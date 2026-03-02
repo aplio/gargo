@@ -27,6 +27,42 @@ Run optimized build:
 cargo run --release -- path/to/file
 ```
 
+## Installation
+
+Quick install:
+
+```bash
+curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
+```
+
+Install a specific version:
+
+```bash
+GARGO_VERSION=v0.1.12 curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
+```
+
+Install to a custom directory:
+
+```bash
+GARGO_BIN_DIR=$HOME/.bin curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
+```
+
+Checksum verification is enabled when a release includes `checksums.txt`. Set `GARGO_SKIP_VERIFY=1` to skip verification.
+
+- Legacy/manual install still works by downloading a release tarball from [GitHub Releases](https://github.com/aplio/gargo/releases) and placing `gargo` on your `PATH`.
+
+Supported assets:
+- `gargo-v<version>-x86_64-apple-darwin.tar.gz`
+- `gargo-v<version>-aarch64-apple-darwin.tar.gz`
+- `gargo-v<version>-x86_64-unknown-linux-gnu.tar.gz`
+- `gargo-v<version>-aarch64-unknown-linux-gnu.tar.gz`
+
+## Source install
+
+```bash
+cargo install --path .
+```
+
 ## Basic keys
 
 - `i`: enter insert mode

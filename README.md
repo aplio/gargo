@@ -38,7 +38,7 @@ curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
 Install a specific version:
 
 ```bash
-GARGO_VERSION=v0.1.12 curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
+GARGO_VERSION=v0.1.13 curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
 ```
 
 Install to a custom directory:

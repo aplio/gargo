@@ -1,0 +1,8 @@
+    1 hover snapshot
+    2
+     ~alpha.md
+     ~beta.md
+     ~gamma.md
+     ~
+ INS [scratch] [+]                       [1/1] 2:1
+

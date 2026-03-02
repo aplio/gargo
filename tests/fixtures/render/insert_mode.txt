@@ -1,0 +1,8 @@
+    1 insert mode smoke
+    2
+     ~
+     ~
+     ~
+     ~
+ INS [scratch] [+]                       [1/1] 1:7
+

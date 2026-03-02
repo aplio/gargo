@@ -1,0 +1,8 @@
+    1 alpha line
+    2 beta line
+    3 gamma line
+    4
+     ~
+     ~
+ NOR [scratch] [+]                       [1/1] 2:3
+

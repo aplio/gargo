@@ -1,0 +1,8 @@
+    1 left pane         │    1 right pane
+    2                   │    2
+     ~                  │     ~
+     ~                  │     ~
+     ~                  │     ~
+     ~                  │     ~
+ INS [scratch] [+]                       [2/2] 2:1
+

@@ -2,7 +2,7 @@ use crate::core::mode::Mode;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::{Component, RenderContext};
 use crate::ui::framework::surface::Surface;
-use crate::core_lib::ui::text::{display_width, truncate_to_width};
+use crate::ui::text::{display_width, truncate_to_width};
 
 pub struct StatusBar;
 

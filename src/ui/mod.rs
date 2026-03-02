@@ -1,4 +1,8 @@
+pub mod diff;
 pub mod framework;
 pub mod overlays;
 pub mod shared;
+pub mod text;
+pub mod text_input;
+pub mod url;
 pub mod views;

@@ -1,5 +1,7 @@
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::path::Path;
+use std::{collections::HashMap, fs, io, path::PathBuf};
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -225,16 +227,62 @@ impl Default for Config {
     }
 }
 
+fn config_home() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".config")
+        })
+}
+
+fn load_toml_with_default<T>(path: &Path) -> io::Result<T>
+where
+    T: DeserializeOwned + Default,
+{
+    let content = match fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
+        Err(err) => return Err(err),
+    };
+
+    toml::from_str::<T>(&content).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed parsing config {}: {err}", path.display()),
+        )
+    })
+}
+
+pub fn app_config_dir() -> PathBuf {
+    config_home().join("gargo")
+}
+
+pub fn app_data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".local")
+                .join("share")
+        })
+        .join("gargo")
+}
+
 impl Config {
     pub fn path() -> Option<PathBuf> {
-        Some(crate::core_lib::xdg::app_config_dir("gargo").join("config.toml"))
+        Some(app_config_dir().join("config.toml"))
     }
 
     pub fn load() -> Self {
         let Some(path) = Self::path() else {
             return Self::default();
         };
-        crate::core_lib::config::load_toml_with_default(&path).unwrap_or_default()
+        load_toml_with_default(&path).unwrap_or_default()
     }
 }
 

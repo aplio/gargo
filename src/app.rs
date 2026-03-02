@@ -8,7 +8,7 @@ use crossterm::{
     event::{Event, KeyCode, KeyModifiers, MouseEventKind},
     terminal,
 };
-use crate::core_lib::runtime::event_loop::{FRAME_DURATION_60_FPS, poll_event_until};
+use event_loop::{FRAME_DURATION_60_FPS, poll_event_until};
 
 use crate::command::file_index_runtime::{
     FileIndexRuntimeCommand, FileIndexRuntimeEvent, FileIndexRuntimeHandle,
@@ -60,6 +60,8 @@ use crate::ui::views::text_view::reserved_left_gutter_width;
 mod dispatch_app;
 #[path = "app/dispatch_core.rs"]
 mod dispatch_core;
+#[path = "app/event_loop.rs"]
+mod event_loop;
 
 const DIRTY_CLOSE_WARNING: &str = "buffer is dirty. ctrl c to force close.";
 const CLOSE_ABORTED_MESSAGE: &str = "Close aborted";
@@ -115,13 +117,13 @@ pub struct App {
 
 impl App {
     pub fn new(editor: Editor, config: Config, start_path: Option<&Path>) -> Self {
-        let project_root = crate::io::file_io::find_project_root(start_path);
+        let project_root = crate::project::find_project_root(start_path);
         let file_index_runtime = Self::build_file_index_runtime().ok();
         let git_index_runtime = Self::build_git_index_runtime().ok();
         let (file_list, file_index_loading, file_index_requested_for_root) =
             match config.performance.file_index.mode {
                 FileIndexMode::Eager => (
-                    crate::io::file_io::collect_files(&project_root),
+                    crate::project::collect_files(&project_root),
                     false,
                     true,
                 ),
@@ -388,7 +390,7 @@ impl App {
     fn queue_file_index_refresh(&mut self) {
         self.file_index_requested_for_root = true;
         let Some(runtime) = &self.file_index_runtime else {
-            self.file_list = crate::io::file_io::collect_files(&self.project_root);
+            self.file_list = crate::project::collect_files(&self.project_root);
             self.file_index_loading = false;
             return;
         };
@@ -490,7 +492,7 @@ impl App {
     fn refresh_file_index_for_current_root(&mut self) {
         match self.config.performance.file_index.mode {
             FileIndexMode::Eager => {
-                self.file_list = crate::io::file_io::collect_files(&self.project_root);
+                self.file_list = crate::project::collect_files(&self.project_root);
                 self.file_index_loading = false;
                 self.file_index_requested_for_root = true;
                 self.refresh_file_index_consumers();

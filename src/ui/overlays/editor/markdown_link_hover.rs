@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::syntax::theme::Theme;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::surface::Surface;
-use crate::core_lib::ui::text::{display_width, truncate_to_width};
+use crate::ui::text::{display_width, truncate_to_width};
 
 const MAX_VISIBLE_ITEMS: usize = 8;
 

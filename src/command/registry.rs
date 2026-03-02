@@ -306,7 +306,7 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
         category: Some("File".into()),
         action: Box::new(|ctx| match &ctx.editor().active_buffer().file_path {
             Some(path) => {
-                let root = crate::io::file_io::find_project_root(Some(path));
+                let root = crate::project::find_project_root(Some(path));
                 let rel = path
                     .strip_prefix(&root)
                     .unwrap_or(path)

@@ -7,8 +7,8 @@ use crate::input::action::{Action, AppAction, UiAction, WorkspaceAction};
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
-use crate::core_lib::text::input::TextInput;
-use crate::core_lib::ui::text::display_width;
+use crate::ui::text_input::TextInput;
+use crate::ui::text::display_width;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusedField {
@@ -312,7 +312,7 @@ impl FindReplacePopup {
         let input_x = popup_x + 2 + find_label.len();
         let input_width = left_width.saturating_sub(4 + find_label.len());
         let (find_display, _) =
-            crate::core_lib::ui::text::truncate_to_width(&self.find.text, input_width);
+            crate::ui::text::truncate_to_width(&self.find.text, input_width);
         surface.fill_region(input_x, y, input_width, ' ', &find_style);
         surface.put_str(input_x, y, find_display, &find_style);
         y += 1;
@@ -331,7 +331,7 @@ impl FindReplacePopup {
 
         surface.put_str(popup_x + 2, y, replace_label, &bg_style);
         let (replace_display, _) =
-            crate::core_lib::ui::text::truncate_to_width(&self.replace.text, input_width);
+            crate::ui::text::truncate_to_width(&self.replace.text, input_width);
         surface.fill_region(input_x, y, input_width, ' ', &replace_style);
         surface.put_str(input_x, y, replace_display, &replace_style);
         y += 1;
@@ -379,7 +379,7 @@ impl FindReplacePopup {
                 ..CellStyle::default()
             };
             let (error_display, _) =
-                crate::core_lib::ui::text::truncate_to_width(error, left_width.saturating_sub(4));
+                crate::ui::text::truncate_to_width(error, left_width.saturating_sub(4));
             surface.put_str(popup_x + 2, y, error_display, &error_style);
         } else if !self.matches.is_empty() {
             let count_text = format!(
@@ -418,7 +418,7 @@ impl FindReplacePopup {
                     }
 
                     let line = preview.line(line_idx).to_string();
-                    let (line_display, _) = crate::core_lib::ui::text::truncate_to_width(
+                    let (line_display, _) = crate::ui::text::truncate_to_width(
                         line.trim_end_matches('\n'),
                         preview_width.saturating_sub(4),
                     );

@@ -83,7 +83,7 @@ impl FileIndexRuntimeWorker {
             }
 
             if let Some(project_root) = self.pending_project_root.take() {
-                let files = crate::io::file_io::collect_files(&project_root);
+                let files = crate::project::collect_files(&project_root);
                 let _ = self.event_tx.send(FileIndexRuntimeEvent::Ready {
                     project_root,
                     files,

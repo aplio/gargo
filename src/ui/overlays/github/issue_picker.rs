@@ -8,8 +8,8 @@ use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
 use crate::ui::shared::filtering::fuzzy_match;
-use crate::core_lib::text::input::delete_prev_word_input;
-use crate::core_lib::ui::text::{display_width, slice_display_window, truncate_to_width};
+use crate::ui::text_input::delete_prev_word_input;
+use crate::ui::text::{display_width, slice_display_window, truncate_to_width};
 
 #[derive(Debug, Deserialize)]
 struct GhAuthor {

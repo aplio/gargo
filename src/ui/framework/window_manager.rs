@@ -1,4 +1,4 @@
-use crate::core_lib::layout::engine;
+use crate::ui::framework::layout as engine;
 
 pub type BufferId = usize;
 pub type WindowId = engine::WindowId;

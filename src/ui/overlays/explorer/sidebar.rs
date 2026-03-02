@@ -12,8 +12,8 @@ use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
 use crate::ui::shared::file_browser::{is_valid_single_name, sort_by_name_case_insensitive};
 use crate::ui::shared::filtering::fuzzy_match;
-use crate::core_lib::text::input::delete_prev_word_input;
-use crate::core_lib::ui::text::truncate_to_width;
+use crate::ui::text_input::delete_prev_word_input;
+use crate::ui::text::truncate_to_width;
 
 struct DirEntry {
     name: String,
@@ -747,7 +747,7 @@ impl Explorer {
         // Header: show current directory path
         let header = self.truncated_path_header(width);
         surface.put_str(x, 0, &header, &dim_style);
-        let header_w = crate::core_lib::ui::text::display_width(&header);
+        let header_w = crate::ui::text::display_width(&header);
         if header_w < width {
             surface.fill_region(x + header_w, 0, width - header_w, ' ', &dim_style);
         }
@@ -853,11 +853,11 @@ impl Explorer {
         let last = &components[components.len() - 1];
         let mut result = format!("{}/", last);
 
-        if crate::core_lib::ui::text::display_width(&result) <= max_width {
+        if crate::ui::text::display_width(&result) <= max_width {
             // Try adding more parent components
             for i in (0..components.len() - 1).rev() {
                 let candidate = format!("{}/{}", components[i], result);
-                if crate::core_lib::ui::text::display_width(&candidate) <= max_width {
+                if crate::ui::text::display_width(&candidate) <= max_width {
                     result = candidate;
                 } else {
                     break;
@@ -866,7 +866,7 @@ impl Explorer {
         }
 
         // If even the last component doesn't fit, truncate it
-        if crate::core_lib::ui::text::display_width(&result) > max_width {
+        if crate::ui::text::display_width(&result) > max_width {
             let (truncated, _) = truncate_to_width(&result, max_width);
             return truncated.to_string();
         }
@@ -907,7 +907,7 @@ impl Explorer {
             return None;
         }
         let find_row = height.saturating_sub(1);
-        let cursor_x = x + crate::core_lib::ui::text::display_width(&prompt);
+        let cursor_x = x + crate::ui::text::display_width(&prompt);
         Some((cursor_x as u16, find_row as u16))
     }
 }

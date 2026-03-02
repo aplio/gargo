@@ -3,7 +3,7 @@ use crossterm::style::Color;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::{Component, RenderContext};
 use crate::ui::framework::surface::Surface;
-use crate::core_lib::ui::text::truncate_to_width;
+use crate::ui::text::truncate_to_width;
 
 pub struct NotificationBar;
 

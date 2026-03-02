@@ -19,8 +19,8 @@ use crate::ui::framework::surface::Surface;
 use crate::ui::shared::file_browser::{is_valid_single_name, sort_by_name_case_insensitive};
 use crate::ui::shared::filtering::fuzzy_match;
 use crate::ui::views::text_view::render_highlighted_line;
-use crate::core_lib::text::input::delete_prev_word_input;
-use crate::core_lib::ui::text::{display_width, slice_display_window, truncate_to_width};
+use crate::ui::text_input::delete_prev_word_input;
+use crate::ui::text::{display_width, slice_display_window, truncate_to_width};
 
 type PreviewCache = HashMap<PathBuf, (Vec<String>, HashMap<usize, Vec<HighlightSpan>>)>;
 
@@ -1124,7 +1124,7 @@ impl ExplorerPopup {
         };
         if !prompt.is_empty() {
             let find_row = offset_y + popup_h - 2; // inside bottom border
-            let cursor_x = (offset_x + 1 + crate::core_lib::ui::text::display_width(&prompt)) as u16;
+            let cursor_x = (offset_x + 1 + crate::ui::text::display_width(&prompt)) as u16;
             let cursor_y = find_row as u16;
             Some((cursor_x, cursor_y))
         } else {

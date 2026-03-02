@@ -49,9 +49,9 @@ fn main() {
 
     let start_path = path_arg.map(std::path::Path::new);
     let mut app = gargo::app::App::new(editor, config, start_path);
-    let mut stdout = gargo::io::terminal::setup();
+    let mut stdout = gargo::terminal::setup();
     let result = app.run(&mut stdout);
-    gargo::io::terminal::teardown(stdout);
+    gargo::terminal::teardown(stdout);
 
     if let Err(e) = result {
         eprintln!("Error: {}", e);

@@ -11,7 +11,7 @@ use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::{Component, RenderContext};
 use crate::ui::framework::surface::Surface;
 use crate::ui::framework::window_manager::PaneRect;
-use crate::core_lib::ui::text::{
+use crate::ui::text::{
     char_display_width, display_width, gutter_width, slice_display_window, truncate_to_width,
 };
 

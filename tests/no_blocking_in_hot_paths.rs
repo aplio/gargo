@@ -22,7 +22,7 @@ const HOT_PATH_FILES: &[&str] = &[
     "src/ui/views/status_bar.rs",
     "src/ui/views/notification_bar.rs",
     "src/ui/views/text_view.rs",
-    "src/ui/framework/compositor.rs",
+    "src/ui/framework/compositor/rendering.rs",
     "src/ui/overlays/command_helper.rs",
 ];
 
@@ -109,7 +109,8 @@ fn test_no_blocking_in_render_methods() {
 #[test]
 fn test_status_bar_path_is_cached() {
     // Verify that status_bar_path returns a reference (cached) not owned String (computed)
-    let doc_rs = fs::read_to_string("src/core/document.rs").expect("Failed to read document.rs");
+    let doc_rs =
+        fs::read_to_string("src/core/document/display.rs").expect("Failed to read document display.rs");
 
     // Find the status_bar_path method
     let method_found = doc_rs.contains("pub fn status_bar_path(&self) -> &str");

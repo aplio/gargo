@@ -4,11 +4,11 @@
 
 ```
 gargo --check
-gargo --upgrade
+gargo --update
 ```
 
 - `--check` prints whether a newer release is available.
-- `--upgrade` downloads and replaces the current `gargo` binary.
+- `--update` downloads and replaces the current `gargo` binary.
 
 Both commands exit before terminal raw-mode startup.
 

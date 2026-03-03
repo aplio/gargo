@@ -9,7 +9,7 @@ const BIN_NAME: &str = "gargo";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpgradeCommand {
     Check,
-    Upgrade,
+    Update,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -184,7 +184,7 @@ fn run_with_source(
                 ))
             }
         }
-        UpgradeCommand::Upgrade => {
+        UpgradeCommand::Update => {
             if newest <= current {
                 return Ok(format!(
                     "Already up to date: {} ({}/{})",

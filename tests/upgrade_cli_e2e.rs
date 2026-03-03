@@ -40,11 +40,11 @@ fn check_reports_available_update_in_mock_mode() {
 }
 
 #[test]
-fn upgrade_reports_success_in_mock_mode() {
-    let output = run_gargo(&["--upgrade"], "has_update");
+fn update_reports_success_in_mock_mode() {
+    let output = run_gargo(&["--update"], "has_update");
     assert!(
         output.status.success(),
-        "expected success for --upgrade has_update: {:?}",
+        "expected success for --update has_update: {:?}",
         output.status
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -55,11 +55,11 @@ fn upgrade_reports_success_in_mock_mode() {
 }
 
 #[test]
-fn upgrade_reports_failure_in_mock_mode() {
-    let output = run_gargo(&["--upgrade"], "error");
+fn update_reports_failure_in_mock_mode() {
+    let output = run_gargo(&["--update"], "error");
     assert!(
         !output.status.success(),
-        "expected failure for --upgrade error: {:?}",
+        "expected failure for --update error: {:?}",
         output.status
     );
     let stderr = String::from_utf8_lossy(&output.stderr);

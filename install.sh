@@ -92,7 +92,7 @@ extract_asset() {
       sub(/^.*\\\"browser_download_url\\\"[[:space:]]*:[[:space:]]*\\\"/, \"\", url)
       sub(/\\\".*/, \"\", url)
       if (name ~ /${pattern}/) {
-        print name "|" url
+        print name \"|\" url
         exit
       }
       name=\"\"

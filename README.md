@@ -38,13 +38,13 @@ curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
 Install a specific version:
 
 ```bash
-GARGO_VERSION=v0.1.13 curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
+curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | GARGO_VERSION=v0.1.13 sh
 ```
 
 Install to a custom directory:
 
 ```bash
-GARGO_BIN_DIR=$HOME/.bin curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
+curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | GARGO_BIN_DIR=$HOME/.bin sh
 ```
 
 Checksum verification is enabled when a release includes `checksums.txt`. Set `GARGO_SKIP_VERIFY=1` to skip verification.

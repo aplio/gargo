@@ -17,8 +17,8 @@ fn main() {
                 }
             }
         }
-        gargo::cli::CliMode::Upgrade => {
-            match gargo::upgrade::run(gargo::upgrade::UpgradeCommand::Upgrade) {
+        gargo::cli::CliMode::Update => {
+            match gargo::upgrade::run(gargo::upgrade::UpgradeCommand::Update) {
                 Ok(message) => {
                     println!("{message}");
                     return;

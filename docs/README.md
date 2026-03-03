@@ -111,8 +111,8 @@ tests/              Integration and E2E tests
 ## Startup
 
 1. Load config from `~/.config/gargo/config.toml`.
-2. Parse CLI args with clap (`--check`, `--upgrade`, optional path).
-3. If `--check` or `--upgrade` is set, run update flow and exit without entering terminal raw mode.
+2. Parse CLI args with clap (`--check`, `--update`, optional path).
+3. If `--check` or `--update` is set, run update flow and exit without entering terminal raw mode.
 4. Create an `Editor` (opens the file or creates a scratch buffer).
 5. Create an `App` with the editor, config, and plugin host.
    - Git status cache starts empty and is populated asynchronously by `GitRuntime`.

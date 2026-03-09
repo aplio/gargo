@@ -100,21 +100,70 @@ impl GitIndexRuntimeWorker {
             }
 
             if let Some(project_root) = self.pending_project_root.take() {
-                let snapshot = collect_git_index_snapshot(&project_root);
+                // Send basic snapshot (branch + status) immediately so the
+                // git view can render without waiting for branch previews.
+                let branch =
+                    git::git_branch_in(&project_root).unwrap_or_else(|_| "???".to_string());
+                let (changed, staged) =
+                    git::git_status_files_in(&project_root).unwrap_or_default();
+                let _ = self.event_tx.send(GitIndexRuntimeEvent::Ready {
+                    project_root: project_root.clone(),
+                    snapshot: GitIndexSnapshot {
+                        branch: branch.clone(),
+                        changed: changed.clone(),
+                        staged: staged.clone(),
+                        branches: Vec::new(),
+                    },
+                });
+
+                // Check for a newer request before starting the slow branch
+                // preview work; if one arrived, skip straight to it.
+                if self.drain_latest_refresh().is_some() {
+                    continue;
+                }
+
+                // Now collect the (potentially slow) branch previews and send
+                // a complete snapshot.
+                let branches = collect_branch_entries(&project_root);
                 let _ = self.event_tx.send(GitIndexRuntimeEvent::Ready {
                     project_root,
-                    snapshot,
+                    snapshot: GitIndexSnapshot {
+                        branch,
+                        changed,
+                        staged,
+                        branches,
+                    },
                 });
             }
         }
     }
+
+    /// Drain all pending commands, returning the latest Refresh project_root
+    /// (if any). Returns None if no Refresh was pending.
+    fn drain_latest_refresh(&mut self) -> Option<PathBuf> {
+        let mut latest: Option<PathBuf> = None;
+        while let Ok(cmd) = self.command_rx.try_recv() {
+            match cmd {
+                GitIndexRuntimeCommand::Refresh { project_root } => {
+                    latest = Some(project_root);
+                }
+                GitIndexRuntimeCommand::Shutdown => {
+                    // Put it back isn't possible, so set pending and let the
+                    // outer loop handle it on next iteration.
+                    self.pending_project_root = latest;
+                    return None;
+                }
+            }
+        }
+        if let Some(root) = &latest {
+            self.pending_project_root = Some(root.clone());
+        }
+        latest
+    }
 }
 
-pub fn collect_git_index_snapshot(project_root: &std::path::Path) -> GitIndexSnapshot {
-    let branch = git::git_branch_in(project_root).unwrap_or_else(|_| "???".to_string());
-    let (changed, staged) = git::git_status_files_in(project_root).unwrap_or_default();
-
-    let branches = git::git_local_branches_in(project_root)
+fn collect_branch_entries(project_root: &std::path::Path) -> Vec<GitIndexBranchEntry> {
+    git::git_local_branches_in(project_root)
         .unwrap_or_default()
         .into_iter()
         .map(|(name, is_current)| {
@@ -132,7 +181,13 @@ pub fn collect_git_index_snapshot(project_root: &std::path::Path) -> GitIndexSna
                 preview_lines,
             }
         })
-        .collect();
+        .collect()
+}
+
+pub fn collect_git_index_snapshot(project_root: &std::path::Path) -> GitIndexSnapshot {
+    let branch = git::git_branch_in(project_root).unwrap_or_else(|_| "???".to_string());
+    let (changed, staged) = git::git_status_files_in(project_root).unwrap_or_default();
+    let branches = collect_branch_entries(project_root);
 
     GitIndexSnapshot {
         branch,
@@ -181,10 +236,11 @@ mod tests {
             })
             .expect("send refresh");
 
+        // First event: quick snapshot with branch + status (no branch previews).
         let event = runtime
             .event_rx
             .recv_timeout(Duration::from_secs(3))
-            .expect("receive event");
+            .expect("receive quick event");
         match event {
             GitIndexRuntimeEvent::Ready {
                 project_root,
@@ -198,6 +254,21 @@ mod tests {
                         .iter()
                         .any(|entry| entry.path == "main.txt")
                 );
+                assert!(snapshot.branches.is_empty());
+            }
+        }
+
+        // Second event: full snapshot including branch previews.
+        let event = runtime
+            .event_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("receive full event");
+        match event {
+            GitIndexRuntimeEvent::Ready {
+                project_root,
+                snapshot,
+            } => {
+                assert_eq!(project_root, tmp.path());
                 assert!(
                     snapshot
                         .branches

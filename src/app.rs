@@ -2546,20 +2546,27 @@ mod tests {
         assert!(app.git_index_loading);
         assert!(app.git_index_requested_for_root);
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while app.git_index_loading && std::time::Instant::now() < deadline {
+        // Wait for the full snapshot (including branch previews) to arrive.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
             app.poll_git_index_runtime();
+            if app
+                .git_index_snapshot
+                .branches
+                .iter()
+                .any(|entry| entry.name == "feature/ui")
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for branch previews"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
         assert!(!app.git_index_loading);
         assert!(app.git_index_requested_for_root);
-        assert!(
-            app.git_index_snapshot
-                .branches
-                .iter()
-                .any(|entry| entry.name == "feature/ui")
-        );
     }
 
     #[test]
@@ -2701,9 +2708,22 @@ mod tests {
             WorkspaceAction::OpenGitBranchPicker,
         )));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while app.git_index_loading && std::time::Instant::now() < deadline {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
             app.poll_git_index_runtime();
+            if let Some(palette) = app.compositor.palette_mut() {
+                if palette
+                    .candidates
+                    .iter()
+                    .any(|entry| entry.label.contains("feature/ui"))
+                {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for branch picker entries"
+            );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
@@ -2715,12 +2735,6 @@ mod tests {
             assert_eq!(
                 palette.mode,
                 crate::ui::overlays::palette::PaletteMode::GitBranchPicker
-            );
-            assert!(
-                palette
-                    .candidates
-                    .iter()
-                    .any(|entry| entry.label.contains("feature/ui"))
             );
         }
         assert!(app.git_index_requested_for_root);
@@ -3483,17 +3497,23 @@ mod tests {
         config.plugins.enabled.clear();
         let mut app = App::new(Editor::new(), config, Some(repo_a.as_path()));
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while app.git_index_loading && std::time::Instant::now() < deadline {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
             app.poll_git_index_runtime();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(
-            app.git_index_snapshot
+            if app
+                .git_index_snapshot
                 .branches
                 .iter()
                 .any(|entry| entry.name == "feature/a")
-        );
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for feature/a branch"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
 
         app.dispatch(Action::App(AppAction::Project(
             ProjectAction::ChangeProjectRoot(repo_b_file.to_string_lossy().to_string()),
@@ -3508,17 +3528,23 @@ mod tests {
                 .any(|entry| entry.name == "feature/a")
         );
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while app.git_index_loading && std::time::Instant::now() < deadline {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
             app.poll_git_index_runtime();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(
-            app.git_index_snapshot
+            if app
+                .git_index_snapshot
                 .branches
                 .iter()
                 .any(|entry| entry.name == "feature/b")
-        );
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for feature/b branch"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

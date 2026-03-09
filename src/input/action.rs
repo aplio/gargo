@@ -113,6 +113,7 @@ pub enum UiAction {
     CloseRecentProjectPopup,
     CloseSaveAsPopup,
     CloseGitView,
+    CloseCommitLog,
     ClosePrListPicker,
     CloseIssueListPicker,
     CloseFindReplacePopup,
@@ -186,6 +187,7 @@ pub enum WorkspaceAction {
     RevealInExplorer,
     OpenExplorerPopup,
     OpenGitView,
+    OpenCommitLog,
     OpenGitCommitMessageBuffer,
     OpenGitBranchPicker,
     OpenPrList,
@@ -413,6 +415,7 @@ mod tests {
     fn test_ui_action_git_view() {
         // Verify git view UI actions
         let _close = UiAction::CloseGitView;
+        let _close_commit_log = UiAction::CloseCommitLog;
         let _close_pr = UiAction::ClosePrListPicker;
         let _close_issue = UiAction::CloseIssueListPicker;
     }
@@ -488,6 +491,7 @@ mod tests {
     fn test_app_action_git_operations() {
         // Verify git operations
         let _open_git = AppAction::Workspace(WorkspaceAction::OpenGitView);
+        let _open_commit_log = AppAction::Workspace(WorkspaceAction::OpenCommitLog);
         let _open_commit = AppAction::Workspace(WorkspaceAction::OpenGitCommitMessageBuffer);
         let _open_switch_branch = AppAction::Workspace(WorkspaceAction::OpenGitBranchPicker);
         let _open_diff = AppAction::Workspace(WorkspaceAction::OpenInEditorDiffView);

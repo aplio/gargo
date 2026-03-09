@@ -115,6 +115,24 @@ impl Compositor {
             return Ok(());
         }
 
+        if let Some(ref mut commit_log) = self.commit_log {
+            let cursor = commit_log.render_overlay(&mut self.current);
+
+            draw_diff(&self.previous, &self.current, stdout)?;
+
+            if let Some((cx, cy)) = cursor {
+                queue!(stdout, MoveTo(cx, cy))?;
+                queue!(stdout, SetCursorStyle::BlinkingBar)?;
+                queue!(stdout, cursor::Show)?;
+            } else {
+                queue!(stdout, cursor::Hide)?;
+            }
+            stdout.flush()?;
+
+            std::mem::swap(&mut self.current, &mut self.previous);
+            return Ok(());
+        }
+
         if let Some(ref mut pr_list_picker) = self.pr_list_picker {
             let cursor = pr_list_picker.render_overlay(&mut self.current);
 

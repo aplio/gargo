@@ -21,6 +21,9 @@ impl Compositor {
             UiAction::CloseGitView => {
                 self.close_git_view();
             }
+            UiAction::CloseCommitLog => {
+                self.close_commit_log();
+            }
             UiAction::ClosePrListPicker => {
                 self.close_pr_list_picker();
             }

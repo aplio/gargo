@@ -1,4 +1,5 @@
 pub mod async_runtime;
+pub mod commit_log_runtime;
 pub mod diff_server;
 pub mod file_index_runtime;
 pub mod git;

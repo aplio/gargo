@@ -484,6 +484,17 @@ impl App {
                 let popup = ExplorerPopup::new(self.project_root.clone(), &self.git_status_cache);
                 self.compositor.open_explorer_popup(popup);
             }
+            AppAction::Workspace(WorkspaceAction::OpenCommitLog) => {
+                let runtime_tx = self
+                    .commit_log_runtime
+                    .as_ref()
+                    .map(|rt| rt.command_tx.clone());
+                let view = crate::ui::overlays::git::CommitLogView::new(
+                    self.project_root.clone(),
+                    runtime_tx,
+                );
+                self.compositor.open_commit_log(view);
+            }
             AppAction::Workspace(WorkspaceAction::OpenGitView) => {
                 self.queue_git_status_refresh(true);
                 self.ensure_git_index_started_if_needed();

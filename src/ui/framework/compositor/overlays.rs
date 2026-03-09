@@ -35,6 +35,7 @@ impl Compositor {
     pub fn can_show_markdown_link_hover(&self) -> bool {
         self.palette.is_none()
             && self.git_view.is_none()
+            && self.commit_log.is_none()
             && self.pr_list_picker.is_none()
             && self.issue_list_picker.is_none()
             && self.explorer_popup.is_none()
@@ -56,6 +57,18 @@ impl Compositor {
 
     pub fn close_git_view(&mut self) {
         self.git_view = None;
+    }
+
+    pub fn open_commit_log(&mut self, view: CommitLogView) {
+        self.commit_log = Some(view);
+    }
+
+    pub fn commit_log_mut(&mut self) -> Option<&mut CommitLogView> {
+        self.commit_log.as_mut()
+    }
+
+    pub fn close_commit_log(&mut self) {
+        self.commit_log = None;
     }
 
     pub fn open_pr_list_picker(&mut self, picker: PrListPicker) {

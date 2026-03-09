@@ -627,6 +627,46 @@ fn current_branch_in(project_root: Option<&Path>) -> Result<String, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Commit log helpers
+// ---------------------------------------------------------------------------
+
+pub fn git_log_oneline_in(
+    project_root: &Path,
+    skip: usize,
+    count: usize,
+) -> Result<String, String> {
+    git_output_in(
+        Some(project_root),
+        &[
+            "log",
+            "--pretty=format:%h%x00%H%x00%an%x00%ar%x00%s",
+            "-n",
+            &count.to_string(),
+            "--skip",
+            &skip.to_string(),
+        ],
+    )
+}
+
+pub fn git_show_metadata_in(project_root: &Path, hash: &str) -> Result<String, String> {
+    git_output_in(
+        Some(project_root),
+        &["show", "--format=%H%n%an%n%ae%n%ar%n%B", "-s", hash],
+    )
+}
+
+pub fn git_diff_tree_in(project_root: &Path, hash: &str) -> Result<String, String> {
+    git_output_in(
+        Some(project_root),
+        &["diff-tree", "--no-commit-id", "-r", "--name-status", hash],
+    )
+}
+
+pub fn git_show_diff_in(project_root: &Path, hash: &str) -> Result<String, String> {
+    git_output_in(Some(project_root), &["show", "--format=", hash])
+}
+
 pub fn register(registry: &mut CommandRegistry) {
     registry.register(CommandEntry {
         id: "core.copy_github_url_main".into(),
@@ -686,6 +726,17 @@ pub fn register(registry: &mut CommandRegistry) {
         action: Box::new(|_ctx| {
             CommandEffect::Action(Action::App(AppAction::Workspace(
                 WorkspaceAction::OpenIssueList,
+            )))
+        }),
+    });
+
+    registry.register(CommandEntry {
+        id: "git.commit_log".into(),
+        label: "Git: Commit Log".into(),
+        category: Some("Git".into()),
+        action: Box::new(|_ctx| {
+            CommandEffect::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::OpenCommitLog,
             )))
         }),
     });

@@ -55,6 +55,10 @@ impl CommandHelper {
                         key: "G".to_string(),
                         description: "Git view".to_string(),
                     },
+                    KeyBinding {
+                        key: "l".to_string(),
+                        description: "Commit log".to_string(),
+                    },
                 ],
             ),
             KeyState::SpaceWindow => (

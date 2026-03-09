@@ -161,6 +161,7 @@ pub fn resolve(key: KeyEvent, state: &mut KeyState, mode: &Mode, is_recording: b
                 WorkspaceAction::ToggleChangedFilesSidebar,
             )),
             KeyCode::Char('G') => app(AppAction::Workspace(WorkspaceAction::OpenGitView)),
+            KeyCode::Char('l') => app(AppAction::Workspace(WorkspaceAction::OpenCommitLog)),
             _ => core(CoreAction::Noop),
         };
     }

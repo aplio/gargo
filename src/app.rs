@@ -22,6 +22,7 @@ use crate::command::git_runtime::{
     GitRuntimeCommand, GitRuntimeDebounceConfig, GitRuntimeEvent, GitRuntimeHandle,
 };
 use crate::command::git_view_diff_runtime::GitViewDiffRuntimeHandle;
+use crate::command::commit_log_runtime::{CommitLogRuntimeHandle, CommitLogEvent};
 use crate::command::history::CommandHistory;
 use crate::command::in_editor_diff::{DiffJumpTarget, InEditorDiffView, build_in_editor_diff_view};
 use crate::command::recent_projects::RecentProjectsStore;
@@ -101,6 +102,7 @@ pub struct App {
     git_runtime: Option<GitRuntimeHandle>,
     git_index_runtime: Option<GitIndexRuntimeHandle>,
     git_view_diff_runtime: Option<GitViewDiffRuntimeHandle>,
+    commit_log_runtime: Option<CommitLogRuntimeHandle>,
     file_index_runtime: Option<FileIndexRuntimeHandle>,
     command_history: Rc<CommandHistory>,
     recent_projects: RecentProjectsStore,
@@ -141,6 +143,7 @@ impl App {
         let git_status_cache = HashMap::new();
         let git_runtime = Self::build_git_runtime(&config).ok();
         let git_view_diff_runtime = Self::build_git_view_diff_runtime().ok();
+        let commit_log_runtime = Self::build_commit_log_runtime().ok();
 
         let command_history = Rc::new(CommandHistory::new(&project_root));
         let recent_projects = RecentProjectsStore::new();
@@ -166,6 +169,7 @@ impl App {
             git_runtime,
             git_index_runtime,
             git_view_diff_runtime,
+            commit_log_runtime,
             file_index_runtime,
             command_history,
             recent_projects,
@@ -199,6 +203,10 @@ impl App {
 
     fn build_git_view_diff_runtime() -> Result<GitViewDiffRuntimeHandle, String> {
         GitViewDiffRuntimeHandle::new()
+    }
+
+    fn build_commit_log_runtime() -> Result<CommitLogRuntimeHandle, String> {
+        CommitLogRuntimeHandle::new()
     }
 
     fn build_git_index_runtime() -> Result<GitIndexRuntimeHandle, String> {
@@ -553,6 +561,21 @@ impl App {
         if let Some(git_view) = self.compositor.git_view_mut() {
             for event in drained_events {
                 git_view.on_diff_event(event);
+            }
+        }
+    }
+
+    fn poll_commit_log_runtime(&mut self) {
+        let mut drained_events: Vec<CommitLogEvent> = Vec::new();
+        if let Some(runtime) = &self.commit_log_runtime {
+            while let Ok(event) = runtime.event_rx.try_recv() {
+                drained_events.push(event);
+            }
+        }
+
+        if let Some(commit_log) = self.compositor.commit_log_mut() {
+            for event in drained_events {
+                commit_log.apply_event(event);
             }
         }
     }
@@ -1479,6 +1502,7 @@ impl App {
             self.poll_git_runtime();
             self.poll_git_index_runtime();
             self.poll_git_view_diff_runtime();
+            self.poll_commit_log_runtime();
             self.poll_file_index_runtime();
         }
     }
@@ -1512,6 +1536,7 @@ impl App {
             self.refresh_markdown_link_hover();
             self.poll_git_index_runtime();
             self.poll_git_view_diff_runtime();
+            self.poll_commit_log_runtime();
             self.poll_file_index_runtime();
         }
 
@@ -1568,6 +1593,7 @@ impl App {
         self.git_runtime = Self::build_git_runtime(&self.config).ok();
         self.git_index_runtime = Self::build_git_index_runtime().ok();
         self.git_view_diff_runtime = Self::build_git_view_diff_runtime().ok();
+        self.commit_log_runtime = Self::build_commit_log_runtime().ok();
         self.file_index_runtime = Self::build_file_index_runtime().ok();
         self.refresh_file_index_for_current_root();
         self.refresh_git_index_for_current_root();

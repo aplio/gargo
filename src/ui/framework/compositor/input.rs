@@ -19,6 +19,9 @@ impl Compositor {
         if let Some(ref mut git_view) = self.git_view {
             return git_view.handle_key(key);
         }
+        if let Some(ref mut commit_log) = self.commit_log {
+            return commit_log.handle_key(key);
+        }
         if let Some(ref mut pr_list_picker) = self.pr_list_picker {
             return pr_list_picker.handle_key(key);
         }
@@ -254,6 +257,17 @@ impl Compositor {
                     if !matches!(result, EventResult::Ignored) {
                         return result;
                     }
+                }
+
+                if let Some(ref mut commit_log) = self.commit_log {
+                    commit_log.handle_mouse_scroll(
+                        mouse.kind,
+                        mouse.column,
+                        mouse.row,
+                        cols,
+                        rows,
+                    );
+                    return EventResult::Consumed;
                 }
 
                 if let Some(ref mut pr_list_picker) = self.pr_list_picker {

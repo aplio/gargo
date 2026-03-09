@@ -27,6 +27,7 @@ use crate::ui::overlays::editor::find_replace::FindReplacePopup;
 use crate::ui::overlays::editor::markdown_link_hover::{HoverKeyResult, MarkdownLinkHover};
 use crate::ui::overlays::explorer::popup::ExplorerPopup;
 use crate::ui::overlays::explorer::sidebar::Explorer;
+use crate::ui::overlays::git::commit_log::CommitLogView;
 use crate::ui::overlays::git::view::GitView;
 use crate::ui::overlays::github::issue_picker::IssueListPicker;
 use crate::ui::overlays::github::pr_picker::PrListPicker;
@@ -79,6 +80,7 @@ pub struct Compositor {
     notification_bar: NotificationBar,
     palette: Option<Palette>,
     git_view: Option<GitView>,
+    commit_log: Option<CommitLogView>,
     pr_list_picker: Option<PrListPicker>,
     issue_list_picker: Option<IssueListPicker>,
     explorer_popup: Option<ExplorerPopup>,
@@ -110,6 +112,7 @@ impl Compositor {
             notification_bar: NotificationBar::new(),
             palette: None,
             git_view: None,
+            commit_log: None,
             pr_list_picker: None,
             issue_list_picker: None,
             explorer_popup: None,

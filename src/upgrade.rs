@@ -229,10 +229,13 @@ fn latest_release_from_release(
             request.target
         )
     })?;
-    Ok(LatestRelease {
-        version: normalize_version_string(&release.version),
-        tag: release.version,
-    })
+    let version = normalize_version_string(&release.version);
+    let tag = if release.version.starts_with('v') {
+        release.version
+    } else {
+        format!("v{}", version)
+    };
+    Ok(LatestRelease { version, tag })
 }
 
 fn normalize_version_string(version: &str) -> String {

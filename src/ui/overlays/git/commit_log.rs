@@ -7,7 +7,7 @@ use crate::command::commit_log_runtime::{
     CommitDetail, CommitEntry, CommitLogCommand, CommitLogEvent,
 };
 use crate::command::git;
-use crate::input::action::{Action, AppAction, IntegrationAction, UiAction};
+use crate::input::action::{Action, AppAction, IntegrationAction, UiAction, WorkspaceAction};
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
@@ -259,17 +259,6 @@ impl CommitLogView {
             .saturating_sub(HORIZONTAL_SCROLL_COLS);
     }
 
-    fn enter_detail(&mut self) {
-        if self.commits.get(self.selected).is_some() {
-            self.view_mode = ViewMode::Detail;
-            self.detail = None;
-            self.detail_scroll = 0;
-            self.detail_horizontal_scroll = 0;
-            let hash = self.commits[self.selected].full_hash.clone();
-            self.request_detail(&hash);
-        }
-    }
-
     fn exit_detail(&mut self) {
         self.view_mode = ViewMode::List;
         self.detail = None;
@@ -445,8 +434,14 @@ impl CommitLogView {
             }
             KeyCode::Char('y') => self.copy_selected_hash().unwrap_or(EventResult::Consumed),
             KeyCode::Char('o') | KeyCode::Enter => {
-                self.enter_detail();
-                EventResult::Consumed
+                if let Some(commit) = self.commits.get(self.selected) {
+                    let hash = commit.full_hash.clone();
+                    EventResult::Action(Action::App(AppAction::Workspace(
+                        WorkspaceAction::OpenCommitDiffView(hash),
+                    )))
+                } else {
+                    EventResult::Consumed
+                }
             }
             KeyCode::Char('r') => {
                 self.commits.clear();
@@ -1129,10 +1124,10 @@ mod tests {
     }
 
     #[test]
-    fn enter_detail_mode() {
+    fn enter_opens_commit_diff_view() {
         let mut view = test_view();
-        view.handle_key(key(KeyCode::Enter));
-        assert_eq!(view.view_mode, ViewMode::Detail);
+        let result = view.handle_key(key(KeyCode::Enter));
+        assert!(matches!(result, EventResult::Action(_)));
     }
 
     #[test]

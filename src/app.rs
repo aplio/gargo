@@ -1830,6 +1830,29 @@ impl App {
         Ok(())
     }
 
+    fn open_commit_diff_view(&mut self, hash: &str) -> Result<(), String> {
+        let view = crate::command::in_editor_diff::build_commit_diff_view(
+            &self.project_root,
+            hash,
+        )?;
+        let previous_buffer_id = self.editor.active_buffer().id;
+        if self.editor.active_buffer().file_path.is_some() {
+            self.editor.new_buffer();
+        }
+        self.materialize_scratch_from_home_if_needed();
+        self.apply_in_editor_diff_view_to_active_buffer(view);
+        if self.editor.active_buffer().id != previous_buffer_id {
+            self.emit_plugin_event(PluginEvent::BufferActivated {
+                doc_id: self.editor.active_buffer().id,
+            });
+        } else {
+            self.emit_plugin_event(PluginEvent::BufferChanged {
+                doc_id: self.editor.active_buffer().id,
+            });
+        }
+        Ok(())
+    }
+
     fn open_file_at_char_location(&mut self, path: &Path, line: usize, char_col: usize) {
         self.flush_insert_transaction_if_active();
         let jump_before = self.editor.current_jump_location();

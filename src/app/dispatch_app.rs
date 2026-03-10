@@ -561,6 +561,19 @@ impl App {
                     }
                 }
             }
+            AppAction::Workspace(WorkspaceAction::OpenCommitDiffView(hash)) => {
+                self.compositor.apply(UiAction::CloseCommitLog);
+                match self.open_commit_diff_view(&hash) {
+                    Ok(()) => {
+                        self.editor.message =
+                            Some(format!("Opened commit diff: {}", &hash[..hash.len().min(8)]));
+                    }
+                    Err(err) => {
+                        self.editor.message =
+                            Some(format!("Failed to open commit diff: {}", err));
+                    }
+                }
+            }
             AppAction::Workspace(WorkspaceAction::OpenInEditorDiffView) => {
                 match self.open_in_editor_diff_view() {
                     Ok(()) => {

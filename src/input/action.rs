@@ -197,6 +197,7 @@ pub enum WorkspaceAction {
     RefreshInEditorDiffView,
     OpenBranchComparePicker,
     OpenBranchCompareView(String),
+    OpenCommitDiffView(String),
     ExecuteFindReplace {
         find: String,
         replace: String,
@@ -501,6 +502,9 @@ mod tests {
         let _compare_picker = AppAction::Workspace(WorkspaceAction::OpenBranchComparePicker);
         let _compare_view = AppAction::Workspace(WorkspaceAction::OpenBranchCompareView(
             "main".to_string(),
+        ));
+        let _commit_diff = AppAction::Workspace(WorkspaceAction::OpenCommitDiffView(
+            "abc123".to_string(),
         ));
         let _open_from_git = AppAction::Buffer(BufferAction::OpenFileFromGitView {
             path: "/path".to_string(),

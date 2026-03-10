@@ -7,6 +7,7 @@ use crate::input::action::{Action, AppAction, WorkspaceAction};
 
 pub const IN_EDITOR_DIFF_TITLE: &str = "IN-EDITOR DIFF VIEW";
 pub const BRANCH_COMPARE_DIFF_TITLE: &str = "BRANCH COMPARE DIFF";
+pub const COMMIT_DIFF_TITLE: &str = "COMMIT DIFF";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffJumpTarget {
@@ -221,6 +222,58 @@ pub fn build_branch_compare_diff_view(
     } else {
         let mut parser = DiffParseState::default();
         for raw_line in diff.lines() {
+            let line_idx = lines.len();
+            lines.push(raw_line.to_string());
+            if let Some(target) = parser.consume_line(raw_line, project_root) {
+                line_targets.insert(line_idx, target);
+            }
+        }
+    }
+
+    let mut text = lines.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+
+    Ok(InEditorDiffView { text, line_targets })
+}
+
+pub fn build_commit_diff_view(
+    project_root: &Path,
+    hash: &str,
+) -> Result<InEditorDiffView, String> {
+    use crate::command::git;
+
+    let meta_raw = git::git_show_metadata_in(project_root, hash)?;
+    let meta_lines: Vec<&str> = meta_raw.splitn(5, '\n').collect();
+    let full_hash = meta_lines.first().unwrap_or(&"");
+    let author = meta_lines.get(1).unwrap_or(&"");
+    let author_email = meta_lines.get(2).unwrap_or(&"");
+    let date = meta_lines.get(3).unwrap_or(&"");
+    let message = meta_lines.get(4).unwrap_or(&"");
+
+    let diff_raw = git::git_show_diff_in(project_root, hash)?;
+
+    let mut lines = Vec::new();
+    let mut line_targets = HashMap::new();
+
+    lines.push(COMMIT_DIFF_TITLE.to_string());
+    lines.push(format!("Commit: {}", full_hash));
+    lines.push(format!("Author: {} <{}>", author, author_email));
+    lines.push(format!("Date:   {}", date));
+    lines.push(String::new());
+    for msg_line in message.lines() {
+        lines.push(format!("    {}", msg_line));
+    }
+    lines.push(String::new());
+    lines.push("gd on a diff line opens that file location.".to_string());
+    lines.push(String::new());
+
+    if diff_raw.trim().is_empty() {
+        lines.push("(no diff)".to_string());
+    } else {
+        let mut parser = DiffParseState::default();
+        for raw_line in diff_raw.lines() {
             let line_idx = lines.len();
             lines.push(raw_line.to_string());
             if let Some(target) = parser.consume_line(raw_line, project_root) {

@@ -538,6 +538,29 @@ impl App {
                     }
                 }
             }
+            AppAction::Workspace(WorkspaceAction::OpenBranchComparePicker) => {
+                self.queue_git_status_refresh(true);
+                match self.open_git_branch_compare_picker() {
+                    Ok(()) => {}
+                    Err(err) => {
+                        self.editor.message =
+                            Some(format!("Failed to open branch compare picker: {}", err));
+                    }
+                }
+            }
+            AppAction::Workspace(WorkspaceAction::OpenBranchCompareView(branch)) => {
+                self.compositor.apply(UiAction::ClosePalette);
+                match self.open_branch_compare_view(&branch) {
+                    Ok(()) => {
+                        self.editor.message =
+                            Some(format!("Opened branch compare: {}...HEAD", branch));
+                    }
+                    Err(err) => {
+                        self.editor.message =
+                            Some(format!("Failed to open branch compare: {}", err));
+                    }
+                }
+            }
             AppAction::Workspace(WorkspaceAction::OpenInEditorDiffView) => {
                 match self.open_in_editor_diff_view() {
                     Ok(()) => {

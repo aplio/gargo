@@ -8,6 +8,7 @@ pub enum PaletteMode {
     JumpPicker,
     ReferencePicker,
     GitBranchPicker,
+    GitBranchComparePicker,
     SymbolPicker,
     GlobalSearch,
     GotoLine,

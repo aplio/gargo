@@ -39,8 +39,12 @@ pub fn assert_rows_match_fixture(name: &str, actual_rows: &[String]) {
     });
 
     let expected = expected.replace("\r\n", "\n");
+    // Normalize version strings so fixtures don't break on version bumps.
+    let version_re = regex::Regex::new(r"gargo v\d+\.\d+\.\d+").unwrap();
+    let actual_normalized = version_re.replace_all(&actual, "gargo vX.Y.Z");
+    let expected_normalized = version_re.replace_all(&expected, "gargo vX.Y.Z");
     assert_eq!(
-        actual, expected,
+        actual_normalized, expected_normalized,
         "Render snapshot mismatch for {}. Re-run with {}=1 to update fixtures.",
         name, UPDATE_ENV
     );

@@ -18,6 +18,7 @@ use crate::config::Config;
 use crate::core::buffer::BufferId;
 use crate::input::action::{
     Action, AppAction, BufferAction, IntegrationAction, NavigationAction, ProjectAction, UiAction,
+    WorkspaceAction,
 };
 use crate::log::debug_log;
 use crate::syntax::highlight::{HighlightSpan, highlight_text};
@@ -134,7 +135,9 @@ impl Palette {
             .collect();
         self.last_previewed_git_branch_index = None;
 
-        if self.mode == PaletteMode::GitBranchPicker {
+        if self.mode == PaletteMode::GitBranchPicker
+            || self.mode == PaletteMode::GitBranchComparePicker
+        {
             self.filter_git_branch_candidates();
             self.update_git_branch_preview();
         }

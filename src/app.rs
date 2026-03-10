@@ -1790,6 +1790,46 @@ impl App {
         Ok(())
     }
 
+    fn open_git_branch_compare_picker(&mut self) -> Result<(), String> {
+        self.ensure_git_index_started_if_needed();
+        let entries = self.git_branch_picker_entries();
+        if entries.is_empty() {
+            if self.git_index_loading {
+                let palette = Palette::new_git_branch_compare_picker(Vec::new());
+                self.compositor.push_palette(palette);
+                self.editor.message = Some("Indexing git branches...".to_string());
+                return Ok(());
+            }
+            return Err("No local branches found".to_string());
+        }
+        let palette = Palette::new_git_branch_compare_picker(entries);
+        self.compositor.push_palette(palette);
+        Ok(())
+    }
+
+    fn open_branch_compare_view(&mut self, other_branch: &str) -> Result<(), String> {
+        let view = crate::command::in_editor_diff::build_branch_compare_diff_view(
+            &self.project_root,
+            other_branch,
+        )?;
+        let previous_buffer_id = self.editor.active_buffer().id;
+        if self.editor.active_buffer().file_path.is_some() {
+            self.editor.new_buffer();
+        }
+        self.materialize_scratch_from_home_if_needed();
+        self.apply_in_editor_diff_view_to_active_buffer(view);
+        if self.editor.active_buffer().id != previous_buffer_id {
+            self.emit_plugin_event(PluginEvent::BufferActivated {
+                doc_id: self.editor.active_buffer().id,
+            });
+        } else {
+            self.emit_plugin_event(PluginEvent::BufferChanged {
+                doc_id: self.editor.active_buffer().id,
+            });
+        }
+        Ok(())
+    }
+
     fn open_file_at_char_location(&mut self, path: &Path, line: usize, char_col: usize) {
         self.flush_insert_transaction_if_active();
         let jump_before = self.editor.current_jump_location();

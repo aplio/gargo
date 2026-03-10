@@ -6,6 +6,7 @@ use crate::command::registry::{CommandContext, CommandEffect, CommandEntry, Comm
 use crate::input::action::{Action, AppAction, WorkspaceAction};
 
 pub const IN_EDITOR_DIFF_TITLE: &str = "IN-EDITOR DIFF VIEW";
+pub const BRANCH_COMPARE_DIFF_TITLE: &str = "BRANCH COMPARE DIFF";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffJumpTarget {
@@ -95,6 +96,17 @@ pub fn register(registry: &mut CommandRegistry) {
     });
 
     registry.register(CommandEntry {
+        id: "diff.compare_branch".into(),
+        label: "Compare Branch Diff".into(),
+        category: Some("Diff".into()),
+        action: Box::new(|_ctx: &CommandContext| {
+            CommandEffect::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::OpenBranchComparePicker,
+            )))
+        }),
+    });
+
+    registry.register(CommandEntry {
         id: "diff.refresh_in_editor".into(),
         label: "Refresh Diff View (In Editor)".into(),
         category: Some("Diff".into()),
@@ -168,6 +180,54 @@ pub fn build_in_editor_diff_view(project_root: &Path) -> Result<InEditorDiffView
         &untracked_diff,
         project_root,
     );
+
+    let mut text = lines.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+
+    Ok(InEditorDiffView { text, line_targets })
+}
+
+pub fn build_branch_compare_diff_view(
+    project_root: &Path,
+    other_branch: &str,
+) -> Result<InEditorDiffView, String> {
+    let current_branch = git_output_in_repo(project_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+    let current_branch = current_branch.trim();
+
+    let diff = git_output_in_repo_allow_codes(
+        project_root,
+        &["diff", &format!("{}...HEAD", other_branch)],
+        &[0, 1],
+    )?;
+
+    let file_count = count_diff_files(&diff);
+
+    let mut lines = Vec::new();
+    let mut line_targets = HashMap::new();
+
+    lines.push(BRANCH_COMPARE_DIFF_TITLE.to_string());
+    lines.push(format!(
+        "Comparing: {} → {}",
+        other_branch, current_branch
+    ));
+    lines.push(format!("Changed files: {}", file_count));
+    lines.push("gd on a diff line opens that file location.".to_string());
+    lines.push(String::new());
+
+    if diff.trim().is_empty() {
+        lines.push("(no differences)".to_string());
+    } else {
+        let mut parser = DiffParseState::default();
+        for raw_line in diff.lines() {
+            let line_idx = lines.len();
+            lines.push(raw_line.to_string());
+            if let Some(target) = parser.consume_line(raw_line, project_root) {
+                line_targets.insert(line_idx, target);
+            }
+        }
+    }
 
     let mut text = lines.join("\n");
     if !text.ends_with('\n') {

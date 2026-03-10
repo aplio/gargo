@@ -40,7 +40,7 @@ impl Palette {
                 self.filter_reference_candidates();
                 self.update_reference_preview();
             }
-            PaletteMode::GitBranchPicker => {
+            PaletteMode::GitBranchPicker | PaletteMode::GitBranchComparePicker => {
                 self.filter_git_branch_candidates();
                 self.update_git_branch_preview();
             }
@@ -451,6 +451,15 @@ impl Palette {
                         if let Some(branch) = self.selected_git_branch() {
                             EventResult::Action(Action::App(AppAction::Project(
                                 ProjectAction::SwitchGitBranch(branch),
+                            )))
+                        } else {
+                            EventResult::Action(Action::Ui(UiAction::ClosePalette))
+                        }
+                    }
+                    PaletteMode::GitBranchComparePicker => {
+                        if let Some(branch) = self.selected_git_branch() {
+                            EventResult::Action(Action::App(AppAction::Workspace(
+                                WorkspaceAction::OpenBranchCompareView(branch),
                             )))
                         } else {
                             EventResult::Action(Action::Ui(UiAction::ClosePalette))

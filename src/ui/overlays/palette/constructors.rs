@@ -352,6 +352,79 @@ impl Palette {
         palette
     }
 
+    pub fn new_git_branch_compare_picker(entries: Vec<GitBranchPickerEntry>) -> Self {
+        let git_branch_entries: Vec<GitBranchEntry> = entries
+            .into_iter()
+            .map(|entry| GitBranchEntry {
+                branch_name: entry.branch_name,
+                label: entry.label,
+                preview_lines: entry.preview_lines,
+            })
+            .collect();
+        let selected = git_branch_entries
+            .iter()
+            .position(|entry| entry.label.starts_with("* "))
+            .unwrap_or(0);
+        let candidates = git_branch_entries
+            .iter()
+            .enumerate()
+            .map(|(idx, entry)| ScoredCandidate {
+                kind: CandidateKind::GitBranch(idx),
+                label: entry.label.clone(),
+                score: 0,
+                match_positions: Vec::new(),
+                preview_lines: Vec::new(),
+            })
+            .collect();
+        let mut palette = Self {
+            input: TextInput::default(),
+            mode: PaletteMode::GitBranchComparePicker,
+            candidates,
+            selected,
+            scroll_offset: 0,
+            preview_lines: Vec::new(),
+            preview_spans: HashMap::new(),
+            preview_cache: HashMap::new(),
+            buffer_entries: Vec::new(),
+            jump_entries: Vec::new(),
+            reference_entries: Vec::new(),
+            git_branch_entries,
+            symbol_entries: Vec::new(),
+            symbol_submit_behavior: SymbolSubmitBehavior::JumpToLocation,
+            file_entries: Vec::new(),
+            project_root: PathBuf::new(),
+            request_tx: None,
+            result_rx: None,
+            _worker: None,
+            requested_paths: HashSet::new(),
+            git_status_map: HashMap::new(),
+            last_previewed_buffer: None,
+            last_previewed_jump_index: None,
+            last_previewed_reference_index: None,
+            last_previewed_git_branch_index: None,
+            last_previewed_symbol_index: None,
+            jump_target_preview_line: None,
+            jump_target_char_col: None,
+            buffer_highlight_cache: HashMap::new(),
+            reference_highlight_cache: HashMap::new(),
+            lang_registry_owned: None,
+            command_history: None,
+            global_search_entries: Vec::new(),
+            global_search_request_tx: None,
+            global_search_result_rx: None,
+            _global_search_worker: None,
+            global_search_generation: 0,
+            global_search_latest_applied: 0,
+            global_search_dirty: false,
+            global_search_changed_at: None,
+            active_doc_lines: Vec::new(),
+            is_unified: false,
+            caller_label: Some("Compare Branch".to_string()),
+        };
+        palette.update_git_branch_preview();
+        palette
+    }
+
     pub fn new_symbol_picker(entries: Vec<(String, usize, usize, Vec<String>)>) -> Self {
         let symbol_entries: Vec<SymbolEntry> = entries
             .into_iter()

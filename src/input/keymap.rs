@@ -162,6 +162,7 @@ pub fn resolve(key: KeyEvent, state: &mut KeyState, mode: &Mode, is_recording: b
             )),
             KeyCode::Char('G') => app(AppAction::Workspace(WorkspaceAction::OpenGitView)),
             KeyCode::Char('l') => app(AppAction::Workspace(WorkspaceAction::OpenCommitLog)),
+            KeyCode::Char('d') => app(AppAction::Workspace(WorkspaceAction::OpenBranchComparePicker)),
             _ => core(CoreAction::Noop),
         };
     }

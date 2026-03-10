@@ -59,6 +59,10 @@ impl CommandHelper {
                         key: "l".to_string(),
                         description: "Commit log".to_string(),
                     },
+                    KeyBinding {
+                        key: "d".to_string(),
+                        description: "Compare branch".to_string(),
+                    },
                 ],
             ),
             KeyState::SpaceWindow => (

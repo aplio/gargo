@@ -538,8 +538,15 @@ fn remote_to_github_url(remote: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-fn git_output(args: &[&str]) -> Result<String, String> {
-    git_output_in(None, args)
+/// Resolve the git repository root from a file path by running
+/// `git rev-parse --show-toplevel` in the file's parent directory.
+pub fn repo_root_for_path(path: &Path) -> Result<PathBuf, String> {
+    let dir = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    git_output_in(Some(dir), &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
 }
 
 fn git_output_in(project_root: Option<&Path>, args: &[&str]) -> Result<String, String> {
@@ -579,12 +586,12 @@ fn build_github_file_url(editor: &Editor, branch: &str) -> Result<String, String
         .as_ref()
         .ok_or_else(|| "No file path".to_string())?;
 
-    let remote = git_output(&["config", "--get", "remote.origin.url"])?;
+    let repo_root = repo_root_for_path(file_path)?;
+    let remote = git_output_in(Some(&repo_root), &["config", "--get", "remote.origin.url"])?;
     let base_url = remote_to_github_url(&remote)
         .ok_or_else(|| format!("Could not parse remote URL: {}", remote))?;
 
-    let repo_root = git_output(&["rev-parse", "--show-toplevel"])?;
-    let repo_root = Path::new(&repo_root);
+    let repo_root = repo_root.as_path();
 
     let rel_path = file_path
         .canonicalize()
@@ -604,8 +611,8 @@ fn build_github_file_url(editor: &Editor, branch: &str) -> Result<String, String
     ))
 }
 
-fn default_branch() -> Result<String, String> {
-    git_output_in(None, &["symbolic-ref", "refs/remotes/origin/HEAD"])
+fn default_branch_for(project_root: Option<&Path>) -> Result<String, String> {
+    git_output_in(project_root, &["symbolic-ref", "refs/remotes/origin/HEAD"])
         .map(|s| {
             s.strip_prefix("refs/remotes/origin/")
                 .unwrap_or(&s)
@@ -614,8 +621,8 @@ fn default_branch() -> Result<String, String> {
         .or_else(|_| Ok("main".to_string()))
 }
 
-fn current_branch() -> Result<String, String> {
-    current_branch_in(None)
+fn current_branch_for(project_root: Option<&Path>) -> Result<String, String> {
+    current_branch_in(project_root)
 }
 
 fn current_branch_in(project_root: Option<&Path>) -> Result<String, String> {
@@ -673,7 +680,12 @@ pub fn register(registry: &mut CommandRegistry) {
         label: "Copy GitHub URL (master/main)".into(),
         category: Some("Git".into()),
         action: Box::new(|ctx| {
-            let branch = match default_branch() {
+            let file_path = match &ctx.editor().active_buffer().file_path {
+                Some(p) => p.clone(),
+                None => return CommandEffect::Message("No file path (scratch buffer)".into()),
+            };
+            let repo_root = repo_root_for_path(&file_path).ok();
+            let branch = match default_branch_for(repo_root.as_deref()) {
                 Ok(b) => b,
                 Err(e) => return CommandEffect::Message(e),
             };
@@ -693,7 +705,12 @@ pub fn register(registry: &mut CommandRegistry) {
         label: "Copy GitHub URL (current branch)".into(),
         category: Some("Git".into()),
         action: Box::new(|ctx| {
-            let branch = match current_branch() {
+            let file_path = match &ctx.editor().active_buffer().file_path {
+                Some(p) => p.clone(),
+                None => return CommandEffect::Message("No file path (scratch buffer)".into()),
+            };
+            let repo_root = repo_root_for_path(&file_path).ok();
+            let branch = match current_branch_for(repo_root.as_deref()) {
                 Ok(b) => b,
                 Err(e) => return CommandEffect::Message(e),
             };

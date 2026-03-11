@@ -250,10 +250,14 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
         id: "core.copy_branch_name".into(),
         label: "Copy Current Branch Name".into(),
         category: Some("Git".into()),
-        action: Box::new(|_editor| {
-            let result = ProcessCommand::new("git")
-                .args(["branch", "--show-current"])
-                .output();
+        action: Box::new(|ctx| {
+            let mut cmd = ProcessCommand::new("git");
+            cmd.args(["branch", "--show-current"]);
+            if let Some(path) = &ctx.editor().active_buffer().file_path {
+                let root = crate::project::find_project_root(Some(path));
+                cmd.current_dir(root);
+            }
+            let result = cmd.output();
             match result {
                 Ok(output) => {
                     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();

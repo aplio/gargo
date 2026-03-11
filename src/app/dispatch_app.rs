@@ -489,8 +489,9 @@ impl App {
                     .commit_log_runtime
                     .as_ref()
                     .map(|rt| rt.command_tx.clone());
+                let repo_root = self.active_buffer_repo_root();
                 let view = crate::ui::overlays::git::CommitLogView::new(
-                    self.project_root.clone(),
+                    repo_root,
                     runtime_tx,
                 );
                 self.compositor.open_commit_log(view);
@@ -505,8 +506,9 @@ impl App {
                 let preloaded_index = (!self.git_index_loading
                     && self.git_index_requested_for_root)
                     .then(|| self.git_view_index_snapshot());
+                let repo_root = self.active_buffer_repo_root();
                 let git_view = GitView::new_with_runtime_prefetched(
-                    self.project_root.clone(),
+                    repo_root,
                     diff_runtime_tx,
                     self.config.git.git_view_diff_cache_max_entries,
                     self.config.git.git_view_diff_prefetch_radius,
@@ -599,7 +601,7 @@ impl App {
                 }
             }
             AppAction::Workspace(WorkspaceAction::OpenPrList) => {
-                match Self::fetch_pr_list(&self.project_root) {
+                match Self::fetch_pr_list(&self.active_buffer_repo_root()) {
                     Ok(entries) => {
                         let picker =
                             crate::ui::overlays::github::pr_picker::PrListPicker::new(entries);
@@ -614,7 +616,7 @@ impl App {
                 self.open_url_in_browser(&url);
             }
             AppAction::Workspace(WorkspaceAction::OpenIssueList) => {
-                match Self::fetch_issue_list(&self.project_root) {
+                match Self::fetch_issue_list(&self.active_buffer_repo_root()) {
                     Ok(entries) => {
                         let picker =
                             crate::ui::overlays::github::issue_picker::IssueListPicker::new(
@@ -892,7 +894,7 @@ impl App {
             AppAction::Project(ProjectAction::SwitchGitBranch(branch)) => {
                 self.flush_insert_transaction_if_active();
                 self.compositor.apply(UiAction::ClosePalette);
-                match crate::command::git::git_switch_branch_in(&self.project_root, &branch) {
+                match crate::command::git::git_switch_branch_in(&self.active_buffer_repo_root(), &branch) {
                     Ok(()) => {
                         self.queue_file_index_refresh();
                         self.queue_git_index_refresh();

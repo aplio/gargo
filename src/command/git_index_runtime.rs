@@ -20,6 +20,7 @@ pub struct GitIndexSnapshot {
     pub changed: Vec<GitFileEntry>,
     pub staged: Vec<GitFileEntry>,
     pub branches: Vec<GitIndexBranchEntry>,
+    pub branches_ready: bool,
 }
 
 #[derive(Debug)]
@@ -104,8 +105,7 @@ impl GitIndexRuntimeWorker {
                 // git view can render without waiting for branch previews.
                 let branch =
                     git::git_branch_in(&project_root).unwrap_or_else(|_| "???".to_string());
-                let (changed, staged) =
-                    git::git_status_files_in(&project_root).unwrap_or_default();
+                let (changed, staged) = git::git_status_files_in(&project_root).unwrap_or_default();
                 let _ = self.event_tx.send(GitIndexRuntimeEvent::Ready {
                     project_root: project_root.clone(),
                     snapshot: GitIndexSnapshot {
@@ -113,6 +113,7 @@ impl GitIndexRuntimeWorker {
                         changed: changed.clone(),
                         staged: staged.clone(),
                         branches: Vec::new(),
+                        branches_ready: false,
                     },
                 });
 
@@ -132,6 +133,7 @@ impl GitIndexRuntimeWorker {
                         changed,
                         staged,
                         branches,
+                        branches_ready: true,
                     },
                 });
             }
@@ -194,6 +196,7 @@ pub fn collect_git_index_snapshot(project_root: &std::path::Path) -> GitIndexSna
         changed,
         staged,
         branches,
+        branches_ready: true,
     }
 }
 
@@ -255,6 +258,7 @@ mod tests {
                         .any(|entry| entry.path == "main.txt")
                 );
                 assert!(snapshot.branches.is_empty());
+                assert!(!snapshot.branches_ready);
             }
         }
 
@@ -275,6 +279,7 @@ mod tests {
                         .iter()
                         .any(|entry| entry.name == "feature/ui")
                 );
+                assert!(snapshot.branches_ready);
             }
         }
     }

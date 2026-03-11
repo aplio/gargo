@@ -490,10 +490,7 @@ impl App {
                     .as_ref()
                     .map(|rt| rt.command_tx.clone());
                 let repo_root = self.active_buffer_repo_root();
-                let view = crate::ui::overlays::git::CommitLogView::new(
-                    repo_root,
-                    runtime_tx,
-                );
+                let view = crate::ui::overlays::git::CommitLogView::new(repo_root, runtime_tx);
                 self.compositor.open_commit_log(view);
             }
             AppAction::Workspace(WorkspaceAction::OpenGitView) => {
@@ -503,10 +500,11 @@ impl App {
                     .git_view_diff_runtime
                     .as_ref()
                     .map(|runtime| runtime.command_tx.clone());
-                let preloaded_index = (!self.git_index_loading
-                    && self.git_index_requested_for_root)
-                    .then(|| self.git_view_index_snapshot());
                 let repo_root = self.active_buffer_repo_root();
+                let preloaded_index = (!self.git_index_loading
+                    || self.git_index_matches_root(&repo_root))
+                .then(|| self.git_view_index_snapshot_for_root(&repo_root))
+                .flatten();
                 let git_view = GitView::new_with_runtime_prefetched(
                     repo_root,
                     diff_runtime_tx,
@@ -567,12 +565,13 @@ impl App {
                 self.compositor.apply(UiAction::CloseCommitLog);
                 match self.open_commit_diff_view(&hash) {
                     Ok(()) => {
-                        self.editor.message =
-                            Some(format!("Opened commit diff: {}", &hash[..hash.len().min(8)]));
+                        self.editor.message = Some(format!(
+                            "Opened commit diff: {}",
+                            &hash[..hash.len().min(8)]
+                        ));
                     }
                     Err(err) => {
-                        self.editor.message =
-                            Some(format!("Failed to open commit diff: {}", err));
+                        self.editor.message = Some(format!("Failed to open commit diff: {}", err));
                     }
                 }
             }
@@ -894,7 +893,10 @@ impl App {
             AppAction::Project(ProjectAction::SwitchGitBranch(branch)) => {
                 self.flush_insert_transaction_if_active();
                 self.compositor.apply(UiAction::ClosePalette);
-                match crate::command::git::git_switch_branch_in(&self.active_buffer_repo_root(), &branch) {
+                match crate::command::git::git_switch_branch_in(
+                    &self.active_buffer_repo_root(),
+                    &branch,
+                ) {
                     Ok(()) => {
                         self.queue_file_index_refresh();
                         self.queue_git_index_refresh();

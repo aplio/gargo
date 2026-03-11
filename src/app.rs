@@ -10,6 +10,7 @@ use crossterm::{
 };
 use event_loop::{FRAME_DURATION_60_FPS, poll_event_until};
 
+use crate::command::commit_log_runtime::{CommitLogEvent, CommitLogRuntimeHandle};
 use crate::command::file_index_runtime::{
     FileIndexRuntimeCommand, FileIndexRuntimeEvent, FileIndexRuntimeHandle,
 };
@@ -22,7 +23,6 @@ use crate::command::git_runtime::{
     GitRuntimeCommand, GitRuntimeDebounceConfig, GitRuntimeEvent, GitRuntimeHandle,
 };
 use crate::command::git_view_diff_runtime::GitViewDiffRuntimeHandle;
-use crate::command::commit_log_runtime::{CommitLogRuntimeHandle, CommitLogEvent};
 use crate::command::history::CommandHistory;
 use crate::command::in_editor_diff::{DiffJumpTarget, InEditorDiffView, build_in_editor_diff_view};
 use crate::command::recent_projects::RecentProjectsStore;
@@ -97,7 +97,9 @@ pub struct App {
     close_confirm: bool,
     git_status_cache: HashMap<String, GitFileStatus>,
     git_index_snapshot: GitIndexSnapshot,
+    git_index_snapshot_root: Option<PathBuf>,
     git_index_loading: bool,
+    git_index_loading_root: Option<PathBuf>,
     git_index_requested_for_root: bool,
     git_runtime: Option<GitRuntimeHandle>,
     git_index_runtime: Option<GitIndexRuntimeHandle>,
@@ -124,11 +126,7 @@ impl App {
         let git_index_runtime = Self::build_git_index_runtime().ok();
         let (file_list, file_index_loading, file_index_requested_for_root) =
             match config.performance.file_index.mode {
-                FileIndexMode::Eager => (
-                    crate::project::collect_files(&project_root),
-                    false,
-                    true,
-                ),
+                FileIndexMode::Eager => (crate::project::collect_files(&project_root), false, true),
                 FileIndexMode::Lazy => (Vec::new(), false, false),
             };
         let home_screen_active = should_show_home_screen(start_path, &editor);
@@ -164,7 +162,9 @@ impl App {
             close_confirm: false,
             git_status_cache,
             git_index_snapshot: GitIndexSnapshot::default(),
+            git_index_snapshot_root: None,
             git_index_loading: false,
+            git_index_loading_root: None,
             git_index_requested_for_root: false,
             git_runtime,
             git_index_runtime,
@@ -276,6 +276,19 @@ impl App {
         }
     }
 
+    fn git_index_matches_root(&self, repo_root: &Path) -> bool {
+        self.git_index_snapshot_root.as_deref() == Some(repo_root)
+    }
+
+    fn git_index_loading_for_root(&self, repo_root: &Path) -> bool {
+        self.git_index_loading_root.as_deref() == Some(repo_root)
+    }
+
+    fn git_view_index_snapshot_for_root(&self, repo_root: &Path) -> Option<GitViewIndexSnapshot> {
+        self.git_index_matches_root(repo_root)
+            .then(|| self.git_view_index_snapshot())
+    }
+
     fn git_branch_picker_entries(&self) -> Vec<GitBranchPickerEntry> {
         self.git_index_snapshot
             .branches
@@ -292,16 +305,27 @@ impl App {
             .collect()
     }
 
+    fn git_branch_picker_entries_for_root(&self, repo_root: &Path) -> Vec<GitBranchPickerEntry> {
+        if self.git_index_matches_root(repo_root) {
+            self.git_branch_picker_entries()
+        } else {
+            Vec::new()
+        }
+    }
+
     fn queue_git_index_refresh(&mut self) {
         self.git_index_requested_for_root = true;
         let repo_root = self.active_buffer_repo_root();
         let Some(runtime) = &self.git_index_runtime else {
             self.git_index_snapshot = collect_git_index_snapshot(&repo_root);
+            self.git_index_snapshot_root = Some(repo_root);
             self.git_index_loading = false;
+            self.git_index_loading_root = None;
             self.refresh_git_index_consumers();
             return;
         };
         self.git_index_loading = true;
+        self.git_index_loading_root = Some(repo_root.clone());
         if runtime
             .command_tx
             .send(GitIndexRuntimeCommand::Refresh {
@@ -310,6 +334,7 @@ impl App {
             .is_err()
         {
             self.git_index_loading = false;
+            self.git_index_loading_root = None;
             self.git_index_requested_for_root = false;
         }
     }
@@ -329,6 +354,7 @@ impl App {
 
         self.git_index_requested_for_root = true;
         self.git_index_loading = true;
+        self.git_index_loading_root = Some(self.project_root.clone());
         if command_tx
             .send(GitIndexRuntimeCommand::Refresh {
                 project_root: self.project_root.clone(),
@@ -336,12 +362,14 @@ impl App {
             .is_err()
         {
             self.git_index_loading = false;
+            self.git_index_loading_root = None;
             self.git_index_requested_for_root = false;
         }
     }
 
     fn ensure_git_index_started_if_needed(&mut self) {
-        if self.git_index_loading || self.git_index_requested_for_root {
+        let repo_root = self.active_buffer_repo_root();
+        if self.git_index_matches_root(&repo_root) || self.git_index_loading_for_root(&repo_root) {
             return;
         }
         self.queue_git_index_refresh();
@@ -351,7 +379,8 @@ impl App {
         if self.git_index_runtime.is_none() {
             return;
         }
-        if self.git_index_loading {
+        let repo_root = self.active_buffer_repo_root();
+        if self.git_index_loading_for_root(&repo_root) {
             return;
         }
         self.queue_git_index_refresh();
@@ -359,9 +388,13 @@ impl App {
 
     fn refresh_git_index_consumers(&mut self) {
         let snapshot = self.git_view_index_snapshot();
-        let branch_entries = self.git_branch_picker_entries();
+        let snapshot_root = self.git_index_snapshot_root.clone();
+        let active_repo_root = self.active_buffer_repo_root();
+        let branch_entries = self.git_branch_picker_entries_for_root(&active_repo_root);
         if let Some(git_view) = self.compositor.git_view_mut() {
-            git_view.apply_index_snapshot(snapshot);
+            if snapshot_root.as_deref() == Some(git_view.project_root()) {
+                git_view.apply_index_snapshot(snapshot.clone());
+            }
         }
         if let Some(palette) = self.compositor.palette_mut() {
             palette.set_git_branch_entries(branch_entries);
@@ -383,11 +416,17 @@ impl App {
                     project_root,
                     snapshot,
                 } => {
-                    if project_root != self.project_root {
-                        continue;
-                    }
+                    let branches_ready = snapshot.branches_ready;
                     self.git_index_snapshot = snapshot;
-                    self.git_index_loading = false;
+                    self.git_index_snapshot_root = Some(project_root.clone());
+                    if branches_ready {
+                        if self.git_index_loading_root.as_deref() == Some(project_root.as_path()) {
+                            self.git_index_loading_root = None;
+                        }
+                    } else if self.git_index_loading_root.is_none() {
+                        self.git_index_loading_root = Some(project_root.clone());
+                    }
+                    self.git_index_loading = self.git_index_loading_root.is_some();
                     self.git_index_requested_for_root = true;
                     updated = true;
                 }
@@ -401,7 +440,9 @@ impl App {
 
     fn refresh_git_index_for_current_root(&mut self) {
         self.git_index_snapshot = GitIndexSnapshot::default();
+        self.git_index_snapshot_root = None;
         self.git_index_loading = false;
+        self.git_index_loading_root = None;
         self.git_index_requested_for_root = false;
         self.refresh_git_index_consumers();
         self.start_git_index_prefetch_if_possible();
@@ -1763,8 +1804,7 @@ impl App {
         if !crate::command::git::git_has_staged_changes_in(&repo_root)? {
             return Err("No staged changes to commit".to_string());
         }
-        let commit_editmsg_path =
-            crate::command::git::git_commit_editmsg_path_in(&repo_root)?;
+        let commit_editmsg_path = crate::command::git::git_commit_editmsg_path_in(&repo_root)?;
         crate::command::git::git_prepare_commit_editmsg_template_in(
             &repo_root,
             &commit_editmsg_path,
@@ -1788,9 +1828,13 @@ impl App {
 
     fn open_git_branch_picker(&mut self) -> Result<(), String> {
         self.ensure_git_index_started_if_needed();
-        let entries = self.git_branch_picker_entries();
+        let repo_root = self.active_buffer_repo_root();
+        let entries = self.git_branch_picker_entries_for_root(&repo_root);
         if entries.is_empty() {
-            if self.git_index_loading {
+            if self.git_index_loading_for_root(&repo_root)
+                || (self.git_index_matches_root(&repo_root)
+                    && !self.git_index_snapshot.branches_ready)
+            {
                 let palette = Palette::new_git_branch_picker(Vec::new());
                 self.compositor.push_palette(palette);
                 self.editor.message = Some("Indexing git branches...".to_string());
@@ -1805,9 +1849,13 @@ impl App {
 
     fn open_git_branch_compare_picker(&mut self) -> Result<(), String> {
         self.ensure_git_index_started_if_needed();
-        let entries = self.git_branch_picker_entries();
+        let repo_root = self.active_buffer_repo_root();
+        let entries = self.git_branch_picker_entries_for_root(&repo_root);
         if entries.is_empty() {
-            if self.git_index_loading {
+            if self.git_index_loading_for_root(&repo_root)
+                || (self.git_index_matches_root(&repo_root)
+                    && !self.git_index_snapshot.branches_ready)
+            {
                 let palette = Palette::new_git_branch_compare_picker(Vec::new());
                 self.compositor.push_palette(palette);
                 self.editor.message = Some("Indexing git branches...".to_string());
@@ -1845,10 +1893,8 @@ impl App {
     }
 
     fn open_commit_diff_view(&mut self, hash: &str) -> Result<(), String> {
-        let view = crate::command::in_editor_diff::build_commit_diff_view(
-            &self.project_root,
-            hash,
-        )?;
+        let view =
+            crate::command::in_editor_diff::build_commit_diff_view(&self.project_root, hash)?;
         let previous_buffer_id = self.editor.active_buffer().id;
         if self.editor.active_buffer().file_path.is_some() {
             self.editor.new_buffer();
@@ -2670,6 +2716,69 @@ mod tests {
 
         assert!(!app.git_index_loading);
         assert!(app.git_index_requested_for_root);
+    }
+
+    #[test]
+    fn open_git_view_uses_active_buffer_repo_root() {
+        let temp = tempdir().expect("create temp dir");
+        let repo_a = temp.path().join("repo_a");
+        let repo_b = temp.path().join("repo_b");
+        fs::create_dir_all(&repo_a).expect("create repo_a");
+        fs::create_dir_all(&repo_b).expect("create repo_b");
+
+        fs::write(repo_a.join("a.txt"), "a\n").expect("write repo_a file");
+        run_git(repo_a.as_path(), &["init"]);
+        run_git(repo_a.as_path(), &["config", "user.name", "gargo-test"]);
+        run_git(
+            repo_a.as_path(),
+            &["config", "user.email", "gargo-test@example.com"],
+        );
+        run_git(repo_a.as_path(), &["add", "a.txt"]);
+        run_git(repo_a.as_path(), &["commit", "-m", "init-a"]);
+
+        fs::write(repo_b.join("b.txt"), "b\n").expect("write repo_b file");
+        run_git(repo_b.as_path(), &["init"]);
+        run_git(repo_b.as_path(), &["config", "user.name", "gargo-test"]);
+        run_git(
+            repo_b.as_path(),
+            &["config", "user.email", "gargo-test@example.com"],
+        );
+        run_git(repo_b.as_path(), &["add", "b.txt"]);
+        run_git(repo_b.as_path(), &["commit", "-m", "init-b"]);
+        run_git(repo_b.as_path(), &["switch", "-c", "feature/b"]);
+        fs::write(repo_b.join("b.txt"), "b\nchanged\n").expect("modify repo_b file");
+
+        let mut config = Config::default();
+        config.plugins.enabled.clear();
+        let mut app = App::new(Editor::new(), config, Some(repo_a.as_path()));
+
+        let repo_b_file = repo_b.join("b.txt");
+        app.editor.open_file(&repo_b_file.to_string_lossy());
+
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::OpenGitView,
+        )));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            app.poll_git_index_runtime();
+            if let Some(git_view) = app.compositor.git_view_mut() {
+                if git_view.branch_name() == "feature/b"
+                    && git_view
+                        .changed_entries()
+                        .iter()
+                        .any(|entry| entry.path == "b.txt")
+                    && git_view.message_text() != Some("Loading git index...")
+                {
+                    break;
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for repo_b git view snapshot"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

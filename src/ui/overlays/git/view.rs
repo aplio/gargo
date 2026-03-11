@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 use crossterm::style::Color;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -11,8 +12,8 @@ use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
 use crate::ui::shared::filtering::fuzzy_match;
-use crate::ui::text_input::delete_prev_word_input;
 use crate::ui::text::{display_width, slice_display_window, truncate_to_width};
+use crate::ui::text_input::delete_prev_word_input;
 
 #[derive(Debug, Clone, Default)]
 pub struct GitViewIndexSnapshot {
@@ -107,6 +108,10 @@ impl Default for GitView {
 }
 
 impl GitView {
+    pub fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
     pub fn new(project_root: PathBuf) -> Self {
         Self::new_with_runtime_prefetched(
             project_root,
@@ -192,6 +197,26 @@ impl GitView {
         if self.message.as_deref() == Some(GIT_INDEX_LOADING_LABEL) {
             self.message = None;
         }
+    }
+
+    #[cfg(test)]
+    pub fn branch_name(&self) -> &str {
+        &self.branch
+    }
+
+    #[cfg(test)]
+    pub fn changed_entries(&self) -> &[GitFileEntry] {
+        &self.changed
+    }
+
+    #[cfg(test)]
+    pub fn staged_entries(&self) -> &[GitFileEntry] {
+        &self.staged
+    }
+
+    #[cfg(test)]
+    pub fn message_text(&self) -> Option<&str> {
+        self.message.as_deref()
     }
 
     fn selectable_row_count(&self) -> usize {

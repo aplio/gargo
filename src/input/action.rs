@@ -500,12 +500,10 @@ mod tests {
         let _open_diff = AppAction::Workspace(WorkspaceAction::OpenInEditorDiffView);
         let _refresh_diff = AppAction::Workspace(WorkspaceAction::RefreshInEditorDiffView);
         let _compare_picker = AppAction::Workspace(WorkspaceAction::OpenBranchComparePicker);
-        let _compare_view = AppAction::Workspace(WorkspaceAction::OpenBranchCompareView(
-            "main".to_string(),
-        ));
-        let _commit_diff = AppAction::Workspace(WorkspaceAction::OpenCommitDiffView(
-            "abc123".to_string(),
-        ));
+        let _compare_view =
+            AppAction::Workspace(WorkspaceAction::OpenBranchCompareView("main".to_string()));
+        let _commit_diff =
+            AppAction::Workspace(WorkspaceAction::OpenCommitDiffView("abc123".to_string()));
         let _open_from_git = AppAction::Buffer(BufferAction::OpenFileFromGitView {
             path: "/path".to_string(),
             line: Some(3),

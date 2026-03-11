@@ -1,5 +1,5 @@
-use ropey::Rope;
 use crate::ui::text::char_display_width;
+use ropey::Rope;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs;

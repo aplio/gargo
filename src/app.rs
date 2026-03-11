@@ -391,10 +391,10 @@ impl App {
         let snapshot_root = self.git_index_snapshot_root.clone();
         let active_repo_root = self.active_buffer_repo_root();
         let branch_entries = self.git_branch_picker_entries_for_root(&active_repo_root);
-        if let Some(git_view) = self.compositor.git_view_mut() {
-            if snapshot_root.as_deref() == Some(git_view.project_root()) {
-                git_view.apply_index_snapshot(snapshot.clone());
-            }
+        if let Some(git_view) = self.compositor.git_view_mut()
+            && snapshot_root.as_deref() == Some(git_view.project_root())
+        {
+            git_view.apply_index_snapshot(snapshot.clone());
         }
         if let Some(palette) = self.compositor.palette_mut() {
             palette.set_git_branch_entries(branch_entries);
@@ -2762,16 +2762,15 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             app.poll_git_index_runtime();
-            if let Some(git_view) = app.compositor.git_view_mut() {
-                if git_view.branch_name() == "feature/b"
-                    && git_view
-                        .changed_entries()
-                        .iter()
-                        .any(|entry| entry.path == "b.txt")
-                    && git_view.message_text() != Some("Loading git index...")
-                {
-                    break;
-                }
+            if let Some(git_view) = app.compositor.git_view_mut()
+                && git_view.branch_name() == "feature/b"
+                && git_view
+                    .changed_entries()
+                    .iter()
+                    .any(|entry| entry.path == "b.txt")
+                && git_view.message_text() != Some("Loading git index...")
+            {
+                break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -2923,14 +2922,13 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             app.poll_git_index_runtime();
-            if let Some(palette) = app.compositor.palette_mut() {
-                if palette
+            if let Some(palette) = app.compositor.palette_mut()
+                && palette
                     .candidates
                     .iter()
                     .any(|entry| entry.label.contains("feature/ui"))
-                {
-                    break;
-                }
+            {
+                break;
             }
             assert!(
                 std::time::Instant::now() < deadline,

@@ -209,10 +209,7 @@ pub fn build_branch_compare_diff_view(
     let mut line_targets = HashMap::new();
 
     lines.push(BRANCH_COMPARE_DIFF_TITLE.to_string());
-    lines.push(format!(
-        "Comparing: {} → {}",
-        other_branch, current_branch
-    ));
+    lines.push(format!("Comparing: {} → {}", other_branch, current_branch));
     lines.push(format!("Changed files: {}", file_count));
     lines.push("gd on a diff line opens that file location.".to_string());
     lines.push(String::new());
@@ -238,10 +235,7 @@ pub fn build_branch_compare_diff_view(
     Ok(InEditorDiffView { text, line_targets })
 }
 
-pub fn build_commit_diff_view(
-    project_root: &Path,
-    hash: &str,
-) -> Result<InEditorDiffView, String> {
+pub fn build_commit_diff_view(project_root: &Path, hash: &str) -> Result<InEditorDiffView, String> {
     use crate::command::git;
 
     let meta_raw = git::git_show_metadata_in(project_root, hash)?;

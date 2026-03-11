@@ -35,11 +35,11 @@ use crate::ui::overlays::palette::Palette;
 use crate::ui::overlays::project::recent_picker::RecentProjectPopup;
 use crate::ui::overlays::project::root_picker::ProjectRootPopup;
 use crate::ui::overlays::project::save_as_popup::SaveAsPopup;
+use crate::ui::text::display_width;
+use crate::ui::text_input::TextInput;
 use crate::ui::views::notification_bar::NotificationBar;
 use crate::ui::views::status_bar::StatusBar;
 use crate::ui::views::text_view::TextView;
-use crate::ui::text::display_width;
-use crate::ui::text_input::TextInput;
 
 mod actions;
 mod input;

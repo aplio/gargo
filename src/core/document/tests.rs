@@ -46,8 +46,7 @@ fn doc_from_str(s: &str) -> Document {
 #[test]
 fn line_count() {
     let doc = doc_ja();
-    let expected =
-        MARKDOWN_JA.lines().count() + if MARKDOWN_JA.ends_with('\n') { 1 } else { 0 };
+    let expected = MARKDOWN_JA.lines().count() + if MARKDOWN_JA.ends_with('\n') { 1 } else { 0 };
     assert_eq!(doc.rope.len_lines(), expected);
 }
 
@@ -358,8 +357,7 @@ fn scroll_viewport_clamps_at_end() {
 
 #[test]
 fn scroll_viewport_preserves_column() {
-    let mut doc =
-        doc_from_str("abcdef\nghijkl\nmnopqr\nstuvwx\nyz1234\n56789a\nbcdefg\nhijklm\n");
+    let mut doc = doc_from_str("abcdef\nghijkl\nmnopqr\nstuvwx\nyz1234\n56789a\nbcdefg\nhijklm\n");
     doc.set_cursor_line_char(0, 3); // cursor at col 3 of line 0
     doc.scroll_viewport(3, 3);
     // Cursor should have moved to line 3, col 3

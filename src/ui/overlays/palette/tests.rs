@@ -79,8 +79,7 @@ fn palette_mode_detection() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette =
-        Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
+    let mut palette = Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
     assert_eq!(palette.input.text, ">");
     palette.update_candidates(&registry, &lang_registry, &config);
     assert_eq!(palette.mode, PaletteMode::Command);
@@ -94,8 +93,7 @@ fn palette_mode_detection() {
 fn palette_selection_wraps() {
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette =
-        Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
+    let mut palette = Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
     palette.candidates = vec![
         ScoredCandidate {
             kind: CandidateKind::Command(0),
@@ -819,8 +817,7 @@ fn picker_ctrl_f_b_moves_input_cursor() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette =
-        Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
+    let mut palette = Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
     palette.set_input("abc".to_string());
     palette.input.cursor = 1;
 
@@ -848,8 +845,7 @@ fn picker_ctrl_w_and_ctrl_k_edit_query() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette =
-        Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
+    let mut palette = Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
     palette.set_input("alpha beta gamma".to_string());
     palette.input.cursor = palette.input.char_len();
 
@@ -878,8 +874,7 @@ fn picker_ctrl_j_selects_next_candidate() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette =
-        Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
+    let mut palette = Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
     palette.candidates = vec![
         ScoredCandidate {
             kind: CandidateKind::Command(0),
@@ -913,8 +908,7 @@ fn ctrl_c_closes_palette() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette =
-        Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
+    let mut palette = Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
     let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
     let result = palette.handle_key_event(key, &registry, &lang_registry, &config);
     assert_eq!(
@@ -929,8 +923,7 @@ fn ctrl_q_closes_palette() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette =
-        Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
+    let mut palette = Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
     let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
     let result = palette.handle_key_event(key, &registry, &lang_registry, &config);
     assert_eq!(
@@ -992,8 +985,7 @@ fn command_history_sorts_by_last_used() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let temp_dir =
-        std::env::temp_dir().join(format!("gargo_test_palette_history_{}", timestamp));
+    let temp_dir = std::env::temp_dir().join(format!("gargo_test_palette_history_{}", timestamp));
     std::fs::create_dir_all(&temp_dir).unwrap();
 
     // Create a test history and record some commands
@@ -1280,8 +1272,7 @@ fn palette_mode_transition_on_prefix_change() {
     let config = Config::default();
     let symbols = vec![("main [function]  1:1".to_string(), 0, 0, vec![])];
     let files = vec!["src/main.rs".to_string()];
-    let mut palette =
-        Palette::new(files, Path::new(""), &HashMap::new(), None, symbols, vec![]);
+    let mut palette = Palette::new(files, Path::new(""), &HashMap::new(), None, symbols, vec![]);
 
     // Start in file mode
     palette.set_input(String::new());
@@ -1364,8 +1355,7 @@ fn palette_symbol_filter_with_at_prefix() {
 #[test]
 fn palette_unified_allows_prefix_deletion() {
     // Unified palettes allow cursor at position 0 so prefixes can be deleted
-    let mut palette =
-        Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
+    let mut palette = Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
     assert!(palette.is_unified);
     palette.set_input("@test".to_string());
     palette.input.cursor = 0;
@@ -1427,8 +1417,7 @@ fn palette_goto_line_enter_invalid_closes() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette =
-        Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
+    let mut palette = Palette::new(vec![], Path::new(""), &HashMap::new(), None, vec![], vec![]);
     palette.set_input(":".to_string());
     palette.update_candidates(&registry, &lang_registry, &config);
 

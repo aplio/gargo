@@ -109,8 +109,8 @@ fn test_no_blocking_in_render_methods() {
 #[test]
 fn test_status_bar_path_is_cached() {
     // Verify that status_bar_path returns a reference (cached) not owned String (computed)
-    let doc_rs =
-        fs::read_to_string("src/core/document/display.rs").expect("Failed to read document display.rs");
+    let doc_rs = fs::read_to_string("src/core/document/display.rs")
+        .expect("Failed to read document display.rs");
 
     // Find the status_bar_path method
     let method_found = doc_rs.contains("pub fn status_bar_path(&self) -> &str");

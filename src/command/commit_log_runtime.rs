@@ -145,20 +145,18 @@ impl CommitLogWorker {
                     }
                 }
             }
-            CommitLogCommand::LoadDetail {
-                project_root,
-                hash,
-            } => match load_commit_detail(&project_root, &hash) {
-                Ok(detail) => {
-                    let _ = self.event_tx.send(CommitLogEvent::DetailLoaded {
-                        hash,
-                        detail,
-                    });
+            CommitLogCommand::LoadDetail { project_root, hash } => {
+                match load_commit_detail(&project_root, &hash) {
+                    Ok(detail) => {
+                        let _ = self
+                            .event_tx
+                            .send(CommitLogEvent::DetailLoaded { hash, detail });
+                    }
+                    Err(message) => {
+                        let _ = self.event_tx.send(CommitLogEvent::Error { message });
+                    }
                 }
-                Err(message) => {
-                    let _ = self.event_tx.send(CommitLogEvent::Error { message });
-                }
-            },
+            }
             CommitLogCommand::Shutdown => {}
         }
     }
@@ -192,10 +190,7 @@ fn load_commits(
     Ok((commits, has_more))
 }
 
-fn load_commit_detail(
-    project_root: &std::path::Path,
-    hash: &str,
-) -> Result<CommitDetail, String> {
+fn load_commit_detail(project_root: &std::path::Path, hash: &str) -> Result<CommitDetail, String> {
     // Get metadata + full message
     let meta_raw = git::git_show_metadata_in(project_root, hash)?;
     let meta_lines: Vec<&str> = meta_raw.splitn(5, '\n').collect();
@@ -214,10 +209,7 @@ fn load_commit_detail(
             continue;
         }
         let mut parts = line.splitn(2, '\t');
-        let status = parts
-            .next()
-            .and_then(|s| s.chars().next())
-            .unwrap_or('M');
+        let status = parts.next().and_then(|s| s.chars().next()).unwrap_or('M');
         let path = parts.next().unwrap_or("").to_string();
         if !path.is_empty() {
             files.push(CommitFileEntry { path, status });

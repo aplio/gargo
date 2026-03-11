@@ -193,7 +193,12 @@ impl Document {
         self.sync_selection_head();
     }
 
-    pub(super) fn word_forward_end_pos(&self, pos: usize, long_word: bool, in_selection: bool) -> usize {
+    pub(super) fn word_forward_end_pos(
+        &self,
+        pos: usize,
+        long_word: bool,
+        in_selection: bool,
+    ) -> usize {
         let len = self.rope.len_chars();
         if pos + 1 >= len {
             return len.saturating_sub(1);

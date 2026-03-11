@@ -7,8 +7,8 @@ use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
 use crate::ui::shared::filtering::fuzzy_match;
-use crate::ui::text_input::TextInput;
 use crate::ui::text::{display_width, truncate_to_width};
+use crate::ui::text_input::TextInput;
 
 const MIN_POPUP_WIDTH: usize = 24;
 const MIN_POPUP_HEIGHT: usize = 8;

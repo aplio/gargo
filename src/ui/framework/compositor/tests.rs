@@ -6,9 +6,7 @@ use crate::input::chord::KeyState;
 use crate::syntax::language::LanguageRegistry;
 use crate::ui::framework::component::EventResult;
 use crate::ui::overlays::explorer::popup::ExplorerPopup;
-use crossterm::event::{
-    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -164,13 +162,9 @@ fn mouse_drag_vertical_divider_resizes_windows() {
         .find(|divider| divider.orientation == DividerOrientation::Vertical)
         .copied()
         .expect("vertical divider");
-    let (primary_window, _) = Compositor::mouse_windows_for_divider(
-        &before,
-        divider,
-        divider.x as u16,
-        divider.y as u16,
-    )
-    .expect("divider windows");
+    let (primary_window, _) =
+        Compositor::mouse_windows_for_divider(&before, divider, divider.x as u16, divider.y as u16)
+            .expect("divider windows");
     let anchor_width_before = before
         .panes
         .iter()
@@ -225,13 +219,9 @@ fn mouse_drag_horizontal_divider_resizes_windows() {
         .find(|divider| divider.orientation == DividerOrientation::Horizontal)
         .copied()
         .expect("horizontal divider");
-    let (primary_window, _) = Compositor::mouse_windows_for_divider(
-        &before,
-        divider,
-        divider.x as u16,
-        divider.y as u16,
-    )
-    .expect("divider windows");
+    let (primary_window, _) =
+        Compositor::mouse_windows_for_divider(&before, divider, divider.x as u16, divider.y as u16)
+            .expect("divider windows");
     let anchor_height_before = before
         .panes
         .iter()
@@ -568,13 +558,19 @@ fn search_bar_insert_text_japanese() {
 
     // Insert more text at the end
     bar.insert_text("\u{30C6}\u{30B9}\u{30C8}");
-    assert_eq!(bar.input.text, "\u{30BF}\u{30FC}\u{30DF}\u{30CA}\u{30EB}\u{30C6}\u{30B9}\u{30C8}");
+    assert_eq!(
+        bar.input.text,
+        "\u{30BF}\u{30FC}\u{30DF}\u{30CA}\u{30EB}\u{30C6}\u{30B9}\u{30C8}"
+    );
     assert_eq!(bar.input.cursor, 8);
 
     // Insert at middle position
     bar.input.cursor = 5;
     bar.insert_text("\u{306E}");
-    assert_eq!(bar.input.text, "\u{30BF}\u{30FC}\u{30DF}\u{30CA}\u{30EB}\u{306E}\u{30C6}\u{30B9}\u{30C8}");
+    assert_eq!(
+        bar.input.text,
+        "\u{30BF}\u{30FC}\u{30DF}\u{30CA}\u{30EB}\u{306E}\u{30C6}\u{30B9}\u{30C8}"
+    );
     assert_eq!(bar.input.cursor, 6);
 }
 

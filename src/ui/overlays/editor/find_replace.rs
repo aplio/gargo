@@ -7,8 +7,8 @@ use crate::input::action::{Action, AppAction, UiAction, WorkspaceAction};
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
-use crate::ui::text_input::TextInput;
 use crate::ui::text::display_width;
+use crate::ui::text_input::TextInput;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusedField {
@@ -311,8 +311,7 @@ impl FindReplacePopup {
         surface.put_str(popup_x + 2, y, find_label, &bg_style);
         let input_x = popup_x + 2 + find_label.len();
         let input_width = left_width.saturating_sub(4 + find_label.len());
-        let (find_display, _) =
-            crate::ui::text::truncate_to_width(&self.find.text, input_width);
+        let (find_display, _) = crate::ui::text::truncate_to_width(&self.find.text, input_width);
         surface.fill_region(input_x, y, input_width, ' ', &find_style);
         surface.put_str(input_x, y, find_display, &find_style);
         y += 1;

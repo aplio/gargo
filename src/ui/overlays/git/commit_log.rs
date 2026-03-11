@@ -52,10 +52,7 @@ pub struct CommitLogView {
 }
 
 impl CommitLogView {
-    pub fn new(
-        project_root: PathBuf,
-        runtime_tx: Option<mpsc::Sender<CommitLogCommand>>,
-    ) -> Self {
+    pub fn new(project_root: PathBuf, runtime_tx: Option<mpsc::Sender<CommitLogCommand>>) -> Self {
         let branch = git::git_branch_in(&project_root).unwrap_or_else(|_| "???".to_string());
         let mut view = Self {
             project_root: project_root.clone(),
@@ -343,9 +340,7 @@ impl CommitLogView {
                 self.find_input.pop();
                 EventResult::Consumed
             }
-            KeyCode::Char('w')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 delete_prev_word_input(&mut self.find_input);
                 EventResult::Consumed
             }
@@ -735,14 +730,7 @@ impl CommitLogView {
         }
     }
 
-    fn render_diff_panel(
-        &mut self,
-        surface: &mut Surface,
-        x: usize,
-        y: usize,
-        w: usize,
-        h: usize,
-    ) {
+    fn render_diff_panel(&mut self, surface: &mut Surface, x: usize, y: usize, w: usize, h: usize) {
         let inner_w = w.saturating_sub(2);
         let content_h = h.saturating_sub(2);
         let default_style = CellStyle::default();
@@ -815,8 +803,7 @@ impl CommitLogView {
                 if line_idx < self.diff_lines.len() && (row - 1) < content_h {
                     let line = &self.diff_lines[line_idx];
                     let style = diff_line_style(line);
-                    let window =
-                        slice_display_window(line, self.diff_horizontal_scroll, inner_w);
+                    let window = slice_display_window(line, self.diff_horizontal_scroll, inner_w);
                     surface.put_str(x + 1, y + row, window.visible, &style);
                     if window.used_width < inner_w {
                         surface.fill_region(
@@ -877,8 +864,7 @@ impl CommitLogView {
             let line_idx = self.detail_scroll + (row - 1);
             if line_idx < detail_lines.len() && (row - 1) < content_h {
                 let (line, style) = &detail_lines[line_idx];
-                let window =
-                    slice_display_window(line, self.detail_horizontal_scroll, inner_w);
+                let window = slice_display_window(line, self.detail_horizontal_scroll, inner_w);
                 surface.put_str(x + 1, y + row, window.visible, style);
                 if window.used_width < inner_w {
                     surface.fill_region(
@@ -927,23 +913,20 @@ impl CommitLogView {
         if let Some(ref detail) = self.detail {
             lines.push((
                 format!("Author: {} <{}>", detail.author, detail.author_email),
-                bold.clone(),
+                bold,
             ));
-            lines.push((format!("Date:   {}", detail.date), dim.clone()));
-            lines.push((String::new(), default.clone()));
+            lines.push((format!("Date:   {}", detail.date), dim));
+            lines.push((String::new(), default));
 
             // Full commit message
             for msg_line in detail.message.lines() {
-                lines.push((msg_line.to_string(), default.clone()));
+                lines.push((msg_line.to_string(), default));
             }
-            lines.push((String::new(), default.clone()));
+            lines.push((String::new(), default));
 
             // Files changed
             if !detail.files.is_empty() {
-                lines.push((
-                    format!("Files changed ({}):", detail.files.len()),
-                    bold.clone(),
-                ));
+                lines.push((format!("Files changed ({}):", detail.files.len()), bold));
                 for file in &detail.files {
                     let status_color = match file.status {
                         'A' => Color::Green,
@@ -960,7 +943,7 @@ impl CommitLogView {
                         },
                     ));
                 }
-                lines.push((String::new(), default.clone()));
+                lines.push((String::new(), default));
             }
 
             // Diff
@@ -968,7 +951,7 @@ impl CommitLogView {
                 lines.push((diff_line.clone(), diff_line_style(diff_line)));
             }
         } else {
-            lines.push((String::new(), default.clone()));
+            lines.push((String::new(), default));
             lines.push(("Loading...".to_string(), dim));
         }
 

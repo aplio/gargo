@@ -260,13 +260,7 @@ impl Compositor {
                 }
 
                 if let Some(ref mut commit_log) = self.commit_log {
-                    commit_log.handle_mouse_scroll(
-                        mouse.kind,
-                        mouse.column,
-                        mouse.row,
-                        cols,
-                        rows,
-                    );
+                    commit_log.handle_mouse_scroll(mouse.kind, mouse.column, mouse.row, cols, rows);
                     return EventResult::Consumed;
                 }
 

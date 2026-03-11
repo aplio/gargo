@@ -31,7 +31,7 @@ use crate::input::action::{Action, AppAction, IntegrationAction};
 /// Commands that can be sent to the GitHub preview server
 #[derive(Debug, Clone)]
 pub enum GithubPreviewCommand {
-    Start,
+    Start { repo_root: PathBuf },
     Stop,
     SetActivePath { rel_path: Option<String> },
     RefreshActive,
@@ -109,7 +109,9 @@ impl GithubPreviewWorker {
     fn run(mut self) {
         loop {
             match self.command_rx.recv() {
-                Ok(GithubPreviewCommand::Start) => self.handle_start_server(),
+                Ok(GithubPreviewCommand::Start { repo_root }) => {
+                    self.handle_start_server(repo_root)
+                }
                 Ok(GithubPreviewCommand::Stop) => self.handle_stop_server(),
                 Ok(GithubPreviewCommand::SetActivePath { rel_path }) => {
                     self.handle_set_active_path(rel_path);
@@ -120,7 +122,7 @@ impl GithubPreviewWorker {
         }
     }
 
-    fn handle_start_server(&mut self) {
+    fn handle_start_server(&mut self, repo_root: PathBuf) {
         if self.server_shutdown_tx.is_some() {
             let _ = self.event_tx.send(GithubPreviewEvent::Error(
                 "Server already running".to_string(),
@@ -156,6 +158,7 @@ impl GithubPreviewWorker {
         self.server_shutdown_tx = Some(shutdown_tx);
 
         let server_state = Arc::new(Mutex::new(PreviewServerState {
+            repo_root,
             port,
             active_rel_path: self.pending_active_rel_path.clone(),
             detached: false,
@@ -245,6 +248,7 @@ impl GithubPreviewWorker {
 }
 
 struct PreviewServerState {
+    repo_root: PathBuf,
     port: u16,
     active_rel_path: Option<String>,
     detached: bool,
@@ -815,10 +819,7 @@ async fn handle_events(
 async fn handle_root(State(state): State<Arc<Mutex<PreviewServerState>>>) -> impl IntoResponse {
     maybe_emit_detached_event(&state, ".");
 
-    let repo_root = match get_repo_root().await {
-        Ok(root) => root,
-        Err(e) => return Html(render_error(&e)),
-    };
+    let repo_root = state.lock().unwrap().repo_root.clone();
 
     // Always show directory listing at root
     handle_directory_listing(&repo_root, ".", &repo_root).await
@@ -829,10 +830,7 @@ async fn handle_tree(
     State(state): State<Arc<Mutex<PreviewServerState>>>,
     AxumPath(path): AxumPath<String>,
 ) -> impl IntoResponse {
-    let repo_root = match get_repo_root().await {
-        Ok(root) => root,
-        Err(e) => return Html(render_error(&e)),
-    };
+    let repo_root = state.lock().unwrap().repo_root.clone();
 
     let full_path = repo_root.join(&path);
 
@@ -851,10 +849,7 @@ async fn handle_blob(
     State(state): State<Arc<Mutex<PreviewServerState>>>,
     AxumPath(path): AxumPath<String>,
 ) -> impl IntoResponse {
-    let repo_root = match get_repo_root().await {
-        Ok(root) => root,
-        Err(e) => return Html(render_error(&e)),
-    };
+    let repo_root = state.lock().unwrap().repo_root.clone();
 
     let full_path = repo_root.join(&path);
 
@@ -920,21 +915,6 @@ fn maybe_emit_detached_event(state: &Arc<Mutex<PreviewServerState>>, requested_r
 }
 
 /// Get repository root directory
-async fn get_repo_root() -> Result<PathBuf, String> {
-    let output = tokio::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .await
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-
-    if !output.status.success() {
-        return Err("Not in a git repository".to_string());
-    }
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(PathBuf::from(path))
-}
-
 /// Render directory listing
 async fn handle_directory_listing(
     path: &Path,
@@ -1034,7 +1014,7 @@ async fn handle_directory_listing(
         content.push_str("</div></div>");
     }
 
-    let github_url = github_url_for_path(display_path, true).await;
+    let github_url = github_url_for_path(repo_root, display_path, true).await;
     let breadcrumb = render_breadcrumb(display_path, true, github_url.as_deref());
     let title = if display_path == "." {
         "Repository Root".to_string()
@@ -1092,7 +1072,7 @@ async fn handle_file_display(path: &Path, display_path: &str, repo_root: &Path) 
         }
     };
 
-    let github_url = github_url_for_path(display_path, false).await;
+    let github_url = github_url_for_path(repo_root, display_path, false).await;
     let breadcrumb = render_breadcrumb(display_path, false, github_url.as_deref());
     let root_path = repo_root.display().to_string();
 
@@ -1204,14 +1184,16 @@ fn render_breadcrumb(path: &str, is_tree: bool, github_url: Option<&str>) -> Str
     crumbs.join(r#"<span class="crumb-separator">/</span>"#)
 }
 
-async fn github_url_for_path(path: &str, is_tree: bool) -> Option<String> {
-    let remote = git_output(&["config", "--get", "remote.origin.url"])
+async fn github_url_for_path(repo_root: &Path, path: &str, is_tree: bool) -> Option<String> {
+    let remote = git_output_in_repo(repo_root, &["config", "--get", "remote.origin.url"])
         .await
         .ok()?;
     let base = remote_to_github_url(&remote)?;
-    let branch = match current_branch().await {
+    let branch = match current_branch_in_repo(repo_root).await {
         Some(branch) => branch,
-        None => default_branch().await.unwrap_or_else(|| "main".to_string()),
+        None => default_branch_in_repo(repo_root)
+            .await
+            .unwrap_or_else(|| "main".to_string()),
     };
 
     let route = if is_tree { "tree" } else { "blob" };
@@ -1222,8 +1204,10 @@ async fn github_url_for_path(path: &str, is_tree: bool) -> Option<String> {
     }
 }
 
-async fn current_branch() -> Option<String> {
-    let branch = git_output(&["branch", "--show-current"]).await.ok()?;
+async fn current_branch_in_repo(repo_root: &Path) -> Option<String> {
+    let branch = git_output_in_repo(repo_root, &["branch", "--show-current"])
+        .await
+        .ok()?;
     if branch.is_empty() {
         None
     } else {
@@ -1231,8 +1215,8 @@ async fn current_branch() -> Option<String> {
     }
 }
 
-async fn default_branch() -> Option<String> {
-    let symbolic_ref = git_output(&["symbolic-ref", "refs/remotes/origin/HEAD"])
+async fn default_branch_in_repo(repo_root: &Path) -> Option<String> {
+    let symbolic_ref = git_output_in_repo(repo_root, &["symbolic-ref", "refs/remotes/origin/HEAD"])
         .await
         .ok()?;
     let branch = symbolic_ref
@@ -1257,9 +1241,10 @@ fn remote_to_github_url(remote: &str) -> Option<String> {
     Some(url.to_string())
 }
 
-async fn git_output(args: &[&str]) -> Result<String, String> {
+async fn git_output_in_repo(repo_root: &Path, args: &[&str]) -> Result<String, String> {
     let output = tokio::process::Command::new("git")
         .args(args)
+        .current_dir(repo_root)
         .output()
         .await
         .map_err(|e| format!("Failed to execute git: {}", e))?;

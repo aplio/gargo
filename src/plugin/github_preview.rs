@@ -202,7 +202,9 @@ impl Plugin for GithubPreviewPlugin {
             )];
         };
         let result = match command_id {
-            "server.start_github_preview" => handle.command_tx.send(GithubPreviewCommand::Start),
+            "server.start_github_preview" => handle.command_tx.send(GithubPreviewCommand::Start {
+                repo_root: self.project_root.clone(),
+            }),
             "server.stop_github_preview" => handle.command_tx.send(GithubPreviewCommand::Stop),
             _ => return Vec::new(),
         };

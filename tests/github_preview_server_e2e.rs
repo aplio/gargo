@@ -81,10 +81,12 @@ fn cwd_test_lock() -> std::sync::MutexGuard<'static, ()> {
     }
 }
 
-fn start_preview_server(handle: &GithubPreviewHandle) -> Option<u16> {
+fn start_preview_server(handle: &GithubPreviewHandle, repo_root: &Path) -> Option<u16> {
     handle
         .command_tx
-        .send(GithubPreviewCommand::Start)
+        .send(GithubPreviewCommand::Start {
+            repo_root: repo_root.to_path_buf(),
+        })
         .expect("send start command");
 
     match read_event(&handle.event_rx) {
@@ -284,7 +286,7 @@ Regular text after diagram.
     let handle = GithubPreviewHandle::new().expect("create github preview handle");
 
     // Test: Start server
-    let Some(port) = start_preview_server(&handle) else {
+    let Some(port) = start_preview_server(&handle, repo) else {
         return;
     };
 
@@ -361,7 +363,9 @@ Regular text after diagram.
     // Test: Duplicate start should error
     handle
         .command_tx
-        .send(GithubPreviewCommand::Start)
+        .send(GithubPreviewCommand::Start {
+            repo_root: repo.to_path_buf(),
+        })
         .expect("send duplicate start");
 
     match read_event(&handle.event_rx) {
@@ -420,7 +424,7 @@ fn test_github_preview_server_serves_tree_view() {
     let _cwd_guard = WorkingDirGuard::set(repo);
     let handle = GithubPreviewHandle::new().expect("create github preview handle");
 
-    let Some(port) = start_preview_server(&handle) else {
+    let Some(port) = start_preview_server(&handle, repo) else {
         return;
     };
 
@@ -484,10 +488,10 @@ fn test_github_preview_server_concurrent_instances_use_distinct_ports() {
     let handle_a = GithubPreviewHandle::new().expect("create first github preview handle");
     let handle_b = GithubPreviewHandle::new().expect("create second github preview handle");
 
-    let Some(port_a) = start_preview_server(&handle_a) else {
+    let Some(port_a) = start_preview_server(&handle_a, repo) else {
         return;
     };
-    let Some(port_b) = start_preview_server(&handle_b) else {
+    let Some(port_b) = start_preview_server(&handle_b, repo) else {
         stop_preview_server(&handle_a);
         return;
     };
@@ -540,7 +544,7 @@ fn test_github_preview_server_detaches_when_browser_leaves_active_path() {
     let _cwd_guard = WorkingDirGuard::set(repo);
     let handle = GithubPreviewHandle::new().expect("create github preview handle");
 
-    let Some(port) = start_preview_server(&handle) else {
+    let Some(port) = start_preview_server(&handle, repo) else {
         return;
     };
 
@@ -608,7 +612,7 @@ fn test_github_preview_server_events_endpoint_emits_navigate_refresh_and_detache
     let _cwd_guard = WorkingDirGuard::set(repo);
     let handle = GithubPreviewHandle::new().expect("create github preview handle");
 
-    let Some(port) = start_preview_server(&handle) else {
+    let Some(port) = start_preview_server(&handle, repo) else {
         return;
     };
 

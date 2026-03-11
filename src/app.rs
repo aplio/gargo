@@ -228,12 +228,23 @@ impl App {
         }
     }
 
+    /// Returns the git repo root for the active buffer, falling back to
+    /// `self.project_root` when the buffer has no file path or isn't in a repo.
+    fn active_buffer_repo_root(&self) -> PathBuf {
+        self.editor
+            .active_buffer()
+            .file_path
+            .as_ref()
+            .and_then(|p| crate::command::git::repo_root_for_path(p).ok())
+            .unwrap_or_else(|| self.project_root.clone())
+    }
+
     fn queue_git_status_refresh(&self, high_priority: bool) {
         let Some(runtime) = &self.git_runtime else {
             return;
         };
         let _ = runtime.command_tx.send(GitRuntimeCommand::RefreshStatus {
-            project_root: self.project_root.clone(),
+            project_root: self.active_buffer_repo_root(),
             high_priority,
         });
     }
@@ -283,8 +294,9 @@ impl App {
 
     fn queue_git_index_refresh(&mut self) {
         self.git_index_requested_for_root = true;
+        let repo_root = self.active_buffer_repo_root();
         let Some(runtime) = &self.git_index_runtime else {
-            self.git_index_snapshot = collect_git_index_snapshot(&self.project_root);
+            self.git_index_snapshot = collect_git_index_snapshot(&repo_root);
             self.git_index_loading = false;
             self.refresh_git_index_consumers();
             return;
@@ -293,7 +305,7 @@ impl App {
         if runtime
             .command_tx
             .send(GitIndexRuntimeCommand::Refresh {
-                project_root: self.project_root.clone(),
+                project_root: repo_root,
             })
             .is_err()
         {
@@ -1747,13 +1759,14 @@ impl App {
     }
 
     fn open_git_commit_message_buffer(&mut self) -> Result<(), String> {
-        if !crate::command::git::git_has_staged_changes_in(&self.project_root)? {
+        let repo_root = self.active_buffer_repo_root();
+        if !crate::command::git::git_has_staged_changes_in(&repo_root)? {
             return Err("No staged changes to commit".to_string());
         }
         let commit_editmsg_path =
-            crate::command::git::git_commit_editmsg_path_in(&self.project_root)?;
+            crate::command::git::git_commit_editmsg_path_in(&repo_root)?;
         crate::command::git::git_prepare_commit_editmsg_template_in(
-            &self.project_root,
+            &repo_root,
             &commit_editmsg_path,
         )?;
         let path_str = commit_editmsg_path.to_string_lossy().to_string();
@@ -1765,7 +1778,7 @@ impl App {
         self.git_commit_buffers.insert(
             active_id,
             GitCommitBufferState {
-                project_root: self.project_root.clone(),
+                project_root: repo_root,
                 commit_editmsg_path,
             },
         );
@@ -1808,8 +1821,9 @@ impl App {
     }
 
     fn open_branch_compare_view(&mut self, other_branch: &str) -> Result<(), String> {
+        let repo_root = self.active_buffer_repo_root();
         let view = crate::command::in_editor_diff::build_branch_compare_diff_view(
-            &self.project_root,
+            &repo_root,
             other_branch,
         )?;
         let previous_buffer_id = self.editor.active_buffer().id;

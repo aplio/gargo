@@ -1,6 +1,7 @@
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use std::rc::Rc;
 
@@ -27,7 +28,8 @@ use crate::command::history::CommandHistory;
 use crate::command::in_editor_diff::{DiffJumpTarget, InEditorDiffView, build_in_editor_diff_view};
 use crate::command::recent_projects::RecentProjectsStore;
 use crate::command::registry::{CommandContext, CommandEffect, CommandRegistry, copy_to_clipboard};
-use crate::config::{Config, FileIndexMode};
+use crate::command::update_check_runtime::{UpdateCheckRuntimeEvent, UpdateCheckRuntimeHandle};
+use crate::config::{Config, FileIndexMode, app_data_dir};
 use crate::core::document::Selection;
 use crate::core::editor::{Editor, JumpLocation};
 use crate::core::markdown_link::link_edit_context_at_cursor;
@@ -56,6 +58,8 @@ use crate::ui::overlays::project::root_picker::ProjectRootPopup;
 use crate::ui::overlays::project::save_as_popup::SaveAsPopup;
 use crate::ui::shared::filtering::fuzzy_match;
 use crate::ui::views::text_view::reserved_left_gutter_width;
+use crate::upgrade::UpgradeCheckStatus;
+use serde::{Deserialize, Serialize};
 
 #[path = "app/dispatch_app.rs"]
 mod dispatch_app;
@@ -66,6 +70,7 @@ mod event_loop;
 
 const DIRTY_CLOSE_WARNING: &str = "buffer is dirty. ctrl c to force close.";
 const CLOSE_ABORTED_MESSAGE: &str = "Close aborted";
+const UPDATE_CHECK_CACHE_TTL_SECS: u64 = 24 * 60 * 60;
 
 struct ClosedBufferInfo {
     doc_id: usize,
@@ -86,6 +91,25 @@ enum CountBehavior {
     Repeat,
     LineSelect,
     AbsoluteLineJump,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct UpdateCheckCache {
+    checked_at_unix_secs: u64,
+    current_version: String,
+    latest_version: String,
+    has_update: bool,
+}
+
+impl UpdateCheckCache {
+    fn from_status(status: &UpgradeCheckStatus, checked_at_unix_secs: u64) -> Self {
+        Self {
+            checked_at_unix_secs,
+            current_version: status.current_version().to_string(),
+            latest_version: status.latest_version().to_string(),
+            has_update: status.has_update(),
+        }
+    }
 }
 
 pub struct App {
@@ -113,6 +137,7 @@ pub struct App {
     git_view_diff_runtime: Option<GitViewDiffRuntimeHandle>,
     commit_log_runtime: Option<CommitLogRuntimeHandle>,
     file_index_runtime: Option<FileIndexRuntimeHandle>,
+    update_check_runtime: Option<UpdateCheckRuntimeHandle>,
     command_history: Rc<CommandHistory>,
     recent_projects: RecentProjectsStore,
     plugin_host: PluginHost,
@@ -122,6 +147,8 @@ pub struct App {
     in_editor_diff_buffers: HashMap<usize, InEditorDiffBufferState>,
     git_commit_buffers: HashMap<usize, GitCommitBufferState>,
     home_screen_active: bool,
+    home_screen_update_notice: Option<String>,
+    home_screen_update_check_requested: bool,
     last_term_cols: usize,
     last_term_rows: usize,
 }
@@ -137,6 +164,11 @@ impl App {
                 FileIndexMode::Lazy => (Vec::new(), false, false),
             };
         let home_screen_active = should_show_home_screen(start_path, &editor);
+        let fresh_update_cache =
+            load_fresh_update_check_cache(&app_data_dir(), unix_timestamp_secs());
+        let home_screen_update_notice = fresh_update_cache
+            .as_ref()
+            .and_then(home_screen_notice_from_cache);
 
         debug_log!(
             &config,
@@ -178,6 +210,7 @@ impl App {
             git_view_diff_runtime,
             commit_log_runtime,
             file_index_runtime,
+            update_check_runtime: None,
             command_history,
             recent_projects,
             plugin_host: PluginHost::new(Vec::new()),
@@ -187,6 +220,8 @@ impl App {
             in_editor_diff_buffers: HashMap::new(),
             git_commit_buffers: HashMap::new(),
             home_screen_active,
+            home_screen_update_notice,
+            home_screen_update_check_requested: !home_screen_active || fresh_update_cache.is_some(),
             last_term_cols: 120,
             last_term_rows: 40,
         };
@@ -243,6 +278,10 @@ impl App {
 
     fn build_file_index_runtime() -> Result<FileIndexRuntimeHandle, String> {
         FileIndexRuntimeHandle::new()
+    }
+
+    fn build_update_check_runtime() -> Result<UpdateCheckRuntimeHandle, String> {
+        UpdateCheckRuntimeHandle::new()
     }
 
     #[cfg(test)]
@@ -657,6 +696,59 @@ impl App {
         if let Some(commit_log) = self.compositor.commit_log_mut() {
             for event in drained_events {
                 commit_log.apply_event(event);
+            }
+        }
+    }
+
+    fn start_home_screen_update_check_if_needed(&mut self) {
+        if !self.home_screen_active || self.home_screen_update_check_requested {
+            return;
+        }
+
+        self.home_screen_update_check_requested = true;
+        match Self::build_update_check_runtime() {
+            Ok(runtime) => {
+                self.update_check_runtime = Some(runtime);
+            }
+            Err(err) => {
+                debug_log!(
+                    &self.config,
+                    "home screen update check runtime failed to start: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    fn poll_update_check_runtime(&mut self) {
+        let mut latest_result = None;
+        if let Some(runtime) = &self.update_check_runtime {
+            while let Ok(event) = runtime.event_rx.try_recv() {
+                match event {
+                    UpdateCheckRuntimeEvent::Ready(result) => latest_result = Some(result),
+                }
+            }
+        }
+
+        let Some(result) = latest_result else {
+            return;
+        };
+        self.update_check_runtime = None;
+
+        match result {
+            Ok(status) => {
+                self.home_screen_update_notice = home_screen_update_notice_from_status(&status);
+                let cache = UpdateCheckCache::from_status(&status, unix_timestamp_secs());
+                if let Err(err) = write_update_check_cache(&app_data_dir(), &cache) {
+                    debug_log!(
+                        &self.config,
+                        "failed to persist update check cache: {}",
+                        err
+                    );
+                }
+            }
+            Err(err) => {
+                debug_log!(&self.config, "home screen update check failed: {}", err);
             }
         }
     }
@@ -1416,6 +1508,7 @@ impl App {
         &mut self,
         stdout: &mut impl std::io::Write,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.start_home_screen_update_check_if_needed();
         loop {
             let frame_start = Instant::now();
             let frame_deadline = frame_start + FRAME_DURATION_60_FPS;
@@ -1475,6 +1568,7 @@ impl App {
                 self.close_confirm,
                 self.home_screen_active,
             );
+            ctx.home_screen_notice = self.home_screen_update_notice.as_deref();
             if let Some((_ew, _border, editor_x, editor_w)) = self.compositor.explorer_layout(cols)
             {
                 ctx.editor_area_x = editor_x;
@@ -1605,6 +1699,7 @@ impl App {
             self.poll_git_view_diff_runtime();
             self.poll_commit_log_runtime();
             self.poll_file_index_runtime();
+            self.poll_update_check_runtime();
         }
     }
 
@@ -1639,6 +1734,7 @@ impl App {
             self.poll_git_view_diff_runtime();
             self.poll_commit_log_runtime();
             self.poll_file_index_runtime();
+            self.poll_update_check_runtime();
         }
 
         should_quit
@@ -2332,6 +2428,62 @@ fn should_show_home_screen(start_path: Option<&Path>, editor: &Editor) -> bool {
     }
 }
 
+fn home_screen_update_notice_from_status(status: &UpgradeCheckStatus) -> Option<String> {
+    match status {
+        UpgradeCheckStatus::UpdateAvailable { latest, .. } => {
+            Some(format!("Update available: v{} (gargo --update)", latest))
+        }
+        UpgradeCheckStatus::UpToDate { .. } => None,
+    }
+}
+
+fn home_screen_notice_from_cache(cache: &UpdateCheckCache) -> Option<String> {
+    if cache.has_update {
+        Some(format!(
+            "Update available: v{} (gargo --update)",
+            cache.latest_version
+        ))
+    } else {
+        None
+    }
+}
+
+fn update_check_cache_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("update_check.toml")
+}
+
+fn unix_timestamp_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn load_update_check_cache(data_dir: &Path) -> Option<UpdateCheckCache> {
+    let path = update_check_cache_path(data_dir);
+    let content = fs::read_to_string(path).ok()?;
+    toml::from_str(&content).ok()
+}
+
+fn load_fresh_update_check_cache(data_dir: &Path, now_secs: u64) -> Option<UpdateCheckCache> {
+    let cache = load_update_check_cache(data_dir)?;
+    if cache.current_version != env!("CARGO_PKG_VERSION") {
+        return None;
+    }
+    if now_secs.saturating_sub(cache.checked_at_unix_secs) > UPDATE_CHECK_CACHE_TTL_SECS {
+        return None;
+    }
+    Some(cache)
+}
+
+fn write_update_check_cache(data_dir: &Path, cache: &UpdateCheckCache) -> Result<(), String> {
+    fs::create_dir_all(data_dir).map_err(|e| format!("failed to create data dir: {e}"))?;
+    let content =
+        toml::to_string(cache).map_err(|e| format!("failed to serialize update cache: {e}"))?;
+    fs::write(update_check_cache_path(data_dir), content)
+        .map_err(|e| format!("failed to write update cache: {e}"))
+}
+
 fn is_home_screen_insert_entry(action: &CoreAction) -> bool {
     matches!(
         action,
@@ -2617,6 +2769,59 @@ mod tests {
 
         assert!(app.is_home_screen_active());
         assert_eq!(app.editor.mode, mode::Mode::Normal);
+    }
+
+    #[test]
+    fn update_check_cache_round_trip_and_ttl() {
+        let temp = tempdir().unwrap();
+        let data_dir = temp.path().join("gargo");
+        let now = 1_700_000_000u64;
+        let cache = UpdateCheckCache {
+            checked_at_unix_secs: now,
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            latest_version: "9.9.9".to_string(),
+            has_update: true,
+        };
+
+        write_update_check_cache(&data_dir, &cache).expect("write cache");
+
+        assert_eq!(load_update_check_cache(&data_dir), Some(cache.clone()));
+        assert_eq!(
+            load_fresh_update_check_cache(&data_dir, now + UPDATE_CHECK_CACHE_TTL_SECS - 1),
+            Some(cache.clone())
+        );
+        assert_eq!(
+            load_fresh_update_check_cache(&data_dir, now + UPDATE_CHECK_CACHE_TTL_SECS + 1),
+            None
+        );
+        assert_eq!(
+            home_screen_notice_from_cache(&cache),
+            Some("Update available: v9.9.9 (gargo --update)".to_string())
+        );
+    }
+
+    #[test]
+    fn stale_or_mismatched_update_cache_is_ignored() {
+        let temp = tempdir().unwrap();
+        let data_dir = temp.path().join("gargo");
+        let now = 1_700_000_000u64;
+        let stale = UpdateCheckCache {
+            checked_at_unix_secs: now.saturating_sub(UPDATE_CHECK_CACHE_TTL_SECS + 10),
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            latest_version: "9.9.9".to_string(),
+            has_update: true,
+        };
+        write_update_check_cache(&data_dir, &stale).expect("write stale cache");
+        assert_eq!(load_fresh_update_check_cache(&data_dir, now), None);
+
+        let mismatched = UpdateCheckCache {
+            checked_at_unix_secs: now,
+            current_version: "0.0.1".to_string(),
+            latest_version: "9.9.9".to_string(),
+            has_update: true,
+        };
+        write_update_check_cache(&data_dir, &mismatched).expect("write mismatched cache");
+        assert_eq!(load_fresh_update_check_cache(&data_dir, now), None);
     }
 
     #[test]

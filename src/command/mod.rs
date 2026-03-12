@@ -13,3 +13,4 @@ pub mod in_editor_diff;
 pub mod lsp;
 pub mod recent_projects;
 pub mod registry;
+pub mod update_check_runtime;

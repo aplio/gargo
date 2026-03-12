@@ -50,7 +50,7 @@ impl TextView {
         show_home_screen: bool,
     ) {
         if show_home_screen {
-            render_home_screen_in_area(surface, area, ctx.project_root);
+            render_home_screen_in_area(surface, area, ctx.project_root, ctx.home_screen_notice);
             return;
         }
         self.render_document(ctx, surface, buf, area, render_search);
@@ -552,7 +552,12 @@ fn diff_overlay_spans_for_line(line: &str) -> Vec<HighlightSpan> {
         .collect()
 }
 
-fn render_home_screen_in_area(surface: &mut Surface, area: PaneRect, project_root: &Path) {
+fn render_home_screen_in_area(
+    surface: &mut Surface,
+    area: PaneRect,
+    project_root: &Path,
+    update_notice: Option<&str>,
+) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -578,10 +583,22 @@ fn render_home_screen_in_area(surface: &mut Surface, area: PaneRect, project_roo
         surface.put_str(path_x, center_row + 1, path_text, &secondary_style);
     }
 
-    if center_row + 2 < area.y + area.height {
+    let hint_row = if let Some(notice) = update_notice {
+        if center_row + 2 < area.y + area.height {
+            let (notice_text, _) = truncate_to_width(notice, area.width);
+            let notice_w = display_width(notice_text);
+            let notice_x = area.x + area.width.saturating_sub(notice_w) / 2;
+            surface.put_str(notice_x, center_row + 2, notice_text, &secondary_style);
+        }
+        center_row + 3
+    } else {
+        center_row + 2
+    };
+
+    if hint_row < area.y + area.height {
         let hint_w = display_width(hint);
         let hint_x = area.x + area.width.saturating_sub(hint_w) / 2;
-        surface.put_str(hint_x, center_row + 2, hint, &secondary_style);
+        surface.put_str(hint_x, hint_row, hint, &secondary_style);
     }
 }
 
@@ -903,6 +920,53 @@ diff --git a/a.txt b/a.txt\n\
                 dim: true,
                 ..CellStyle::default()
             }
+        );
+    }
+
+    #[test]
+    fn home_screen_renders_update_notice_when_present() {
+        let editor = Editor::new();
+        let config = Config::default();
+        let theme = Theme::dark();
+        let key_state = KeyState::Normal;
+        let mut ctx = RenderContext::new(
+            72,
+            10,
+            &editor,
+            &theme,
+            &key_state,
+            &config,
+            Path::new("/tmp/gargo-test-root"),
+            false,
+            true,
+        );
+        ctx.home_screen_notice = Some("Update available: v0.1.20 (gargo --update)");
+        let mut surface = Surface::new(72, 10);
+
+        TextView::new().render(&ctx, &mut surface);
+
+        let rendered = (0..10)
+            .map(|row| row_text(&surface, row))
+            .collect::<Vec<_>>();
+        let notice = "Update available: v0.1.20 (gargo --update)";
+        let notice_row = rendered
+            .iter()
+            .position(|line| line.contains(notice))
+            .expect("notice line should be rendered");
+        let notice_x = rendered[notice_row]
+            .find(notice)
+            .expect("notice should be centered in row");
+        assert_eq!(
+            surface.get(notice_x, notice_row).style,
+            CellStyle {
+                dim: true,
+                ..CellStyle::default()
+            }
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("Press i to start editing"))
         );
     }
 

@@ -24,6 +24,32 @@ struct LatestRelease {
     tag: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpgradeCheckStatus {
+    UpToDate { current: String },
+    UpdateAvailable { current: String, latest: String },
+}
+
+impl UpgradeCheckStatus {
+    pub fn current_version(&self) -> &str {
+        match self {
+            Self::UpToDate { current } => current,
+            Self::UpdateAvailable { current, .. } => current,
+        }
+    }
+
+    pub fn latest_version(&self) -> &str {
+        match self {
+            Self::UpToDate { current } => current,
+            Self::UpdateAvailable { latest, .. } => latest,
+        }
+    }
+
+    pub fn has_update(&self) -> bool {
+        matches!(self, Self::UpdateAvailable { .. })
+    }
+}
+
 trait UpdateSource {
     fn latest_release(&self, request: &UpdateRequest) -> Result<LatestRelease, String>;
     fn perform_upgrade(
@@ -146,36 +172,27 @@ pub fn run(command: UpgradeCommand) -> Result<String, String> {
     }
 }
 
+pub fn check_status() -> Result<UpgradeCheckStatus, String> {
+    let request = build_request()?;
+    if use_mock_update_source() {
+        let source = MockUpdateSource::from_env();
+        check_status_with_source(&source, &request)
+    } else {
+        let source = GithubUpdateSource;
+        check_status_with_source(&source, &request)
+    }
+}
+
 fn run_with_source(
     source: &dyn UpdateSource,
     command: UpgradeCommand,
     request: &UpdateRequest,
 ) -> Result<String, String> {
-    let latest = source.latest_release(request)?;
-
-    let current = parse_semver(&request.current_version)?;
-    let newest = parse_semver(&latest.version)?;
+    let status = check_status_with_source(source, request)?;
     match command {
-        UpgradeCommand::Check => {
-            if newest > current {
-                Ok(format!(
-                    "Update available: {} -> {} ({}/{})",
-                    current,
-                    newest,
-                    std::env::consts::OS,
-                    std::env::consts::ARCH
-                ))
-            } else {
-                Ok(format!(
-                    "Already up to date: {} ({}/{})",
-                    current,
-                    std::env::consts::OS,
-                    std::env::consts::ARCH
-                ))
-            }
-        }
+        UpgradeCommand::Check => Ok(format_check_status(&status)),
         UpgradeCommand::Update => {
-            if newest <= current {
+            if let UpgradeCheckStatus::UpToDate { current } = status {
                 return Ok(format!(
                     "Already up to date: {} ({}/{})",
                     current,
@@ -183,9 +200,50 @@ fn run_with_source(
                     std::env::consts::ARCH
                 ));
             }
+            let latest = source.latest_release(request)?;
+            let current = status.current_version().to_string();
+            let newest = status.latest_version().to_string();
             source.perform_upgrade(request, &latest)?;
             Ok(format!("Upgraded gargo from {} to {}", current, newest))
         }
+    }
+}
+
+fn check_status_with_source(
+    source: &dyn UpdateSource,
+    request: &UpdateRequest,
+) -> Result<UpgradeCheckStatus, String> {
+    let latest = source.latest_release(request)?;
+    let current = parse_semver(&request.current_version)?;
+    let newest = parse_semver(&latest.version)?;
+
+    if newest > current {
+        Ok(UpgradeCheckStatus::UpdateAvailable {
+            current: current.to_string(),
+            latest: newest.to_string(),
+        })
+    } else {
+        Ok(UpgradeCheckStatus::UpToDate {
+            current: current.to_string(),
+        })
+    }
+}
+
+fn format_check_status(status: &UpgradeCheckStatus) -> String {
+    match status {
+        UpgradeCheckStatus::UpToDate { current } => format!(
+            "Already up to date: {} ({}/{})",
+            current,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ),
+        UpgradeCheckStatus::UpdateAvailable { current, latest } => format!(
+            "Update available: {} -> {} ({}/{})",
+            current,
+            latest,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ),
     }
 }
 
@@ -249,7 +307,10 @@ fn parse_semver(value: &str) -> Result<Version, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_semver, resolve_target_triple};
+    use super::{
+        MockUpdateSource, MockUpdateState, UpdateRequest, UpgradeCheckStatus,
+        check_status_with_source, parse_semver, resolve_target_triple,
+    };
 
     #[test]
     fn semver_parser_accepts_with_or_without_v() {
@@ -274,5 +335,50 @@ mod tests {
                 | "aarch64-unknown-linux-gnu"
         );
         assert!(valid, "unexpected target: {target}");
+    }
+
+    #[test]
+    fn typed_status_reports_available_update() {
+        let source = MockUpdateSource {
+            state: MockUpdateState::HasUpdate,
+        };
+        let request = UpdateRequest {
+            current_version: "0.1.19".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+        };
+
+        let status = check_status_with_source(&source, &request).expect("status");
+        assert_eq!(
+            status,
+            UpgradeCheckStatus::UpdateAvailable {
+                current: "0.1.19".to_string(),
+                latest: "0.1.20".to_string(),
+            }
+        );
+        assert!(status.has_update());
+        assert_eq!(status.current_version(), "0.1.19");
+        assert_eq!(status.latest_version(), "0.1.20");
+    }
+
+    #[test]
+    fn typed_status_reports_up_to_date() {
+        let source = MockUpdateSource {
+            state: MockUpdateState::UpToDate,
+        };
+        let request = UpdateRequest {
+            current_version: "0.1.19".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+        };
+
+        let status = check_status_with_source(&source, &request).expect("status");
+        assert_eq!(
+            status,
+            UpgradeCheckStatus::UpToDate {
+                current: "0.1.19".to_string(),
+            }
+        );
+        assert!(!status.has_update());
+        assert_eq!(status.current_version(), "0.1.19");
+        assert_eq!(status.latest_version(), "0.1.19");
     }
 }

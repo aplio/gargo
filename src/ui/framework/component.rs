@@ -19,6 +19,7 @@ pub struct RenderContext<'a> {
     pub project_root: &'a Path,
     pub close_confirm_active: bool,
     pub home_screen_active: bool,
+    pub home_screen_notice: Option<&'a str>,
     pub editor_area_x: usize,
     pub editor_area_width: usize,
 }
@@ -72,6 +73,7 @@ impl<'a> RenderContext<'a> {
             project_root,
             close_confirm_active,
             home_screen_active,
+            home_screen_notice: None,
             editor_area_x: 0,
             editor_area_width: cols,
         }

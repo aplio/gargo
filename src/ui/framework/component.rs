@@ -36,15 +36,31 @@ impl<'a> RenderContext<'a> {
         close_confirm_active: bool,
         home_screen_active: bool,
     ) -> Self {
-        let chord_display = match key_state {
-            KeyState::CtrlX => "C-x ",
-            KeyState::Space => "SPC ",
-            KeyState::SpaceWindow => "SPC w ",
-            KeyState::Goto => "g ",
-            KeyState::MacroRecord => "q ",
-            KeyState::MacroPlay => "@ ",
-            KeyState::Normal => "",
-        };
+        Self::new_with_chord_display(
+            cols,
+            rows,
+            editor,
+            theme,
+            key_state.display_prefix(),
+            config,
+            project_root,
+            close_confirm_active,
+            home_screen_active,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_chord_display(
+        cols: usize,
+        rows: usize,
+        editor: &'a Editor,
+        theme: &'a Theme,
+        chord_display: &'a str,
+        config: &'a Config,
+        project_root: &'a Path,
+        close_confirm_active: bool,
+        home_screen_active: bool,
+    ) -> Self {
         Self {
             cols,
             rows,

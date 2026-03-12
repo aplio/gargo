@@ -81,6 +81,13 @@ struct GitCommitBufferState {
     commit_editmsg_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CountBehavior {
+    Repeat,
+    LineSelect,
+    AbsoluteLineJump,
+}
+
 pub struct App {
     editor: Editor,
     compositor: Compositor,
@@ -109,7 +116,7 @@ pub struct App {
     command_history: Rc<CommandHistory>,
     recent_projects: RecentProjectsStore,
     plugin_host: PluginHost,
-    pending_line_jump_count: Option<usize>,
+    pending_count: Option<usize>,
     pending_edit_jump_locations: Vec<JumpLocation>,
     suspend_jump_recording: bool,
     in_editor_diff_buffers: HashMap<usize, InEditorDiffBufferState>,
@@ -174,7 +181,7 @@ impl App {
             command_history,
             recent_projects,
             plugin_host: PluginHost::new(Vec::new()),
-            pending_line_jump_count: None,
+            pending_count: None,
             pending_edit_jump_locations: Vec::new(),
             suspend_jump_recording: false,
             in_editor_diff_buffers: HashMap::new(),
@@ -192,6 +199,27 @@ impl App {
         app.queue_git_status_refresh(true);
         app.queue_active_doc_git_refresh(true);
         app
+    }
+
+    fn count_behavior(action: &CoreAction) -> Option<CountBehavior> {
+        match action {
+            CoreAction::MoveRight
+            | CoreAction::MoveLeft
+            | CoreAction::MoveDown
+            | CoreAction::MoveUp
+            | CoreAction::MoveWordForward
+            | CoreAction::MoveWordForwardEnd
+            | CoreAction::MoveWordBackward
+            | CoreAction::MoveLongWordForward
+            | CoreAction::MoveLongWordForwardEnd
+            | CoreAction::MoveLongWordBackward
+            | CoreAction::ExtendLineSelection
+            | CoreAction::SearchNext
+            | CoreAction::SearchPrev => Some(CountBehavior::Repeat),
+            CoreAction::SelectLine => Some(CountBehavior::LineSelect),
+            CoreAction::MoveToFileEnd => Some(CountBehavior::AbsoluteLineJump),
+            _ => None,
+        }
     }
 
     fn build_git_runtime(config: &Config) -> Result<GitRuntimeHandle, String> {
@@ -652,49 +680,76 @@ impl App {
         plugin_error
     }
 
-    fn resolve_count_prefixed_line_jump(
-        &mut self,
-        key_event: crossterm::event::KeyEvent,
-    ) -> Action {
-        use crossterm::event::KeyCode;
+    fn can_collect_count_prefix(&self) -> bool {
+        matches!(self.editor.mode, mode::Mode::Normal | mode::Mode::Visual)
+            && self.key_state == KeyState::Normal
+    }
 
-        if self.editor.mode != mode::Mode::Normal || self.key_state != KeyState::Normal {
-            self.pending_line_jump_count = None;
-            return Action::Noop;
-        }
-        if !key_event.modifiers.is_empty() {
-            self.pending_line_jump_count = None;
-            return Action::Noop;
+    fn collect_count_prefix(&mut self, key_event: crossterm::event::KeyEvent) -> bool {
+        if !self.can_collect_count_prefix() || !key_event.modifiers.is_empty() {
+            self.pending_count = None;
+            return false;
         }
 
         match key_event.code {
             KeyCode::Char(c @ '1'..='9') => {
                 let digit = (c as u8 - b'0') as usize;
                 let next = self
-                    .pending_line_jump_count
+                    .pending_count
                     .unwrap_or(0)
                     .saturating_mul(10)
                     .saturating_add(digit);
-                self.pending_line_jump_count = Some(next);
-                Action::Core(CoreAction::Noop)
+                self.pending_count = Some(next);
+                true
             }
-            KeyCode::Char('0') if self.pending_line_jump_count.is_some() => {
-                let next = self.pending_line_jump_count.unwrap_or(0).saturating_mul(10);
-                self.pending_line_jump_count = Some(next);
-                Action::Core(CoreAction::Noop)
+            KeyCode::Char('0') if self.pending_count.is_some() => {
+                let next = self.pending_count.unwrap_or(0).saturating_mul(10);
+                self.pending_count = Some(next);
+                true
             }
-            KeyCode::Char('G') => {
-                if let Some(count) = self.pending_line_jump_count.take() {
-                    let zero_based = count.saturating_sub(1);
-                    Action::Core(CoreAction::MoveToLineNumber(zero_based))
-                } else {
-                    Action::Noop
+            _ => false,
+        }
+    }
+
+    fn command_display(&self) -> String {
+        match self.pending_count {
+            Some(count) => format!("{count}{}", self.key_state.display_prefix()),
+            None => self.key_state.display_prefix().to_string(),
+        }
+    }
+
+    fn dispatch_resolved_key_action(&mut self, action: Action) -> bool {
+        let Some(count) = self.pending_count.take() else {
+            return self.dispatch_action(action);
+        };
+
+        match action {
+            Action::Core(core_action) => match Self::count_behavior(&core_action) {
+                Some(CountBehavior::Repeat) => {
+                    for _ in 0..count {
+                        if self.dispatch_action(Action::Core(core_action.clone())) {
+                            return true;
+                        }
+                    }
+                    false
                 }
-            }
-            _ => {
-                self.pending_line_jump_count = None;
-                Action::Noop
-            }
+                Some(CountBehavior::LineSelect) => {
+                    if self.dispatch_action(Action::Core(CoreAction::SelectLine)) {
+                        return true;
+                    }
+                    for _ in 1..count {
+                        if self.dispatch_action(Action::Core(CoreAction::ExtendLineSelection)) {
+                            return true;
+                        }
+                    }
+                    false
+                }
+                Some(CountBehavior::AbsoluteLineJump) => self.dispatch_action(Action::Core(
+                    CoreAction::MoveToLineNumber(count.saturating_sub(1)),
+                )),
+                None => self.dispatch_action(Action::Core(core_action)),
+            },
+            _ => self.dispatch_action(action),
         }
     }
 
@@ -702,7 +757,10 @@ impl App {
         &mut self,
         key_event: crossterm::event::KeyEvent,
     ) -> Option<Action> {
-        if self.editor.mode != mode::Mode::Normal || self.key_state != KeyState::Normal {
+        if self.editor.mode != mode::Mode::Normal
+            || self.key_state != KeyState::Normal
+            || self.pending_count.is_some()
+        {
             return None;
         }
         if !key_event.modifiers.is_empty() {
@@ -710,12 +768,9 @@ impl App {
         }
 
         match key_event.code {
-            KeyCode::Char('r') if self.is_active_in_editor_diff_buffer() => {
-                self.pending_line_jump_count = None;
-                Some(Action::App(AppAction::Workspace(
-                    WorkspaceAction::RefreshInEditorDiffView,
-                )))
-            }
+            KeyCode::Char('r') if self.is_active_in_editor_diff_buffer() => Some(Action::App(
+                AppAction::Workspace(WorkspaceAction::RefreshInEditorDiffView),
+            )),
             _ => None,
         }
     }
@@ -1408,12 +1463,13 @@ impl App {
                     self.config.horizontal_scroll_margin,
                 );
 
-            let mut ctx = RenderContext::new(
+            let command_display = self.command_display();
+            let mut ctx = RenderContext::new_with_chord_display(
                 cols,
                 rows,
                 &self.editor,
                 &self.theme,
-                &self.key_state,
+                &command_display,
                 &self.config,
                 &self.project_root,
                 self.close_confirm,
@@ -1463,23 +1519,15 @@ impl App {
                             }
                             EventResult::Ignored => {
                                 self.editor.message = None;
+                                if self.collect_count_prefix(key_event) {
+                                    continue;
+                                }
                                 if let Some(action) = self.resolve_contextual_key_action(key_event)
                                 {
                                     if self.dispatch_action(action) {
                                         return Ok(());
                                     }
                                     continue;
-                                }
-                                let prefixed = self.resolve_count_prefixed_line_jump(key_event);
-                                match prefixed {
-                                    Action::Core(CoreAction::Noop) => continue,
-                                    Action::Noop => {}
-                                    action => {
-                                        if self.dispatch_action(action) {
-                                            return Ok(());
-                                        }
-                                        continue;
-                                    }
                                 }
                                 let action = crate::input::keymap::resolve(
                                     key_event,
@@ -1490,7 +1538,7 @@ impl App {
                                 debug_log!(&self.config, "action: {:?}", action);
                                 // Update command helper based on current key_state
                                 self.compositor.update_command_helper(&self.key_state);
-                                if self.dispatch_action(action) {
+                                if self.dispatch_resolved_key_action(action) {
                                     return Ok(());
                                 }
                             }
@@ -4101,19 +4149,85 @@ mod tests {
     #[test]
     fn numeric_g_jumps_to_line_number() {
         let mut app = test_app_with_text("line1\nline2\nline3\n");
-        let a1 = app.resolve_count_prefixed_line_jump(KeyEvent::new(
-            KeyCode::Char('2'),
-            KeyModifiers::NONE,
-        ));
-        assert_eq!(a1, Action::Core(CoreAction::Noop));
+        assert!(app.collect_count_prefix(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE,)));
 
-        let a2 = app.resolve_count_prefixed_line_jump(KeyEvent::new(
-            KeyCode::Char('G'),
-            KeyModifiers::NONE,
-        ));
-        assert_eq!(a2, Action::Core(CoreAction::MoveToLineNumber(1)));
-        app.dispatch(a2);
+        let action = crate::input::keymap::resolve(
+            KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE),
+            &mut app.key_state,
+            &app.editor.mode,
+            app.editor.macro_recorder.is_recording(),
+        );
+
+        app.dispatch_resolved_key_action(action);
         assert_eq!(app.editor.active_buffer().cursor_line(), 1);
+    }
+
+    #[test]
+    fn count_prefix_repeats_line_selection_until_eof() {
+        let mut app = test_app_with_text("one\ntwo\nthree\nfour\n");
+        app.editor.active_buffer_mut().move_down();
+        app.editor.mode = mode::Mode::Normal;
+
+        assert!(app.collect_count_prefix(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE,)));
+
+        let action = crate::input::keymap::resolve(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut app.key_state,
+            &app.editor.mode,
+            app.editor.macro_recorder.is_recording(),
+        );
+
+        app.dispatch_resolved_key_action(action);
+
+        assert_eq!(app.editor.mode, mode::Mode::Visual);
+        assert_eq!(
+            app.editor.active_buffer().selection_text(),
+            Some("two\nthree\nfour\n".to_string())
+        );
+        assert_eq!(app.pending_count, None);
+    }
+
+    #[test]
+    fn count_prefix_repeats_direct_motions() {
+        let mut app = test_app_with_text("a\nb\nc\nd\n");
+        app.editor.mode = mode::Mode::Normal;
+
+        assert!(app.collect_count_prefix(KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE,)));
+
+        let action = crate::input::keymap::resolve(
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut app.key_state,
+            &app.editor.mode,
+            app.editor.macro_recorder.is_recording(),
+        );
+
+        app.dispatch_resolved_key_action(action);
+
+        assert_eq!(app.editor.active_buffer().cursor_line(), 3);
+        assert_eq!(app.pending_count, None);
+    }
+
+    #[test]
+    fn bare_zero_keeps_line_start_behavior() {
+        let mut app = test_app_with_text("hello world");
+        app.editor.mode = mode::Mode::Normal;
+        app.editor.active_buffer_mut().move_right();
+        app.editor.active_buffer_mut().move_right();
+        assert_eq!(app.editor.active_buffer().cursors[0], 2);
+
+        assert!(!app.collect_count_prefix(KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE,)));
+
+        let action = crate::input::keymap::resolve(
+            KeyEvent::new(KeyCode::Char('0'), KeyModifiers::NONE),
+            &mut app.key_state,
+            &app.editor.mode,
+            app.editor.macro_recorder.is_recording(),
+        );
+
+        app.dispatch_resolved_key_action(action);
+
+        assert_eq!(app.editor.active_buffer().cursors[0], 0);
+        assert_eq!(app.pending_count, None);
     }
 
     #[test]

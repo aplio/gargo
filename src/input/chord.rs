@@ -8,3 +8,17 @@ pub enum KeyState {
     MacroRecord,
     MacroPlay,
 }
+
+impl KeyState {
+    pub fn display_prefix(&self) -> &'static str {
+        match self {
+            KeyState::CtrlX => "C-x ",
+            KeyState::Space => "SPC ",
+            KeyState::SpaceWindow => "SPC w ",
+            KeyState::Goto => "g ",
+            KeyState::MacroRecord => "q ",
+            KeyState::MacroPlay => "@ ",
+            KeyState::Normal => "",
+        }
+    }
+}

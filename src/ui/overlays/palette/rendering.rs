@@ -164,17 +164,12 @@ impl Palette {
                     let line = &self.preview_lines[line_idx];
                     let window = slice_preview_display_window(line, preview_start_col, inner_w);
                     if let Some(spans) = self.preview_spans.get(&line_idx) {
-                        let visible_spans = rebase_preview_spans_to_window(
-                            spans,
-                            window.start_byte,
-                            window.end_byte,
-                        );
-                        render_highlighted_line(
+                        render_highlighted_line_windowed(
                             surface,
-                            y + row,
-                            x + 1,
+                            (y + row, x + 1),
                             window.visible,
-                            &visible_spans,
+                            spans,
+                            window.start_byte..window.end_byte,
                             inner_w,
                             theme,
                         );

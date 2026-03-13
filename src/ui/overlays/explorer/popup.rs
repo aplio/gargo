@@ -20,7 +20,7 @@ use crate::ui::shared::file_browser::{is_valid_single_name, sort_by_name_case_in
 use crate::ui::shared::filtering::fuzzy_match;
 use crate::ui::text::{display_width, slice_display_window, truncate_to_width};
 use crate::ui::text_input::delete_prev_word_input;
-use crate::ui::views::text_view::render_highlighted_line;
+use crate::ui::views::text_view::render_highlighted_line_windowed;
 
 type PreviewCache = HashMap<PathBuf, (Vec<String>, HashMap<usize, Vec<HighlightSpan>>)>;
 
@@ -1313,14 +1313,12 @@ impl ExplorerPopup {
                     let window =
                         slice_display_window(line, self.preview_horizontal_scroll, inner_w);
                     if let Some(spans) = self.preview_spans.get(&line_idx) {
-                        let visible_spans =
-                            rebase_spans_to_window(spans, window.start_byte, window.end_byte);
-                        render_highlighted_line(
+                        render_highlighted_line_windowed(
                             surface,
-                            y + row,
-                            x + 1,
+                            (y + row, x + 1),
                             window.visible,
-                            &visible_spans,
+                            spans,
+                            window.start_byte..window.end_byte,
                             inner_w,
                             theme,
                         );
@@ -1389,28 +1387,6 @@ fn collapse_indent_prefix(max_prefix_w: usize) -> &'static str {
         2 => "..",
         _ => ".. ",
     }
-}
-
-fn rebase_spans_to_window(
-    spans: &[HighlightSpan],
-    start_byte: usize,
-    end_byte: usize,
-) -> Vec<HighlightSpan> {
-    spans
-        .iter()
-        .filter_map(|span| {
-            let overlap_start = span.start.max(start_byte);
-            let overlap_end = span.end.min(end_byte);
-            if overlap_start >= overlap_end {
-                return None;
-            }
-            Some(HighlightSpan {
-                start: overlap_start - start_byte,
-                end: overlap_end - start_byte,
-                capture_name: span.capture_name.clone(),
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]

@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 
 use ropey::Rope;
 use streaming_iterator::StreamingIterator;
@@ -23,12 +26,87 @@ struct BufferHighlight {
     tree: Option<Tree>,
     query: Query,
     indent_query: Option<Query>,
+    visible_cache: RefCell<Option<VisibleHighlightCache>>,
     #[allow(dead_code)]
     language: Language,
 }
 
 pub struct HighlightManager {
     highlights: HashMap<BufferId, BufferHighlight>,
+}
+
+const HIGHLIGHT_TEXT_CACHE_CAPACITY: usize = 64;
+
+struct VisibleHighlightCache {
+    start_line: usize,
+    end_line: usize,
+    spans: HashMap<usize, Vec<HighlightSpan>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct HighlightTextCacheKey {
+    language_name: &'static str,
+    byte_len: usize,
+    line_count: usize,
+    content_hash: u64,
+}
+
+struct HighlightTextCache {
+    order: VecDeque<HighlightTextCacheKey>,
+    entries: HashMap<HighlightTextCacheKey, HashMap<usize, Vec<HighlightSpan>>>,
+}
+
+impl HighlightTextCache {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::new(),
+            entries: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, key: HighlightTextCacheKey) -> Option<HashMap<usize, Vec<HighlightSpan>>> {
+        let spans = self.entries.get(&key)?.clone();
+        self.touch(key);
+        Some(spans)
+    }
+
+    fn insert(&mut self, key: HighlightTextCacheKey, spans: HashMap<usize, Vec<HighlightSpan>>) {
+        if self.entries.insert(key, spans).is_some() {
+            self.touch(key);
+            return;
+        }
+
+        self.order.push_back(key);
+        while self.order.len() > HIGHLIGHT_TEXT_CACHE_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn touch(&mut self, key: HighlightTextCacheKey) {
+        if let Some(position) = self.order.iter().position(|existing| *existing == key) {
+            self.order.remove(position);
+        }
+        self.order.push_back(key);
+    }
+}
+
+fn highlight_text_cache() -> &'static Mutex<HighlightTextCache> {
+    static CACHE: OnceLock<Mutex<HighlightTextCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HighlightTextCache::new()))
+}
+
+fn highlight_text_cache_key(text: &str, lang_def: &LanguageDef) -> HighlightTextCacheKey {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    lang_def.name.hash(&mut hasher);
+    text.hash(&mut hasher);
+    HighlightTextCacheKey {
+        language_name: lang_def.name,
+        byte_len: text.len(),
+        line_count: text.lines().count(),
+        content_hash: hasher.finish(),
+    }
 }
 
 struct RopeChunkIter<'a> {
@@ -93,6 +171,7 @@ impl HighlightManager {
                 tree,
                 query,
                 indent_query,
+                visible_cache: RefCell::new(None),
                 language,
             },
         );
@@ -132,6 +211,7 @@ impl HighlightManager {
         }
 
         bh.tree = parse_rope(&mut bh.parser, rope, bh.tree.as_ref());
+        *bh.visible_cache.get_mut() = None;
     }
 
     /// Get a reference to the parsed tree for a buffer.
@@ -167,6 +247,13 @@ impl HighlightManager {
         let end_line = end_line.min(total_lines);
         if start_line >= end_line {
             return result;
+        }
+
+        if let Some(cached) = bh.visible_cache.borrow().as_ref()
+            && cached.start_line == start_line
+            && cached.end_line == end_line
+        {
+            return cached.spans.clone();
         }
 
         let start_byte = rope.line_to_byte(start_line);
@@ -235,6 +322,12 @@ impl HighlightManager {
             spans.sort_by_key(|s| s.start);
         }
 
+        *bh.visible_cache.borrow_mut() = Some(VisibleHighlightCache {
+            start_line,
+            end_line,
+            spans: result.clone(),
+        });
+
         result
     }
 }
@@ -243,6 +336,15 @@ impl HighlightManager {
 /// keyed by line index. This is a standalone function that doesn't require a
 /// registered buffer — useful for preview panels, etc.
 pub fn highlight_text(text: &str, lang_def: &LanguageDef) -> HashMap<usize, Vec<HighlightSpan>> {
+    let cache_key = highlight_text_cache_key(text, lang_def);
+    if let Some(cached) = highlight_text_cache()
+        .lock()
+        .expect("highlight text cache lock poisoned")
+        .get(cache_key)
+    {
+        return cached;
+    }
+
     let mut result: HashMap<usize, Vec<HighlightSpan>> = HashMap::new();
 
     let language = LanguageRegistry::ts_language(lang_def.language_fn);
@@ -329,6 +431,11 @@ pub fn highlight_text(text: &str, lang_def: &LanguageDef) -> HashMap<usize, Vec<
         spans.sort_by_key(|s| s.start);
     }
 
+    highlight_text_cache()
+        .lock()
+        .expect("highlight text cache lock poisoned")
+        .insert(cache_key, result.clone());
+
     result
 }
 
@@ -384,6 +491,8 @@ mod tests {
 
         let mut mgr = HighlightManager::new();
         mgr.register_buffer(1, &rope, lang_def);
+        let initial_spans = mgr.query_visible(1, &rope, 0, 2);
+        assert!(!initial_spans.is_empty());
 
         // Insert "fn foo() { " at the beginning
         let insert_text = "fn foo() { ";
@@ -403,6 +512,9 @@ mod tests {
 
         let spans = mgr.query_visible(1, &rope, 0, 2);
         assert!(!spans.is_empty());
+        let line0 = spans.get(&0).expect("Expected spans for line 0");
+        let has_keyword = line0.iter().any(|s| s.capture_name.starts_with("keyword"));
+        assert!(has_keyword, "Expected refreshed keyword capture on line 0");
     }
 
     #[test]

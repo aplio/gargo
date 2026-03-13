@@ -306,6 +306,13 @@ impl App {
             .unwrap_or_else(|| self.project_root.clone())
     }
 
+    fn active_buffer_should_refresh_project_scoped_state(&self) -> bool {
+        let Some(path) = self.editor.active_buffer().file_path.as_deref() else {
+            return true;
+        };
+        path_is_within_project_root(&self.project_root, path)
+    }
+
     fn queue_git_status_refresh(&self, high_priority: bool) {
         let Some(runtime) = &self.git_runtime else {
             return;
@@ -2595,6 +2602,21 @@ fn app_action_refreshes_active_doc(action: &AppAction) -> bool {
     )
 }
 
+fn path_is_within_project_root(project_root: &Path, file_path: &Path) -> bool {
+    if file_path.strip_prefix(project_root).is_ok() {
+        return true;
+    }
+
+    let Ok(root) = std::fs::canonicalize(project_root) else {
+        return false;
+    };
+    let Ok(file) = std::fs::canonicalize(file_path) else {
+        return false;
+    };
+
+    file.starts_with(root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2603,7 +2625,14 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
     use tempfile::tempdir;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     fn test_app_with_text(text: &str) -> App {
         let mut editor = Editor::new();
@@ -2708,11 +2737,107 @@ mod tests {
         (temp, file)
     }
 
+    fn drain_git_runtime_events(app: &App) -> Vec<GitRuntimeEvent> {
+        let Some(runtime) = &app.git_runtime else {
+            return Vec::new();
+        };
+
+        let mut events = Vec::new();
+        while let Ok(event) = runtime.event_rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
     #[test]
     fn home_screen_active_on_no_arg_startup() {
         let editor = Editor::new();
         let app = App::new(editor, Config::default(), None);
         assert!(app.is_home_screen_active());
+    }
+
+    #[test]
+    fn path_within_project_root_accepts_direct_and_canonicalized_matches() {
+        let temp = tempdir().expect("create temp dir");
+        let root = temp.path().join("repo");
+        let nested = root.join("src");
+        fs::create_dir_all(&nested).expect("create nested dir");
+        let file = nested.join("main.rs");
+        fs::write(&file, "fn main() {}\n").expect("write file");
+
+        assert!(path_is_within_project_root(&root, &file));
+
+        let relative_dot = root.join("src/../src/main.rs");
+        assert!(path_is_within_project_root(&root, &relative_dot));
+
+        let outside = temp.path().join("outside.rs");
+        fs::write(&outside, "fn outside() {}\n").expect("write outside file");
+        assert!(!path_is_within_project_root(&root, &outside));
+    }
+
+    #[test]
+    fn open_config_file_outside_project_keeps_editor_responsive() {
+        let _guard = env_lock();
+        let temp = tempdir().expect("create temp dir");
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(&repo).expect("create repo dir");
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["config", "user.name", "gargo-test"]);
+        run_git(&repo, &["config", "user.email", "gargo-test@example.com"]);
+
+        let repo_file = repo.join("README.md");
+        fs::write(&repo_file, "# repo\n").expect("write repo file");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "init"]);
+
+        let config_home = temp.path().join("config-home");
+        let gargo_dir = config_home.join("gargo");
+        fs::create_dir_all(&gargo_dir).expect("create config dir");
+        let config_path = gargo_dir.join("config.toml");
+        fs::write(
+            &config_path,
+            "debug = true\nshow_line_number = true\nhorizontal_scroll_margin = 5\n",
+        )
+        .expect("write config file");
+
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", &config_home);
+        }
+
+        let mut config = Config::default();
+        config.plugins.enabled.clear();
+        let editor = Editor::open(repo_file.to_str().expect("repo path utf-8"));
+        let mut app = App::new(editor, config, Some(repo_file.as_path()));
+
+        drain_git_runtime_events(&app);
+
+        let action = Action::App(AppAction::Lifecycle(LifecycleAction::OpenConfigFile));
+        assert!(!app.dispatch_action(action));
+
+        assert_eq!(
+            app.editor.active_buffer().file_path.as_deref(),
+            Some(config_path.as_path())
+        );
+        assert!(!app.active_buffer_should_refresh_project_scoped_state());
+
+        std::thread::sleep(Duration::from_millis(20));
+        let runtime_events = drain_git_runtime_events(&app);
+        assert!(
+            !runtime_events.iter().any(|event| matches!(
+                event,
+                GitRuntimeEvent::DocumentGutterUpdated { doc_id, .. }
+                    if *doc_id == app.editor.active_buffer().id
+            )),
+            "external config buffer should not queue project-scoped git refresh events"
+        );
+
+        let initial_line = app.editor.active_buffer().cursor_line();
+        assert!(!app.dispatch_action(Action::Core(CoreAction::MoveDown)));
+        assert_eq!(app.editor.active_buffer().cursor_line(), initial_line + 1);
+
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
     }
 
     #[test]

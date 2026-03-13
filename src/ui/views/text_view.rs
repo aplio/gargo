@@ -176,28 +176,52 @@ impl TextView {
                 let visible_display = horizontal.visible;
                 let used_width = horizontal.used_width;
 
-                let mut visible_spans = highlight_spans
-                    .get(&line_idx)
-                    .map(|spans| {
-                        rebase_spans_to_window(spans, horizontal.start_byte, horizontal.end_byte)
-                    })
-                    .unwrap_or_default();
+                let line_spans = highlight_spans.get(&line_idx);
                 if is_in_editor_diff {
-                    let diff_spans = diff_overlay_spans_for_line(display);
-                    visible_spans.extend(rebase_spans_to_window(
-                        &diff_spans,
-                        horizontal.start_byte,
-                        horizontal.end_byte,
-                    ));
-                }
-
-                if !visible_spans.is_empty() {
-                    render_highlighted_line(
+                    if let Some(capture_name) = diff_overlay_capture_for_line(display) {
+                        render_captured_line(
+                            surface,
+                            screen_y,
+                            area_x + gutter_w,
+                            visible_display,
+                            available,
+                            capture_name,
+                            ctx.theme,
+                        );
+                    } else if let Some(spans) = line_spans {
+                        render_highlighted_line_windowed(
+                            surface,
+                            (screen_y, area_x + gutter_w),
+                            visible_display,
+                            spans,
+                            horizontal.start_byte..horizontal.end_byte,
+                            available,
+                            ctx.theme,
+                        );
+                    } else {
+                        surface.put_str(
+                            area_x + gutter_w,
+                            screen_y,
+                            visible_display,
+                            &default_style,
+                        );
+                        if available > used_width {
+                            surface.fill_region(
+                                area_x + gutter_w + used_width,
+                                screen_y,
+                                available - used_width,
+                                ' ',
+                                &default_style,
+                            );
+                        }
+                    }
+                } else if let Some(spans) = line_spans {
+                    render_highlighted_line_windowed(
                         surface,
-                        screen_y,
-                        area_x + gutter_w,
+                        (screen_y, area_x + gutter_w),
                         visible_display,
-                        &visible_spans,
+                        spans,
+                        horizontal.start_byte..horizontal.end_byte,
                         available,
                         ctx.theme,
                     );
@@ -477,28 +501,6 @@ impl Component for TextView {
     }
 }
 
-fn rebase_spans_to_window(
-    spans: &[HighlightSpan],
-    start_byte: usize,
-    end_byte: usize,
-) -> Vec<HighlightSpan> {
-    spans
-        .iter()
-        .filter_map(|span| {
-            let overlap_start = span.start.max(start_byte);
-            let overlap_end = span.end.min(end_byte);
-            if overlap_start >= overlap_end {
-                return None;
-            }
-            Some(HighlightSpan {
-                start: overlap_start - start_byte,
-                end: overlap_end - start_byte,
-                capture_name: span.capture_name.clone(),
-            })
-        })
-        .collect()
-}
-
 fn is_in_editor_diff_buffer(buf: &Document) -> bool {
     if buf.file_path.is_some() || buf.rope.len_lines() == 0 {
         return false;
@@ -506,8 +508,8 @@ fn is_in_editor_diff_buffer(buf: &Document) -> bool {
     buf.rope.line(0).to_string().trim_end_matches('\n') == IN_EDITOR_DIFF_TITLE
 }
 
-fn diff_overlay_spans_for_line(line: &str) -> Vec<HighlightSpan> {
-    let capture = if line == IN_EDITOR_DIFF_TITLE {
+fn diff_overlay_capture_for_line(line: &str) -> Option<&'static str> {
+    if line == IN_EDITOR_DIFF_TITLE {
         Some("diff.header")
     } else if line.starts_with("## ") {
         Some("diff.section")
@@ -540,16 +542,32 @@ fn diff_overlay_spans_for_line(line: &str) -> Vec<HighlightSpan> {
         Some("diff.context")
     } else {
         None
-    };
+    }
+}
 
-    capture
-        .map(|capture_name| HighlightSpan {
-            start: 0,
-            end: line.len(),
-            capture_name: capture_name.to_string(),
+fn render_captured_line(
+    surface: &mut Surface,
+    y: usize,
+    x_offset: usize,
+    display: &str,
+    max_width: usize,
+    capture_name: &str,
+    theme: &crate::syntax::theme::Theme,
+) {
+    let style = theme
+        .style_for_capture(capture_name)
+        .map(|theme_style| CellStyle {
+            fg: theme_style.fg,
+            bold: theme_style.bold,
+            italic: theme_style.italic,
+            ..CellStyle::default()
         })
-        .into_iter()
-        .collect()
+        .unwrap_or_default();
+    let (truncated, used) = truncate_to_width(display, max_width);
+    surface.put_str(x_offset, y, truncated, &style);
+    if max_width > used {
+        surface.fill_region(x_offset + used, y, max_width - used, ' ', &style);
+    }
 }
 
 fn render_home_screen_in_area(
@@ -612,29 +630,71 @@ pub fn render_highlighted_line(
     max_width: usize,
     theme: &crate::syntax::theme::Theme,
 ) {
+    render_highlighted_line_windowed(
+        surface,
+        (y, x_offset),
+        display,
+        spans,
+        0..display.len(),
+        max_width,
+        theme,
+    );
+}
+
+pub fn render_highlighted_line_windowed(
+    surface: &mut Surface,
+    pos: (usize, usize),
+    display: &str,
+    spans: &[HighlightSpan],
+    byte_window: std::ops::Range<usize>,
+    max_width: usize,
+    theme: &crate::syntax::theme::Theme,
+) {
+    let (y, x_offset) = pos;
+    let start_byte = byte_window.start;
+    let end_byte = byte_window.end;
     let line_len = display.len();
-
-    let mut paint: Vec<Option<usize>> = vec![None; line_len];
-    for (i, span) in spans.iter().enumerate() {
-        let s = span.start.min(line_len);
-        let e = span.end.min(line_len);
-        for slot in paint.iter_mut().take(e).skip(s) {
-            *slot = Some(i);
-        }
-    }
-
     let mut col_width = 0usize;
     let mut byte_pos = 0usize;
+    let mut next_span_idx = 0usize;
+    let mut active_spans: Vec<usize> = Vec::new();
     let default_style = CellStyle::default();
 
     while byte_pos < line_len && col_width < max_width {
-        let current_capture = paint[byte_pos];
+        let absolute_byte_pos = start_byte + byte_pos;
+
+        while next_span_idx < spans.len() && spans[next_span_idx].start <= absolute_byte_pos {
+            if spans[next_span_idx].end > absolute_byte_pos {
+                active_spans.push(next_span_idx);
+            }
+            next_span_idx += 1;
+        }
+
+        while let Some(span_idx) = active_spans.last().copied() {
+            if spans[span_idx].end > absolute_byte_pos {
+                break;
+            }
+            active_spans.pop();
+        }
+
+        let current_capture = active_spans.last().copied();
+        let next_boundary = {
+            let mut boundary = end_byte;
+            if let Some(span_idx) = current_capture {
+                boundary = boundary.min(spans[span_idx].end.min(end_byte));
+            }
+            if next_span_idx < spans.len() {
+                boundary = boundary.min(spans[next_span_idx].start.min(end_byte));
+            }
+            if boundary > absolute_byte_pos {
+                boundary - start_byte
+            } else {
+                byte_pos + display[byte_pos..].chars().next().unwrap().len_utf8()
+            }
+        };
 
         let run_start = byte_pos;
-        while byte_pos < line_len && paint[byte_pos] == current_capture {
-            let ch = display[byte_pos..].chars().next().unwrap();
-            byte_pos += ch.len_utf8();
-        }
+        byte_pos = next_boundary;
 
         let seg_text = &display[run_start..byte_pos];
         let (truncated, used) = truncate_to_width(seg_text, max_width - col_width);
@@ -758,22 +818,20 @@ mod tests {
     }
 
     #[test]
-    fn diff_overlay_spans_classify_diff_lines() {
-        let plus = diff_overlay_spans_for_line("+added");
-        assert_eq!(plus.len(), 1);
-        assert_eq!(plus[0].capture_name, "diff.plus");
-
-        let minus = diff_overlay_spans_for_line("-removed");
-        assert_eq!(minus.len(), 1);
-        assert_eq!(minus[0].capture_name, "diff.minus");
-
-        let hunk = diff_overlay_spans_for_line("@@ -1,2 +1,2 @@");
-        assert_eq!(hunk.len(), 1);
-        assert_eq!(hunk[0].capture_name, "diff.hunk");
-
-        let meta = diff_overlay_spans_for_line("diff --git a/a.txt b/a.txt");
-        assert_eq!(meta.len(), 1);
-        assert_eq!(meta[0].capture_name, "diff.meta");
+    fn diff_overlay_capture_classifies_diff_lines() {
+        assert_eq!(diff_overlay_capture_for_line("+added"), Some("diff.plus"));
+        assert_eq!(
+            diff_overlay_capture_for_line("-removed"),
+            Some("diff.minus")
+        );
+        assert_eq!(
+            diff_overlay_capture_for_line("@@ -1,2 +1,2 @@"),
+            Some("diff.hunk")
+        );
+        assert_eq!(
+            diff_overlay_capture_for_line("diff --git a/a.txt b/a.txt"),
+            Some("diff.meta")
+        );
     }
 
     #[test]
@@ -1207,5 +1265,66 @@ diff --git a/a.txt b/a.txt\n\
         assert_eq!(surface.get(0, 0).symbol, " ");
         assert_eq!(surface.get(0, 0).style.bg, Some(Color::DarkGreen));
         assert_eq!(find_char_in_row(&surface, 0, 'a'), 1);
+    }
+
+    #[test]
+    fn highlighted_line_later_overlap_wins_without_losing_text() {
+        let mut surface = Surface::new(8, 1);
+        let theme = Theme::dark();
+        let spans = vec![
+            HighlightSpan {
+                start: 0,
+                end: 6,
+                capture_name: "keyword".to_string(),
+            },
+            HighlightSpan {
+                start: 2,
+                end: 4,
+                capture_name: "string".to_string(),
+            },
+        ];
+
+        render_highlighted_line(&mut surface, 0, 0, "abcdef", &spans, 8, &theme);
+
+        assert_eq!(&row_text(&surface, 0)[..6], "abcdef");
+        assert_eq!(
+            surface.get(0, 0).style.fg,
+            theme
+                .style_for_capture("keyword")
+                .and_then(|style| style.fg)
+        );
+        assert_eq!(
+            surface.get(2, 0).style.fg,
+            theme.style_for_capture("string").and_then(|style| style.fg)
+        );
+        assert_eq!(
+            surface.get(4, 0).style.fg,
+            theme
+                .style_for_capture("keyword")
+                .and_then(|style| style.fg)
+        );
+    }
+
+    #[test]
+    fn highlighted_line_windowed_clips_without_rebasing_spans() {
+        let mut surface = Surface::new(8, 1);
+        let theme = Theme::dark();
+        let spans = vec![HighlightSpan {
+            start: 2,
+            end: 5,
+            capture_name: "string".to_string(),
+        }];
+
+        render_highlighted_line_windowed(&mut surface, (0, 0), "cde", &spans, 2..5, 8, &theme);
+
+        assert_eq!(&row_text(&surface, 0)[..3], "cde");
+        assert_eq!(
+            surface.get(0, 0).style.fg,
+            theme.style_for_capture("string").and_then(|style| style.fg)
+        );
+        assert_eq!(
+            surface.get(2, 0).style.fg,
+            theme.style_for_capture("string").and_then(|style| style.fg)
+        );
     }
 }

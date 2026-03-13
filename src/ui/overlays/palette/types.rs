@@ -235,28 +235,6 @@ pub(super) fn slice_preview_display_window(
     }
 }
 
-pub(super) fn rebase_preview_spans_to_window(
-    spans: &[HighlightSpan],
-    start_byte: usize,
-    end_byte: usize,
-) -> Vec<HighlightSpan> {
-    spans
-        .iter()
-        .filter_map(|span| {
-            let overlap_start = span.start.max(start_byte);
-            let overlap_end = span.end.min(end_byte);
-            if overlap_start >= overlap_end {
-                return None;
-            }
-            Some(HighlightSpan {
-                start: overlap_start - start_byte,
-                end: overlap_end - start_byte,
-                capture_name: span.capture_name.clone(),
-            })
-        })
-        .collect()
-}
-
 pub(super) fn command_display_label(
     entry: &crate::command::registry::CommandEntry,
     config: &Config,

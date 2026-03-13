@@ -30,7 +30,7 @@ use crate::ui::framework::surface::Surface;
 use crate::ui::shared::filtering::{fuzzy_match, fzf_style_match};
 use crate::ui::text::{display_width, truncate_to_width};
 use crate::ui::text_input::TextInput;
-use crate::ui::views::text_view::render_highlighted_line;
+use crate::ui::views::text_view::render_highlighted_line_windowed;
 
 #[path = "workers.rs"]
 mod workers;

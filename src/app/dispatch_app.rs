@@ -1110,7 +1110,21 @@ impl App {
             self.queue_git_status_refresh(true);
         }
         if app_action_refreshes_active_doc(&action_for_jump) {
-            self.queue_active_doc_git_refresh(true);
+            if self.active_buffer_should_refresh_project_scoped_state() {
+                self.queue_active_doc_git_refresh(true);
+            } else {
+                debug_log!(
+                    &self.config,
+                    "git: skipped active-doc refresh for external buffer path={} project_root={}",
+                    self.editor
+                        .active_buffer()
+                        .file_path
+                        .as_deref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "<scratch>".to_string()),
+                    self.project_root.display()
+                );
+            }
         }
         self.prune_in_editor_diff_buffers();
         self.prune_git_commit_buffers();

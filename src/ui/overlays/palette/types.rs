@@ -23,6 +23,7 @@ pub enum CandidateKind {
     GitBranch(usize),
     Symbol(usize),
     File(usize),
+    CreateFile(String),
     SearchResult(usize),
 }
 

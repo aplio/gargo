@@ -560,8 +560,8 @@ impl App {
                                 .char_to_line(if sel_end > 0 { sel_end - 1 } else { 0 });
                         let anchor = buf.selection_anchor().unwrap_or(0);
                         let cursor = buf.cursors[0];
-                        let anchor_line = buf.rope.char_to_line(anchor);
-                        let cursor_line = buf.rope.char_to_line(cursor);
+                        let anchor_line = buf.rope.char_to_line(anchor).min(last_line);
+                        let cursor_line = buf.rope.char_to_line(cursor).min(last_line);
 
                         let buf = self.editor.active_buffer_mut();
                         buf.begin_transaction();
@@ -602,8 +602,8 @@ impl App {
                                 .char_to_line(if sel_end > 0 { sel_end - 1 } else { 0 });
                         let anchor = buf.selection_anchor().unwrap_or(0);
                         let cursor = buf.cursors[0];
-                        let anchor_line = buf.rope.char_to_line(anchor);
-                        let cursor_line = buf.rope.char_to_line(cursor);
+                        let anchor_line = buf.rope.char_to_line(anchor).min(last_line);
+                        let cursor_line = buf.rope.char_to_line(cursor).min(last_line);
 
                         let mut per_line_removed = Vec::with_capacity(last_line - first_line + 1);
                         for line in first_line..=last_line {

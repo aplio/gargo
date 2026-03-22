@@ -1684,3 +1684,42 @@ fn clear_anchor_no_adjust_for_backward_selection() {
     assert_eq!(doc.cursors[0], pos0);
     assert_eq!(doc.cursors[1], pos1);
 }
+
+#[test]
+fn dedent_after_select_line_multibyte_no_panic() {
+    let mut doc = doc_from_str("    alpha\n    café bravo\n    charlie\n");
+    doc.move_down();
+    doc.select_line();
+
+    let (sel_start, sel_end) = doc.selection_range().unwrap();
+    let first_line = doc.rope.char_to_line(sel_start);
+    let last_line = doc.rope.char_to_line(if sel_end > 0 { sel_end - 1 } else { 0 });
+    let anchor = doc.selection_anchor().unwrap();
+    let cursor = doc.cursors[0];
+    // .min(last_line) is the fix — without it, cursor_line overflows per_line_removed
+    let anchor_line = doc.rope.char_to_line(anchor).min(last_line);
+    let cursor_line = doc.rope.char_to_line(cursor).min(last_line);
+
+    let tab_width = 4usize;
+    let mut per_line_removed = Vec::new();
+    for line in first_line..=last_line {
+        let line_text = doc.rope.line(line).to_string();
+        let leading = line_text.chars().take_while(|c| *c == ' ').count();
+        per_line_removed.push(leading.min(tab_width));
+    }
+
+    doc.begin_transaction();
+    for line in (first_line..=last_line).rev() {
+        let remove_count = per_line_removed[line - first_line];
+        if remove_count > 0 {
+            let line_start = doc.rope.line_to_char(line);
+            doc.delete_range(line_start, line_start + remove_count);
+        }
+    }
+    let _anchor_shift: usize = per_line_removed[..=(anchor_line - first_line)].iter().sum();
+    let cursor_shift: usize = per_line_removed[..=(cursor_line - first_line)].iter().sum();
+    doc.cursors[0] = cursor.saturating_sub(cursor_shift);
+    doc.commit_transaction();
+
+    assert_eq!(doc.rope.to_string(), "    alpha\ncafé bravo\n    charlie\n");
+}

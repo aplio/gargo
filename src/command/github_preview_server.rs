@@ -35,6 +35,8 @@ pub enum GithubPreviewCommand {
     Stop,
     SetActivePath { rel_path: Option<String> },
     RefreshActive,
+    UpdateBufferContent { content: String, cursor_line: usize },
+    UpdateCursorLine { line: usize },
 }
 
 /// Events emitted by the GitHub preview server
@@ -117,6 +119,13 @@ impl GithubPreviewWorker {
                     self.handle_set_active_path(rel_path);
                 }
                 Ok(GithubPreviewCommand::RefreshActive) => self.handle_refresh_active(),
+                Ok(GithubPreviewCommand::UpdateBufferContent {
+                    content,
+                    cursor_line,
+                }) => self.handle_update_buffer_content(content, cursor_line),
+                Ok(GithubPreviewCommand::UpdateCursorLine { line }) => {
+                    self.handle_update_cursor_line(line)
+                }
                 Err(_) => break, // Main thread exited
             }
         }
@@ -173,8 +182,11 @@ impl GithubPreviewWorker {
                 )),
                 detached: false,
                 version: 1,
+                cursor_line: None,
             }),
             event_tx: self.event_tx.clone(),
+            buffer_content: None,
+            cursor_line: None,
         }));
         self.server_state = Some(server_state.clone());
 
@@ -207,6 +219,8 @@ impl GithubPreviewWorker {
             state.active_rel_path = normalized;
             state.detached = false;
             state.last_detach_path = None;
+            state.buffer_content = None;
+            state.cursor_line = None;
             state.version = state.version.wrapping_add(1);
             let event = PreviewBrowserEvent {
                 kind: PreviewBrowserEventKind::Navigate,
@@ -217,6 +231,7 @@ impl GithubPreviewWorker {
                 )),
                 detached: state.detached,
                 version: state.version,
+                cursor_line: None,
             };
             broadcast_preview_event(&mut state, event);
         }
@@ -242,6 +257,57 @@ impl GithubPreviewWorker {
             )),
             detached: state.detached,
             version: state.version,
+            cursor_line: state.cursor_line,
+        };
+        broadcast_preview_event(&mut state, event);
+    }
+
+    fn handle_update_buffer_content(&mut self, content: String, cursor_line: usize) {
+        let Some(state) = &self.server_state else {
+            return;
+        };
+        let Ok(mut state) = state.lock() else {
+            return;
+        };
+        if state.detached {
+            return;
+        }
+        state.buffer_content = Some(content);
+        state.cursor_line = Some(cursor_line);
+        state.version = state.version.wrapping_add(1);
+        let event = PreviewBrowserEvent {
+            kind: PreviewBrowserEventKind::Refresh,
+            path: state.active_rel_path.clone(),
+            url: Some(preview_url_for_rel_path(
+                state.port,
+                state.active_rel_path.as_deref(),
+            )),
+            detached: state.detached,
+            version: state.version,
+            cursor_line: state.cursor_line,
+        };
+        broadcast_preview_event(&mut state, event);
+    }
+
+    fn handle_update_cursor_line(&mut self, line: usize) {
+        let Some(state) = &self.server_state else {
+            return;
+        };
+        let Ok(mut state) = state.lock() else {
+            return;
+        };
+        if state.detached {
+            return;
+        }
+        state.cursor_line = Some(line);
+        state.version = state.version.wrapping_add(1);
+        let event = PreviewBrowserEvent {
+            kind: PreviewBrowserEventKind::ScrollTo,
+            path: state.active_rel_path.clone(),
+            url: None,
+            detached: state.detached,
+            version: state.version,
+            cursor_line: Some(line),
         };
         broadcast_preview_event(&mut state, event);
     }
@@ -256,6 +322,8 @@ struct PreviewServerState {
     version: u64,
     last_browser_event: Option<PreviewBrowserEvent>,
     event_tx: mpsc::Sender<GithubPreviewEvent>,
+    buffer_content: Option<String>,
+    cursor_line: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -264,6 +332,7 @@ enum PreviewBrowserEventKind {
     Navigate,
     Refresh,
     Detached,
+    ScrollTo,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -273,6 +342,7 @@ struct PreviewBrowserEvent {
     url: Option<String>,
     detached: bool,
     version: u64,
+    cursor_line: Option<usize>,
 }
 
 fn preview_url_for_rel_path(port: u16, rel_path: Option<&str>) -> String {
@@ -293,6 +363,9 @@ const LIVE_SYNC_SCRIPT: &str = r#"<script>
 (() => {
   const POLL_INTERVAL_MS = 600;
   const VERSION_STORAGE_KEY = 'gargo_preview_last_seen_event_version';
+  const CURSOR_LINE_STORAGE_KEY = 'gargo_preview_cursor_line';
+  const USER_SCROLL_TIMEOUT_MS = 3000;
+
   const readStoredVersion = () => {
     try {
       const raw = window.sessionStorage.getItem(VERSION_STORAGE_KEY);
@@ -305,13 +378,63 @@ const LIVE_SYNC_SCRIPT: &str = r#"<script>
   const persistVersion = (version) => {
     try {
       window.sessionStorage.setItem(VERSION_STORAGE_KEY, String(version));
-    } catch (_) {
-      // Ignore storage failures (private mode, blocked storage, etc).
-    }
+    } catch (_) {}
   };
 
   let lastSeenVersion = readStoredVersion();
   let pollInFlight = false;
+  let userScrolled = false;
+  let userScrollTimer = null;
+
+  // Track user scroll to suppress cursor tracking while user is scrolling
+  let programmaticScroll = false;
+  window.addEventListener('scroll', () => {
+    if (programmaticScroll) return;
+    userScrolled = true;
+    if (userScrollTimer) clearTimeout(userScrollTimer);
+    userScrollTimer = setTimeout(() => { userScrolled = false; }, USER_SCROLL_TIMEOUT_MS);
+  }, { passive: true });
+
+  const scrollToLine = (line) => {
+    if (!line || line < 1) return;
+    // Try code line element first (id="L{n}")
+    const lineEl = document.getElementById('L' + line);
+    if (lineEl) {
+      programmaticScroll = true;
+      lineEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setTimeout(() => { programmaticScroll = false; }, 100);
+      return;
+    }
+    // For markdown: find the nearest heading with data-source-line <= line
+    const headings = document.querySelectorAll('[data-source-line]');
+    let best = null;
+    for (const h of headings) {
+      const sl = parseInt(h.getAttribute('data-source-line'), 10);
+      if (sl <= line) {
+        best = h;
+      } else {
+        break;
+      }
+    }
+    if (best) {
+      programmaticScroll = true;
+      best.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      setTimeout(() => { programmaticScroll = false; }, 100);
+    }
+  };
+
+  // On page load, restore cursor position from sessionStorage
+  const storedCursorLine = (() => {
+    try {
+      const raw = window.sessionStorage.getItem(CURSOR_LINE_STORAGE_KEY);
+      return raw ? parseInt(raw, 10) : null;
+    } catch (_) { return null; }
+  })();
+  if (storedCursorLine) {
+    // Small delay to let the page render first
+    setTimeout(() => scrollToLine(storedCursorLine), 100);
+    try { window.sessionStorage.removeItem(CURSOR_LINE_STORAGE_KEY); } catch (_) {}
+  }
 
   const toRoute = (url) => {
     try {
@@ -327,6 +450,7 @@ const LIVE_SYNC_SCRIPT: &str = r#"<script>
     if (!route || route === currentRoute()) {
       return;
     }
+    userScrolled = false;
     window.location.assign(route);
   };
 
@@ -336,11 +460,16 @@ const LIVE_SYNC_SCRIPT: &str = r#"<script>
     }
 
     if (payload.kind === 'navigate' && payload.url) {
+      userScrolled = false;
       navigateInPlace(payload.url);
       return;
     }
 
     if (payload.kind === 'refresh') {
+      // Store cursor line so we can scroll after reload
+      if (payload.cursor_line) {
+        try { window.sessionStorage.setItem(CURSOR_LINE_STORAGE_KEY, String(payload.cursor_line)); } catch (_) {}
+      }
       if (payload.url) {
         const route = toRoute(payload.url);
         if (route && route !== currentRoute()) {
@@ -349,6 +478,14 @@ const LIVE_SYNC_SCRIPT: &str = r#"<script>
         }
       }
       window.location.reload();
+      return;
+    }
+
+    if (payload.kind === 'scroll_to') {
+      if (!userScrolled && payload.cursor_line) {
+        scrollToLine(payload.cursor_line);
+      }
+      return;
     }
   };
 
@@ -849,7 +986,20 @@ async fn handle_blob(
     State(state): State<Arc<Mutex<PreviewServerState>>>,
     AxumPath(path): AxumPath<String>,
 ) -> impl IntoResponse {
-    let repo_root = state.lock().unwrap().repo_root.clone();
+    let (repo_root, buffer_content) = {
+        let st = state.lock().unwrap();
+        let bc = if st
+            .active_rel_path
+            .as_deref()
+            .map(|a| normalize_rel_path_for_compare(a))
+            == Some(normalize_rel_path_for_compare(&path))
+        {
+            st.buffer_content.clone()
+        } else {
+            None
+        };
+        (st.repo_root.clone(), bc)
+    };
 
     let full_path = repo_root.join(&path);
 
@@ -860,7 +1010,7 @@ async fn handle_blob(
 
     maybe_emit_detached_event(&state, &path);
 
-    handle_file_display(&full_path, &path, &repo_root).await
+    handle_file_display(&full_path, &path, &repo_root, buffer_content.as_deref()).await
 }
 
 fn normalize_rel_path_for_compare(path: &str) -> String {
@@ -901,6 +1051,7 @@ fn maybe_emit_detached_event(state: &Arc<Mutex<PreviewServerState>>, requested_r
                 url: None,
                 detached: state.detached,
                 version: state.version,
+                cursor_line: None,
             };
             broadcast_preview_event(&mut state, browser_event);
             to_emit = Some(state.event_tx.clone());
@@ -1035,12 +1186,12 @@ async fn handle_directory_listing(
 }
 
 /// Render file content
-async fn handle_file_display(path: &Path, display_path: &str, repo_root: &Path) -> Html<String> {
-    let content = match tokio::fs::read(path).await {
-        Ok(content) => content,
-        Err(e) => return Html(render_error(&format!("Failed to read file: {}", e))),
-    };
-
+async fn handle_file_display(
+    path: &Path,
+    display_path: &str,
+    repo_root: &Path,
+    buffer_content: Option<&str>,
+) -> Html<String> {
     let filename = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -1048,26 +1199,41 @@ async fn handle_file_display(path: &Path, display_path: &str, repo_root: &Path) 
 
     let is_markdown = filename.ends_with(".md");
 
-    let rendered_content = if is_markdown {
-        // Render markdown with GFM
-        let text = String::from_utf8_lossy(&content);
-        let html = render_markdown(&text);
-        format!(r#"<div class="markdown-body">{}</div>"#, html)
+    // Use buffer content if available, otherwise read from disk
+    let rendered_content = if let Some(text) = buffer_content {
+        if is_markdown {
+            let html = render_markdown_with_source_lines(text);
+            format!(r#"<div class="markdown-body">{}</div>"#, html)
+        } else {
+            let language = detect_language(filename);
+            format!(
+                r#"<div class="file-content"><pre><code class="language-{}">{}</code></pre></div>"#,
+                language,
+                render_code_with_line_ids(text)
+            )
+        }
     } else {
-        // Try to detect if it's text
-        match String::from_utf8(content) {
-            Ok(text) => {
-                // Render as code with syntax highlighting
-                let language = detect_language(filename);
-                format!(
-                    r#"<div class="file-content"><pre><code class="language-{}">{}</code></pre></div>"#,
-                    language,
-                    html_escape(&text)
-                )
-            }
-            Err(_) => {
-                // Binary file
-                r#"<div class="error">Binary file - cannot display</div>"#.to_string()
+        let content = match tokio::fs::read(path).await {
+            Ok(content) => content,
+            Err(e) => return Html(render_error(&format!("Failed to read file: {}", e))),
+        };
+        if is_markdown {
+            let text = String::from_utf8_lossy(&content);
+            let html = render_markdown_with_source_lines(&text);
+            format!(r#"<div class="markdown-body">{}</div>"#, html)
+        } else {
+            match String::from_utf8(content) {
+                Ok(text) => {
+                    let language = detect_language(filename);
+                    format!(
+                        r#"<div class="file-content"><pre><code class="language-{}">{}</code></pre></div>"#,
+                        language,
+                        render_code_with_line_ids(&text)
+                    )
+                }
+                Err(_) => {
+                    r#"<div class="error">Binary file - cannot display</div>"#.to_string()
+                }
             }
         }
     };
@@ -1104,6 +1270,67 @@ fn render_markdown(text: &str) -> String {
     options.render.unsafe_ = true; // Allow HTML in markdown
 
     markdown_to_html(text, &options)
+}
+
+/// Render markdown to HTML, then inject `data-source-line` attributes on block-level elements.
+/// This enables scroll-to-line by mapping rendered elements back to source line numbers.
+fn render_markdown_with_source_lines(text: &str) -> String {
+    let html = render_markdown(text);
+
+    // Build a map from source lines: which line does each block-level element start at?
+    // We track headings (h1-h6) and paragraphs by scanning the source for heading prefixes
+    // and inserting data attributes into the rendered HTML.
+    //
+    // A simpler approach: wrap the entire markdown body in a container and annotate
+    // heading elements with their source line numbers.
+    let mut heading_lines: Vec<(usize, String)> = Vec::new(); // (1-based line, heading text)
+    for (i, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            let heading_text = trimmed.trim_start_matches('#').trim().to_string();
+            if !heading_text.is_empty() {
+                heading_lines.push((i + 1, heading_text));
+            }
+        }
+    }
+
+    // Inject data-source-line on heading tags (h1-h6) by matching heading text
+    let mut result = html;
+    for (line_num, _heading_text) in heading_lines.iter().rev() {
+        // Match <h1>, <h2>, etc. tags and add data-source-line attribute
+        for level in 1..=6 {
+            let open_tag = format!("<h{}", level);
+            let replacement = format!("<h{} data-source-line=\"{}\"", level, line_num);
+            // Only replace the first occurrence that doesn't already have the attribute
+            if let Some(pos) = result.find(&open_tag) {
+                let after = &result[pos..];
+                if !after[open_tag.len()..].starts_with(" data-source-line") {
+                    result = format!(
+                        "{}{}{}",
+                        &result[..pos],
+                        replacement,
+                        &result[pos + open_tag.len()..]
+                    );
+                    break;
+                }
+            }
+        }
+    }
+    result
+}
+
+/// Render code with line IDs (`<span id="L1">`, `<span id="L2">`, etc.) for scroll-to-line support.
+fn render_code_with_line_ids(text: &str) -> String {
+    let mut result = String::new();
+    for (i, line) in text.split('\n').enumerate() {
+        let line_num = i + 1;
+        result.push_str(&format!(
+            "<span id=\"L{}\" class=\"code-line\">{}</span>\n",
+            line_num,
+            html_escape(line)
+        ));
+    }
+    result
 }
 
 /// Detect programming language from filename

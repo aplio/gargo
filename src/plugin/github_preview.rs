@@ -1,3 +1,5 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -19,6 +21,9 @@ pub struct GithubPreviewPlugin {
     last_active_rel_path: Option<String>,
     last_observed_file_sig: Option<ActiveFileSignature>,
     last_file_probe_at: Option<Instant>,
+    last_pushed_content_hash: u64,
+    last_pushed_cursor_line: usize,
+    last_content_push_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,6 +34,7 @@ struct ActiveFileSignature {
 }
 
 const EXTERNAL_CHANGE_POLL_INTERVAL: Duration = Duration::from_millis(600);
+const BUFFER_PUSH_INTERVAL: Duration = Duration::from_millis(300);
 
 impl GithubPreviewPlugin {
     pub fn new(config: &Config, project_root: &Path) -> Self {
@@ -55,6 +61,9 @@ impl GithubPreviewPlugin {
             last_active_rel_path: None,
             last_observed_file_sig: None,
             last_file_probe_at: None,
+            last_pushed_content_hash: 0,
+            last_pushed_cursor_line: 0,
+            last_content_push_at: None,
         }
     }
 
@@ -112,6 +121,64 @@ impl GithubPreviewPlugin {
         self.last_file_probe_at = Some(Instant::now());
     }
 
+    fn maybe_push_buffer_content(&mut self, ctx: &PluginContext) {
+        if !self.is_running || self.is_detached {
+            return;
+        }
+        if self.active_rel_path(ctx).is_none() {
+            return;
+        }
+        match self.last_content_push_at {
+            None => {
+                // First call — initialize the timer but don't push yet
+                self.last_content_push_at = Some(Instant::now());
+                return;
+            }
+            Some(last_push) if last_push.elapsed() < BUFFER_PUSH_INTERVAL => {
+                return;
+            }
+            _ => {}
+        }
+
+        let doc = ctx.editor().active_buffer();
+        let content = doc.rope.to_string();
+        let cursor_line = doc.cursor_line() + 1; // 1-based
+
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        let content_hash = hasher.finish();
+
+        if content_hash != self.last_pushed_content_hash {
+            // Content changed — push full content + cursor
+            self.last_pushed_content_hash = content_hash;
+            self.last_pushed_cursor_line = cursor_line;
+            self.last_content_push_at = Some(Instant::now());
+            if let Some(handle) = &self.handle {
+                let _ = handle.command_tx.send(
+                    GithubPreviewCommand::UpdateBufferContent {
+                        content,
+                        cursor_line,
+                    },
+                );
+            }
+        } else if cursor_line != self.last_pushed_cursor_line {
+            // Only cursor moved — send lightweight scroll event
+            self.last_pushed_cursor_line = cursor_line;
+            self.last_content_push_at = Some(Instant::now());
+            if let Some(handle) = &self.handle {
+                let _ = handle
+                    .command_tx
+                    .send(GithubPreviewCommand::UpdateCursorLine { line: cursor_line });
+            }
+        }
+    }
+
+    fn clear_buffer_push_state(&mut self) {
+        self.last_pushed_content_hash = 0;
+        self.last_pushed_cursor_line = 0;
+        self.last_content_push_at = None;
+    }
+
     fn maybe_refresh_on_external_change(&mut self, ctx: &PluginContext) {
         if !self.is_running || self.is_detached {
             return;
@@ -160,6 +227,7 @@ impl GithubPreviewPlugin {
         self.last_active_rel_path = rel_path.clone();
         self.is_detached = false;
         self.clear_external_change_probe_state();
+        self.clear_buffer_push_state();
         self.sync_active_path(rel_path.clone());
 
         Vec::new()
@@ -250,6 +318,7 @@ impl Plugin for GithubPreviewPlugin {
                     self.last_active_rel_path = rel_path.clone();
                     self.sync_active_path(rel_path.clone());
                     self.clear_external_change_probe_state();
+                    self.clear_buffer_push_state();
                     self.refresh_file_signature_baseline(ctx);
                     let url = Self::preview_url(port, rel_path.as_deref());
                     out.push(PluginOutput::Message(format!("GitHub preview: {}", url)));
@@ -262,6 +331,7 @@ impl Plugin for GithubPreviewPlugin {
                     self.is_running = false;
                     self.is_detached = false;
                     self.clear_external_change_probe_state();
+                    self.clear_buffer_push_state();
                     out.push(PluginOutput::Message(
                         "GitHub preview server stopped".to_string(),
                     ));
@@ -269,6 +339,7 @@ impl Plugin for GithubPreviewPlugin {
                 GithubPreviewEvent::Detached { requested_path } => {
                     self.is_detached = true;
                     self.clear_external_change_probe_state();
+                    self.clear_buffer_push_state();
                     out.push(PluginOutput::Message(format!(
                         "GitHub preview detached: {}",
                         requested_path
@@ -280,6 +351,7 @@ impl Plugin for GithubPreviewPlugin {
             }
         }
         self.maybe_refresh_on_external_change(ctx);
+        self.maybe_push_buffer_content(ctx);
         out
     }
 }
@@ -315,6 +387,9 @@ mod tests {
             last_active_rel_path: None,
             last_observed_file_sig: None,
             last_file_probe_at: None,
+            last_pushed_content_hash: 0,
+            last_pushed_cursor_line: 0,
+            last_content_push_at: None,
         };
         (plugin, command_rx, event_tx)
     }

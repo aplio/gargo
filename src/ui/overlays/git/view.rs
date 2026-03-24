@@ -22,11 +22,19 @@ pub struct GitViewIndexSnapshot {
     pub staged: Vec<GitFileEntry>,
 }
 
+pub struct RepoSection {
+    pub project_root: PathBuf,
+    pub display_name: String,
+    pub branch: String,
+    pub changed: Vec<GitFileEntry>,
+    pub staged: Vec<GitFileEntry>,
+}
+
 pub struct GitView {
+    /// Primary project root (for single-repo compat and the public accessor).
     project_root: PathBuf,
-    branch: String,
-    changed: Vec<GitFileEntry>,
-    staged: Vec<GitFileEntry>,
+    /// Per-repo data. Single-repo: len=1, multi-repo: len>1.
+    repos: Vec<RepoSection>,
     selected: usize,
     scroll_offset: usize,
     find_active: bool,
@@ -55,16 +63,33 @@ enum SectionKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionTarget {
-    ChangedHeader,
-    ChangedFile(usize),
-    StagedHeader,
-    StagedFile(usize),
+    RepoHeader(usize),
+    ChangedHeader(usize),
+    ChangedFile(usize, usize),
+    StagedHeader(usize),
+    StagedFile(usize, usize),
+}
+
+impl SelectionTarget {
+    fn repo_idx(&self) -> usize {
+        match self {
+            Self::RepoHeader(ri)
+            | Self::ChangedHeader(ri)
+            | Self::ChangedFile(ri, _)
+            | Self::StagedHeader(ri)
+            | Self::StagedFile(ri, _) => *ri,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SelectionAnchor {
-    Header(SectionKind),
-    File { path: String, staged: bool },
+    Header(usize, SectionKind),
+    File {
+        repo_idx: usize,
+        path: String,
+        staged: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -110,6 +135,32 @@ impl Default for GitView {
 impl GitView {
     pub fn project_root(&self) -> &Path {
         &self.project_root
+    }
+
+    pub fn is_multi_repo(&self) -> bool {
+        self.repos.len() > 1
+    }
+
+    /// Returns the repo root for the currently selected entry.
+    pub fn active_repo_root(&self) -> &Path {
+        if let Some(target) = self.selected_target() {
+            let repo_idx = target.repo_idx();
+            if let Some(section) = self.repos.get(repo_idx) {
+                return &section.project_root;
+            }
+        }
+        // Fallback: first repo or project_root
+        self.repos
+            .first()
+            .map(|s| s.project_root.as_path())
+            .unwrap_or(&self.project_root)
+    }
+
+    fn repo_root_for_target(&self, target: &SelectionTarget) -> &Path {
+        self.repos
+            .get(target.repo_idx())
+            .map(|s| s.project_root.as_path())
+            .unwrap_or(&self.project_root)
     }
 
     pub fn new(project_root: PathBuf) -> Self {
@@ -161,12 +212,22 @@ impl GitView {
                 Some(GIT_INDEX_LOADING_LABEL.to_string()),
             )
         };
-        let allow_sync_diff_fallback = diff_runtime_tx.is_none();
-        let mut view = Self {
-            project_root,
+        let display_name = project_root
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let repos = vec![RepoSection {
+            project_root: project_root.clone(),
+            display_name,
             branch,
             changed,
             staged,
+        }];
+        let allow_sync_diff_fallback = diff_runtime_tx.is_none();
+        let mut view = Self {
+            project_root,
+            repos,
             selected: 0,
             scroll_offset: 0,
             find_active: false,
@@ -191,27 +252,101 @@ impl GitView {
         view
     }
 
+    pub fn new_multi_repo(
+        project_root: PathBuf,
+        repo_sections: Vec<RepoSection>,
+        diff_runtime_tx: Option<mpsc::Sender<GitViewDiffCommand>>,
+        diff_cache_max_entries: usize,
+        diff_prefetch_radius: usize,
+    ) -> Self {
+        let allow_sync_diff_fallback = diff_runtime_tx.is_none();
+        let mut view = Self {
+            project_root,
+            repos: repo_sections,
+            selected: 0,
+            scroll_offset: 0,
+            find_active: false,
+            find_input: String::new(),
+            diff_state: DiffDisplayState::Idle,
+            diff_scroll: 0,
+            diff_horizontal_scroll: 0,
+            message: None,
+            diff_runtime_tx,
+            allow_sync_diff_fallback,
+            diff_cache: HashMap::new(),
+            diff_cache_order: VecDeque::new(),
+            diff_cache_max_entries,
+            diff_prefetch_radius,
+            pending_requests: HashMap::new(),
+            next_request_id: 1,
+            selected_diff_key: None,
+            selected_request_id: None,
+        };
+        view.selected = view.first_file_row().unwrap_or(0);
+        view.request_selected_diff();
+        view
+    }
+
     pub fn apply_index_snapshot(&mut self, snapshot: GitViewIndexSnapshot) {
-        self.branch = snapshot.branch;
-        self.apply_file_entries(snapshot.changed, snapshot.staged);
+        if let Some(section) = self.repos.first_mut() {
+            section.branch = snapshot.branch;
+        }
+        self.apply_file_entries(0, snapshot.changed, snapshot.staged);
         if self.message.as_deref() == Some(GIT_INDEX_LOADING_LABEL) {
             self.message = None;
         }
     }
 
+    pub fn apply_multi_index_snapshots(
+        &mut self,
+        snapshots: Vec<(PathBuf, GitViewIndexSnapshot)>,
+    ) {
+        for (repo_root, snapshot) in snapshots {
+            if let Some(section) = self
+                .repos
+                .iter_mut()
+                .find(|s| s.project_root == repo_root)
+            {
+                section.branch = snapshot.branch;
+                section.changed = snapshot.changed;
+                section.staged = snapshot.staged;
+            }
+        }
+        if self.message.as_deref() == Some(GIT_INDEX_LOADING_LABEL) {
+            self.message = None;
+        }
+        // Recalculate selection
+        let total_rows = self.selectable_row_count();
+        if total_rows == 0 {
+            self.selected = 0;
+        } else if self.selected >= total_rows {
+            self.selected = total_rows.saturating_sub(1);
+        }
+        self.request_selected_diff();
+    }
+
     #[cfg(test)]
     pub fn branch_name(&self) -> &str {
-        &self.branch
+        self.repos
+            .first()
+            .map(|s| s.branch.as_str())
+            .unwrap_or("???")
     }
 
     #[cfg(test)]
     pub fn changed_entries(&self) -> &[GitFileEntry] {
-        &self.changed
+        self.repos
+            .first()
+            .map(|s| s.changed.as_slice())
+            .unwrap_or(&[])
     }
 
     #[cfg(test)]
     pub fn staged_entries(&self) -> &[GitFileEntry] {
-        &self.staged
+        self.repos
+            .first()
+            .map(|s| s.staged.as_slice())
+            .unwrap_or(&[])
     }
 
     #[cfg(test)]
@@ -220,45 +355,74 @@ impl GitView {
     }
 
     fn selectable_row_count(&self) -> usize {
+        let multi = self.is_multi_repo();
         let mut count: usize = 0;
-        if !self.changed.is_empty() {
-            count = count.saturating_add(1 + self.changed.len());
-        }
-        if !self.staged.is_empty() {
-            count = count.saturating_add(1 + self.staged.len());
+        for section in &self.repos {
+            let has_entries = !section.changed.is_empty() || !section.staged.is_empty();
+            if !has_entries {
+                continue;
+            }
+            if multi {
+                count = count.saturating_add(1); // repo header
+            }
+            if !section.changed.is_empty() {
+                count = count.saturating_add(1 + section.changed.len());
+            }
+            if !section.staged.is_empty() {
+                count = count.saturating_add(1 + section.staged.len());
+            }
         }
         count
     }
 
     fn first_file_row(&self) -> Option<usize> {
-        if !self.changed.is_empty() || !self.staged.is_empty() {
-            Some(1)
-        } else {
-            None
+        let multi = self.is_multi_repo();
+        for section in &self.repos {
+            if !section.changed.is_empty() || !section.staged.is_empty() {
+                // First file row: after repo header (if multi) + section header
+                return Some(if multi { 2 } else { 1 });
+            }
         }
+        None
     }
 
     fn selection_target_at(&self, row: usize) -> Option<SelectionTarget> {
+        let multi = self.is_multi_repo();
         let mut offset = row;
 
-        if !self.changed.is_empty() {
-            if offset == 0 {
-                return Some(SelectionTarget::ChangedHeader);
+        for (repo_idx, section) in self.repos.iter().enumerate() {
+            let has_entries = !section.changed.is_empty() || !section.staged.is_empty();
+            if !has_entries {
+                continue;
             }
-            offset = offset.saturating_sub(1);
-            if offset < self.changed.len() {
-                return Some(SelectionTarget::ChangedFile(offset));
-            }
-            offset = offset.saturating_sub(self.changed.len());
-        }
 
-        if !self.staged.is_empty() {
-            if offset == 0 {
-                return Some(SelectionTarget::StagedHeader);
+            if multi {
+                if offset == 0 {
+                    return Some(SelectionTarget::RepoHeader(repo_idx));
+                }
+                offset = offset.saturating_sub(1);
             }
-            offset = offset.saturating_sub(1);
-            if offset < self.staged.len() {
-                return Some(SelectionTarget::StagedFile(offset));
+
+            if !section.changed.is_empty() {
+                if offset == 0 {
+                    return Some(SelectionTarget::ChangedHeader(repo_idx));
+                }
+                offset = offset.saturating_sub(1);
+                if offset < section.changed.len() {
+                    return Some(SelectionTarget::ChangedFile(repo_idx, offset));
+                }
+                offset = offset.saturating_sub(section.changed.len());
+            }
+
+            if !section.staged.is_empty() {
+                if offset == 0 {
+                    return Some(SelectionTarget::StagedHeader(repo_idx));
+                }
+                offset = offset.saturating_sub(1);
+                if offset < section.staged.len() {
+                    return Some(SelectionTarget::StagedFile(repo_idx, offset));
+                }
+                offset = offset.saturating_sub(section.staged.len());
             }
         }
 
@@ -274,62 +438,108 @@ impl GitView {
     }
 
     fn row_for_anchor(&self, anchor: &SelectionAnchor) -> Option<usize> {
-        match anchor {
-            SelectionAnchor::Header(SectionKind::Changed) => {
-                (!self.changed.is_empty()).then_some(0)
+        let multi = self.is_multi_repo();
+        let mut base = 0usize;
+
+        for (repo_idx, section) in self.repos.iter().enumerate() {
+            let has_entries = !section.changed.is_empty() || !section.staged.is_empty();
+            if !has_entries {
+                continue;
             }
-            SelectionAnchor::Header(SectionKind::Staged) => {
-                if self.staged.is_empty() {
-                    None
-                } else {
-                    Some(if self.changed.is_empty() {
-                        0
-                    } else {
-                        1 + self.changed.len()
-                    })
+
+            if multi {
+                base += 1; // repo header
+            }
+
+            match anchor {
+                SelectionAnchor::Header(ri, SectionKind::Changed) if *ri == repo_idx => {
+                    return (!section.changed.is_empty()).then_some(base);
                 }
-            }
-            SelectionAnchor::File { path, staged } => {
-                if *staged {
-                    let file_idx = self.staged.iter().position(|entry| entry.path == *path)?;
-                    let section_offset = if self.changed.is_empty() {
+                SelectionAnchor::Header(ri, SectionKind::Staged) if *ri == repo_idx => {
+                    if section.staged.is_empty() {
+                        return None;
+                    }
+                    let staged_offset = if section.changed.is_empty() {
                         0
                     } else {
-                        1 + self.changed.len()
+                        1 + section.changed.len()
                     };
-                    Some(section_offset + 1 + file_idx)
-                } else {
-                    let file_idx = self.changed.iter().position(|entry| entry.path == *path)?;
-                    Some(1 + file_idx)
+                    return Some(base + staged_offset);
                 }
+                SelectionAnchor::File {
+                    repo_idx: ri,
+                    path,
+                    staged,
+                } if *ri == repo_idx => {
+                    if *staged {
+                        let file_idx =
+                            section.staged.iter().position(|e| e.path == *path)?;
+                        let staged_offset = if section.changed.is_empty() {
+                            0
+                        } else {
+                            1 + section.changed.len()
+                        };
+                        return Some(base + staged_offset + 1 + file_idx);
+                    } else {
+                        let file_idx =
+                            section.changed.iter().position(|e| e.path == *path)?;
+                        return Some(base + 1 + file_idx);
+                    }
+                }
+                _ => {}
+            }
+
+            if !section.changed.is_empty() {
+                base += 1 + section.changed.len();
+            }
+            if !section.staged.is_empty() {
+                base += 1 + section.staged.len();
             }
         }
+        None
     }
 
     fn selected_anchor(&self) -> Option<SelectionAnchor> {
         match self.selected_target()? {
-            SelectionTarget::ChangedHeader => Some(SelectionAnchor::Header(SectionKind::Changed)),
-            SelectionTarget::StagedHeader => Some(SelectionAnchor::Header(SectionKind::Staged)),
-            SelectionTarget::ChangedFile(idx) => {
-                self.changed.get(idx).map(|entry| SelectionAnchor::File {
+            SelectionTarget::RepoHeader(_) => None,
+            SelectionTarget::ChangedHeader(ri) => {
+                Some(SelectionAnchor::Header(ri, SectionKind::Changed))
+            }
+            SelectionTarget::StagedHeader(ri) => {
+                Some(SelectionAnchor::Header(ri, SectionKind::Staged))
+            }
+            SelectionTarget::ChangedFile(ri, idx) => self
+                .repos
+                .get(ri)
+                .and_then(|s| s.changed.get(idx))
+                .map(|entry| SelectionAnchor::File {
+                    repo_idx: ri,
                     path: entry.path.clone(),
                     staged: false,
-                })
-            }
-            SelectionTarget::StagedFile(idx) => {
-                self.staged.get(idx).map(|entry| SelectionAnchor::File {
+                }),
+            SelectionTarget::StagedFile(ri, idx) => self
+                .repos
+                .get(ri)
+                .and_then(|s| s.staged.get(idx))
+                .map(|entry| SelectionAnchor::File {
+                    repo_idx: ri,
                     path: entry.path.clone(),
                     staged: true,
-                })
-            }
+                }),
         }
     }
 
     fn entry_for_target(&self, target: SelectionTarget) -> Option<&GitFileEntry> {
         match target {
-            SelectionTarget::ChangedFile(idx) => self.changed.get(idx),
-            SelectionTarget::StagedFile(idx) => self.staged.get(idx),
-            SelectionTarget::ChangedHeader | SelectionTarget::StagedHeader => None,
+            SelectionTarget::ChangedFile(ri, idx) => {
+                self.repos.get(ri).and_then(|s| s.changed.get(idx))
+            }
+            SelectionTarget::StagedFile(ri, idx) => {
+                self.repos.get(ri).and_then(|s| s.staged.get(idx))
+            }
+            SelectionTarget::RepoHeader(_)
+            | SelectionTarget::ChangedHeader(_)
+            | SelectionTarget::StagedHeader(_) => None,
         }
     }
 
@@ -352,13 +562,16 @@ impl GitView {
     }
 
     fn has_entry_for_key(&self, key: &DiffCacheKey) -> bool {
-        self.changed
-            .iter()
-            .any(|entry| entry.path == key.path && !key.staged)
-            || self
-                .staged
+        self.repos.iter().any(|section| {
+            section
+                .changed
                 .iter()
-                .any(|entry| entry.path == key.path && key.staged)
+                .any(|entry| entry.path == key.path && !key.staged)
+                || section
+                    .staged
+                    .iter()
+                    .any(|entry| entry.path == key.path && key.staged)
+        })
     }
 
     fn current_diff_lines(&self) -> Option<&[String]> {
@@ -423,14 +636,30 @@ impl GitView {
     }
 
     pub fn refresh(&mut self) {
-        let (changed, staged) = git::git_status_files_in(&self.project_root).unwrap_or_default();
-        self.apply_file_entries(changed, staged);
+        for section in &mut self.repos {
+            let (changed, staged) =
+                git::git_status_files_in(&section.project_root).unwrap_or_default();
+            section.changed = changed;
+            section.staged = staged;
+        }
+        self.after_file_entries_changed();
     }
 
-    fn apply_file_entries(&mut self, changed: Vec<GitFileEntry>, staged: Vec<GitFileEntry>) {
+    fn apply_file_entries(
+        &mut self,
+        repo_idx: usize,
+        changed: Vec<GitFileEntry>,
+        staged: Vec<GitFileEntry>,
+    ) {
+        if let Some(section) = self.repos.get_mut(repo_idx) {
+            section.changed = changed;
+            section.staged = staged;
+        }
+        self.after_file_entries_changed();
+    }
+
+    fn after_file_entries_changed(&mut self) {
         let prev_selected = self.selected_anchor();
-        self.changed = changed;
-        self.staged = staged;
         self.retain_cache_for_current_entries();
 
         let total_rows = self.selectable_row_count();
@@ -515,6 +744,20 @@ impl GitView {
         self.prefetch_neighbors();
     }
 
+    fn repo_root_for_entry_path(&self, path: &str, staged: bool) -> PathBuf {
+        for section in &self.repos {
+            let list = if staged {
+                &section.staged
+            } else {
+                &section.changed
+            };
+            if list.iter().any(|e| e.path == path) {
+                return section.project_root.clone();
+            }
+        }
+        self.project_root.clone()
+    }
+
     fn enqueue_diff_request(&mut self, key: DiffCacheKey, high_priority: bool) -> Option<u64> {
         if let Some(existing) = self.pending_requests.get(&key) {
             return Some(*existing);
@@ -524,9 +767,10 @@ impl GitView {
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
 
+        let project_root = self.repo_root_for_entry_path(&key.path, key.staged);
         let sent = tx.send(GitViewDiffCommand::RequestDiff {
             request_id,
-            project_root: self.project_root.clone(),
+            project_root,
             key: key.clone(),
             high_priority,
         });
@@ -577,7 +821,8 @@ impl GitView {
     }
 
     fn load_diff_sync(&mut self, key: &DiffCacheKey) {
-        match git::git_diff_in(&self.project_root, &key.path, key.staged) {
+        let repo_root = self.repo_root_for_entry_path(&key.path, key.staged);
+        match git::git_diff_in(&repo_root, &key.path, key.staged) {
             Ok(diff) => {
                 let lines: Vec<String> = diff.lines().map(|line| line.to_string()).collect();
                 self.cache_insert(key.clone(), CachedDiffEntry::Ready(lines.clone()));
@@ -592,16 +837,21 @@ impl GitView {
 
     fn retain_cache_for_current_entries(&mut self) {
         let valid: HashSet<DiffCacheKey> = self
-            .changed
+            .repos
             .iter()
-            .map(|entry| DiffCacheKey {
-                path: entry.path.clone(),
-                staged: false,
+            .flat_map(|section| {
+                section
+                    .changed
+                    .iter()
+                    .map(|entry| DiffCacheKey {
+                        path: entry.path.clone(),
+                        staged: false,
+                    })
+                    .chain(section.staged.iter().map(|entry| DiffCacheKey {
+                        path: entry.path.clone(),
+                        staged: true,
+                    }))
             })
-            .chain(self.staged.iter().map(|entry| DiffCacheKey {
-                path: entry.path.clone(),
-                staged: true,
-            }))
             .collect();
 
         self.diff_cache.retain(|key, _| valid.contains(key));
@@ -824,9 +1074,14 @@ impl GitView {
         }
     }
 
-    fn single_file_stage_or_unstage(&mut self, path: String, staged: bool) {
+    fn single_file_stage_or_unstage(&mut self, repo_idx: usize, path: String, staged: bool) {
+        let repo_root = self
+            .repos
+            .get(repo_idx)
+            .map(|s| s.project_root.clone())
+            .unwrap_or_else(|| self.project_root.clone());
         if staged {
-            match git::git_unstage_in(&self.project_root, &path) {
+            match git::git_unstage_in(&repo_root, &path) {
                 Ok(()) => self.message = Some(format!("Unstaged: {}", path)),
                 Err(e) => {
                     self.message = Some(e);
@@ -834,7 +1089,7 @@ impl GitView {
                 }
             }
         } else {
-            match git::git_stage_in(&self.project_root, &path) {
+            match git::git_stage_in(&repo_root, &path) {
                 Ok(()) => self.message = Some(format!("Staged: {}", path)),
                 Err(e) => {
                     self.message = Some(e);
@@ -871,8 +1126,11 @@ impl GitView {
         }
     }
 
-    fn stage_all_changed(&mut self) {
-        let paths: Vec<String> = self
+    fn stage_all_changed(&mut self, repo_idx: usize) {
+        let Some(section) = self.repos.get(repo_idx) else {
+            return;
+        };
+        let paths: Vec<String> = section
             .changed
             .iter()
             .map(|entry| entry.path.clone())
@@ -881,19 +1139,26 @@ impl GitView {
             self.message = Some("No changed files to stage".to_string());
             return;
         }
-        let result = git::git_stage_many_in(&self.project_root, &paths);
+        let result = git::git_stage_many_in(&section.project_root, &paths);
         self.invalidate_cache_for_paths(&paths);
         self.refresh();
         self.message = Some(Self::bulk_result_message("Staged", &result));
     }
 
-    fn unstage_all_staged(&mut self) {
-        let paths: Vec<String> = self.staged.iter().map(|entry| entry.path.clone()).collect();
+    fn unstage_all_staged(&mut self, repo_idx: usize) {
+        let Some(section) = self.repos.get(repo_idx) else {
+            return;
+        };
+        let paths: Vec<String> = section
+            .staged
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
         if paths.is_empty() {
             self.message = Some("No staged files to unstage".to_string());
             return;
         }
-        let result = git::git_unstage_many_in(&self.project_root, &paths);
+        let result = git::git_unstage_many_in(&section.project_root, &paths);
         self.invalidate_cache_for_paths(&paths);
         self.refresh();
         self.message = Some(Self::bulk_result_message("Unstaged", &result));
@@ -901,19 +1166,19 @@ impl GitView {
 
     fn stage_or_unstage(&mut self) {
         match self.selected_target() {
-            Some(SelectionTarget::ChangedHeader) => self.stage_all_changed(),
-            Some(SelectionTarget::StagedHeader) => self.unstage_all_staged(),
-            Some(SelectionTarget::ChangedFile(idx)) => {
-                if let Some(entry) = self.changed.get(idx) {
-                    self.single_file_stage_or_unstage(entry.path.clone(), false);
+            Some(SelectionTarget::ChangedHeader(ri)) => self.stage_all_changed(ri),
+            Some(SelectionTarget::StagedHeader(ri)) => self.unstage_all_staged(ri),
+            Some(SelectionTarget::ChangedFile(ri, idx)) => {
+                if let Some(entry) = self.repos.get(ri).and_then(|s| s.changed.get(idx)) {
+                    self.single_file_stage_or_unstage(ri, entry.path.clone(), false);
                 }
             }
-            Some(SelectionTarget::StagedFile(idx)) => {
-                if let Some(entry) = self.staged.get(idx) {
-                    self.single_file_stage_or_unstage(entry.path.clone(), true);
+            Some(SelectionTarget::StagedFile(ri, idx)) => {
+                if let Some(entry) = self.repos.get(ri).and_then(|s| s.staged.get(idx)) {
+                    self.single_file_stage_or_unstage(ri, entry.path.clone(), true);
                 }
             }
-            None => {}
+            Some(SelectionTarget::RepoHeader(_)) | None => {}
         }
     }
 
@@ -1075,12 +1340,29 @@ impl GitView {
                 EventResult::Consumed
             }
             KeyCode::Char('o') | KeyCode::Enter => {
-                if let Some(entry) = self.selected_entry() {
-                    let path = entry.path.clone();
-                    let line = self.first_changed_line_in_diff();
-                    EventResult::Action(Action::App(AppAction::Buffer(
-                        BufferAction::OpenFileFromGitView { path, line },
-                    )))
+                if let Some(target) = self.selected_target() {
+                    if let Some(entry) = self.entry_for_target(target) {
+                        let repo_root = self.repo_root_for_target(&target);
+                        let path = if self.is_multi_repo() {
+                            // In multi-repo mode, emit path relative to project_root
+                            // by joining repo display name + file path
+                            let repo_name = self
+                                .repos
+                                .get(target.repo_idx())
+                                .map(|s| s.display_name.as_str())
+                                .unwrap_or("");
+                            format!("{}/{}", repo_name, entry.path)
+                        } else {
+                            entry.path.clone()
+                        };
+                        let _ = repo_root; // used for context; path resolves via project_root
+                        let line = self.first_changed_line_in_diff();
+                        EventResult::Action(Action::App(AppAction::Buffer(
+                            BufferAction::OpenFileFromGitView { path, line },
+                        )))
+                    } else {
+                        EventResult::Consumed
+                    }
                 } else {
                     EventResult::Consumed
                 }
@@ -1128,10 +1410,11 @@ impl GitView {
     ) -> Option<(u16, u16)> {
         let inner_w = w.saturating_sub(2);
         let default_style = CellStyle::default();
+        let multi = self.is_multi_repo();
 
         // Layout:
         // row 0: top border
-        // row 1: branch name
+        // row 1: branch name (single-repo) or title (multi-repo)
         // row 2..h-2: file list content (with headers)
         // row h-2: message row
         // row h-1: bottom border
@@ -1142,32 +1425,50 @@ impl GitView {
 
         // Build flat display list: selectable headers + files
         let mut display_items: Vec<DisplayItem> = Vec::new();
-        if !self.changed.is_empty() {
-            let header_idx = display_items.len();
-            display_items.push(DisplayItem::Header(
-                format!("Changed ({})", self.changed.len()),
-                header_idx == self.selected,
-            ));
-            for entry in &self.changed {
-                let row_idx = display_items.len();
-                display_items.push(DisplayItem::File {
-                    label: format!(" {} {}", entry.status_char, entry.path),
-                    selected: row_idx == self.selected,
-                });
+        for section in &self.repos {
+            let has_entries = !section.changed.is_empty() || !section.staged.is_empty();
+            if !has_entries {
+                continue;
             }
-        }
-        if !self.staged.is_empty() {
-            let header_idx = display_items.len();
-            display_items.push(DisplayItem::Header(
-                format!("Staged ({})", self.staged.len()),
-                header_idx == self.selected,
-            ));
-            for entry in &self.staged {
+
+            if multi {
                 let row_idx = display_items.len();
-                display_items.push(DisplayItem::File {
-                    label: format!(" {} {}", entry.status_char, entry.path),
-                    selected: row_idx == self.selected,
-                });
+                display_items.push(DisplayItem::RepoHeader(
+                    format!(
+                        "\u{e0a0} {} ({})",
+                        section.display_name, section.branch
+                    ),
+                    row_idx == self.selected,
+                ));
+            }
+
+            if !section.changed.is_empty() {
+                let header_idx = display_items.len();
+                display_items.push(DisplayItem::Header(
+                    format!("Changed ({})", section.changed.len()),
+                    header_idx == self.selected,
+                ));
+                for entry in &section.changed {
+                    let row_idx = display_items.len();
+                    display_items.push(DisplayItem::File {
+                        label: format!(" {} {}", entry.status_char, entry.path),
+                        selected: row_idx == self.selected,
+                    });
+                }
+            }
+            if !section.staged.is_empty() {
+                let header_idx = display_items.len();
+                display_items.push(DisplayItem::Header(
+                    format!("Staged ({})", section.staged.len()),
+                    header_idx == self.selected,
+                ));
+                for entry in &section.staged {
+                    let row_idx = display_items.len();
+                    display_items.push(DisplayItem::File {
+                        label: format!(" {} {}", entry.status_char, entry.path),
+                        selected: row_idx == self.selected,
+                    });
+                }
             }
         }
 
@@ -1197,9 +1498,18 @@ impl GitView {
                 surface.fill_region(x + 1, y + row, inner_w, '\u{2500}', &default_style);
                 surface.put_str(x + 1 + inner_w, y + row, "\u{2518}", &default_style);
             } else if row == 1 {
-                // Branch row
+                // Branch row (single-repo) or title row (multi-repo)
                 surface.put_str(x, y + row, "\u{2502}", &default_style);
-                let branch_label = format!(" \u{e0a0} {}", self.branch);
+                let branch_label = if multi {
+                    format!(" Git Status ({} repos)", self.repos.len())
+                } else {
+                    let branch = self
+                        .repos
+                        .first()
+                        .map(|s| s.branch.as_str())
+                        .unwrap_or("???");
+                    format!(" \u{e0a0} {}", branch)
+                };
                 let branch_style = CellStyle {
                     bold: true,
                     fg: Some(Color::Cyan),
@@ -1254,6 +1564,33 @@ impl GitView {
 
                 if display_idx < display_items.len() {
                     match &display_items[display_idx] {
+                        DisplayItem::RepoHeader(label, selected) => {
+                            let header_style = if *selected {
+                                CellStyle {
+                                    bold: true,
+                                    reverse: true,
+                                    fg: Some(Color::Cyan),
+                                    ..CellStyle::default()
+                                }
+                            } else {
+                                CellStyle {
+                                    bold: true,
+                                    fg: Some(Color::Cyan),
+                                    ..CellStyle::default()
+                                }
+                            };
+                            let (truncated, used) = truncate_to_width(label, inner_w);
+                            surface.put_str(x + 1, y + row, truncated, &header_style);
+                            if used < inner_w {
+                                surface.fill_region(
+                                    x + 1 + used,
+                                    y + row,
+                                    inner_w - used,
+                                    ' ',
+                                    &header_style,
+                                );
+                            }
+                        }
                         DisplayItem::Header(label, selected) => {
                             let header_style = if *selected {
                                 CellStyle {
@@ -1419,6 +1756,7 @@ impl GitView {
 }
 
 enum DisplayItem {
+    RepoHeader(String, bool),
     Header(String, bool),
     File { label: String, selected: bool },
 }
@@ -1426,6 +1764,7 @@ enum DisplayItem {
 impl DisplayItem {
     fn is_selected(&self) -> bool {
         match self {
+            DisplayItem::RepoHeader(_, selected) => *selected,
             DisplayItem::Header(_, selected) => *selected,
             DisplayItem::File { selected, .. } => *selected,
         }
@@ -1485,23 +1824,27 @@ mod tests {
     fn test_view() -> GitView {
         GitView {
             project_root: PathBuf::from("."),
-            branch: "main".to_string(),
-            changed: vec![
-                GitFileEntry {
-                    path: "src/lib.rs".to_string(),
-                    status_char: 'M',
-                    staged: false,
-                },
-                GitFileEntry {
-                    path: "README.md".to_string(),
-                    status_char: 'M',
-                    staged: false,
-                },
-            ],
-            staged: vec![GitFileEntry {
-                path: "src/ui/explorer.rs".to_string(),
-                status_char: 'A',
-                staged: true,
+            repos: vec![RepoSection {
+                project_root: PathBuf::from("."),
+                display_name: "test".to_string(),
+                branch: "main".to_string(),
+                changed: vec![
+                    GitFileEntry {
+                        path: "src/lib.rs".to_string(),
+                        status_char: 'M',
+                        staged: false,
+                    },
+                    GitFileEntry {
+                        path: "README.md".to_string(),
+                        status_char: 'M',
+                        staged: false,
+                    },
+                ],
+                staged: vec![GitFileEntry {
+                    path: "src/ui/explorer.rs".to_string(),
+                    status_char: 'A',
+                    staged: true,
+                }],
             }],
             selected: 0,
             scroll_offset: 0,
@@ -1556,19 +1899,19 @@ mod tests {
     #[test]
     fn navigation_moves_across_headers_and_files() {
         let mut view = test_view();
-        assert_eq!(view.selected_target(), Some(SelectionTarget::ChangedHeader));
+        assert_eq!(view.selected_target(), Some(SelectionTarget::ChangedHeader(0)));
         view.handle_key(key(KeyCode::Char('j')));
         assert_eq!(
             view.selected_target(),
-            Some(SelectionTarget::ChangedFile(0))
+            Some(SelectionTarget::ChangedFile(0, 0))
         );
         view.handle_key(key(KeyCode::Char('j')));
         assert_eq!(
             view.selected_target(),
-            Some(SelectionTarget::ChangedFile(1))
+            Some(SelectionTarget::ChangedFile(0, 1))
         );
         view.handle_key(key(KeyCode::Char('j')));
-        assert_eq!(view.selected_target(), Some(SelectionTarget::StagedHeader));
+        assert_eq!(view.selected_target(), Some(SelectionTarget::StagedHeader(0)));
     }
 
     #[test]
@@ -1584,8 +1927,10 @@ mod tests {
     fn apply_file_entries_preserves_header_selection() {
         let mut view = test_view();
         view.selected = 3; // Staged header with current test data
-        view.apply_file_entries(view.changed.clone(), view.staged.clone());
-        assert_eq!(view.selected_target(), Some(SelectionTarget::StagedHeader));
+        let changed = view.repos[0].changed.clone();
+        let staged = view.repos[0].staged.clone();
+        view.apply_file_entries(0, changed, staged);
+        assert_eq!(view.selected_target(), Some(SelectionTarget::StagedHeader(0)));
     }
 
     #[test]

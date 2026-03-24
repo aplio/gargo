@@ -19,6 +19,7 @@ struct DirEntry {
     name: String,
     is_dir: bool,
     git_status: Option<GitFileStatus>,
+    is_repo_header: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,12 +145,14 @@ impl Explorer {
                         name,
                         is_dir: true,
                         git_status,
+                        is_repo_header: false,
                     });
                 } else {
                     files.push(DirEntry {
                         name,
                         is_dir: false,
                         git_status,
+                        is_repo_header: false,
                     });
                 }
             }
@@ -165,17 +168,65 @@ impl Explorer {
     }
 
     fn read_changed_entries(&mut self) {
-        let mut files: Vec<DirEntry> = self
-            .git_status_map
-            .iter()
-            .map(|(path, status)| DirEntry {
-                name: path.clone(),
-                is_dir: false,
-                git_status: Some(*status),
-            })
-            .collect();
-        sort_by_name_case_insensitive(&mut files, |entry| &entry.name);
-        self.entries.extend(files);
+        // Detect multi-repo: check if paths contain a "/" and group by first component
+        // Only treat as a repo group if the subdirectory contains a .git marker
+        let mut repo_groups: std::collections::BTreeMap<String, Vec<(String, GitFileStatus)>> =
+            std::collections::BTreeMap::new();
+        let mut ungrouped: Vec<(String, GitFileStatus)> = Vec::new();
+
+        for (path, status) in &self.git_status_map {
+            if let Some(slash_idx) = path.find('/') {
+                let repo_name = &path[..slash_idx];
+                let repo_dir = self.project_root.join(repo_name);
+                let dot_git = repo_dir.join(".git");
+                if dot_git.is_dir() || dot_git.is_file() {
+                    repo_groups
+                        .entry(repo_name.to_string())
+                        .or_default()
+                        .push((path.clone(), *status));
+                    continue;
+                }
+            }
+            ungrouped.push((path.clone(), *status));
+        }
+
+        let is_multi_repo = !repo_groups.is_empty() && ungrouped.is_empty();
+
+        if is_multi_repo {
+            for (repo_name, mut files) in repo_groups {
+                // Insert repo header
+                self.entries.push(DirEntry {
+                    name: repo_name.clone(),
+                    is_dir: true,
+                    git_status: None,
+                    is_repo_header: true,
+                });
+                sort_by_name_case_insensitive(&mut files, |(path, _)| path);
+                for (path, status) in files {
+                    self.entries.push(DirEntry {
+                        name: path,
+                        is_dir: false,
+                        git_status: Some(status),
+                        is_repo_header: false,
+                    });
+                }
+            }
+        } else {
+            // Single repo or mixed: flat list
+            let mut all_files: Vec<(String, GitFileStatus)> = ungrouped;
+            for (_, files) in repo_groups {
+                all_files.extend(files);
+            }
+            sort_by_name_case_insensitive(&mut all_files, |(path, _)| path);
+            for (path, status) in all_files {
+                self.entries.push(DirEntry {
+                    name: path,
+                    is_dir: false,
+                    git_status: Some(status),
+                    is_repo_header: false,
+                });
+            }
+        }
         self.visible_entries = (0..self.entries.len()).collect();
     }
 
@@ -644,6 +695,9 @@ impl Explorer {
         }
         let entry_idx = self.visible_entries[self.selected];
         let entry = &self.entries[entry_idx];
+        if entry.is_repo_header {
+            return EventResult::Consumed;
+        }
         if entry.is_dir {
             let new_dir = self.current_dir.join(&entry.name);
             self.current_dir = new_dir;
@@ -790,7 +844,9 @@ impl Explorer {
                 let is_selected = vis_idx == self.selected;
 
                 let prefix = if is_selected { "> " } else { "  " };
-                let display = if self.mode == ExplorerMode::ChangedOnly {
+                let display = if entry.is_repo_header {
+                    format!("{}\u{e0a0} {}/", prefix, entry.name)
+                } else if self.mode == ExplorerMode::ChangedOnly {
                     let status = entry.git_status.map_or(' ', |s| s.indicator());
                     format!("{}[{}] {}", prefix, status, entry.name)
                 } else {
@@ -798,7 +854,22 @@ impl Explorer {
                     format!("{}{}{}", prefix, entry.name, suffix)
                 };
 
-                let style = if is_selected {
+                let style = if entry.is_repo_header {
+                    if is_selected {
+                        CellStyle {
+                            bold: true,
+                            reverse: true,
+                            fg: Some(crossterm::style::Color::Cyan),
+                            ..CellStyle::default()
+                        }
+                    } else {
+                        CellStyle {
+                            bold: true,
+                            fg: Some(crossterm::style::Color::Cyan),
+                            ..CellStyle::default()
+                        }
+                    }
+                } else if is_selected {
                     CellStyle {
                         reverse: true,
                         fg: entry.git_status.map(|s| s.color()),

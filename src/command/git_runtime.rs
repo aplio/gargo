@@ -25,12 +25,17 @@ pub enum GitRuntimeCommand {
     ClearDocument {
         doc_id: DocumentId,
     },
+    RefreshMultiStatus {
+        repos: Vec<PathBuf>,
+        high_priority: bool,
+    },
     Shutdown,
 }
 
 #[derive(Debug)]
 pub enum GitRuntimeEvent {
     FileStatusMapUpdated(HashMap<String, GitFileStatus>),
+    MultiFileStatusMapUpdated(Vec<(PathBuf, HashMap<String, GitFileStatus>)>),
     DocumentGutterUpdated {
         doc_id: DocumentId,
         gutter: HashMap<usize, GitLineStatus>,
@@ -79,6 +84,11 @@ struct PendingStatusUpdate {
     due: Instant,
 }
 
+struct PendingMultiStatusUpdate {
+    repos: Vec<PathBuf>,
+    due: Instant,
+}
+
 struct PendingDocUpdate {
     doc_id: DocumentId,
     path: PathBuf,
@@ -90,6 +100,7 @@ struct GitRuntimeWorker {
     command_rx: mpsc::Receiver<GitRuntimeCommand>,
     event_tx: mpsc::Sender<GitRuntimeEvent>,
     pending_status: Option<PendingStatusUpdate>,
+    pending_multi_status: Option<PendingMultiStatusUpdate>,
     pending_docs: HashMap<DocumentId, PendingDocUpdate>,
     debounce: GitRuntimeDebounceConfig,
 }
@@ -104,6 +115,7 @@ impl GitRuntimeWorker {
             command_rx,
             event_tx,
             pending_status: None,
+            pending_multi_status: None,
             pending_docs: HashMap::new(),
             debounce,
         }
@@ -174,6 +186,22 @@ impl GitRuntimeWorker {
                     gutter: HashMap::new(),
                 });
             }
+            GitRuntimeCommand::RefreshMultiStatus {
+                repos,
+                high_priority,
+            } => {
+                let due = Instant::now() + self.debounce_duration(high_priority);
+                match &mut self.pending_multi_status {
+                    Some(pending) => {
+                        pending.repos = repos;
+                        pending.due = pending.due.min(due);
+                    }
+                    None => {
+                        self.pending_multi_status =
+                            Some(PendingMultiStatusUpdate { repos, due });
+                    }
+                }
+            }
             GitRuntimeCommand::Shutdown => {}
         }
     }
@@ -191,6 +219,25 @@ impl GitRuntimeWorker {
             let _ = self
                 .event_tx
                 .send(GitRuntimeEvent::FileStatusMapUpdated(map));
+        }
+
+        if self
+            .pending_multi_status
+            .as_ref()
+            .is_some_and(|pending| pending.due <= now)
+        {
+            let pending = self.pending_multi_status.take().expect("checked above");
+            let results: Vec<(PathBuf, HashMap<String, GitFileStatus>)> = pending
+                .repos
+                .into_iter()
+                .map(|repo| {
+                    let map = git_backend::status_map(&repo);
+                    (repo, map)
+                })
+                .collect();
+            let _ = self
+                .event_tx
+                .send(GitRuntimeEvent::MultiFileStatusMapUpdated(results));
         }
 
         let ready_docs: Vec<DocumentId> = self
@@ -215,6 +262,13 @@ impl GitRuntimeWorker {
     fn next_timeout(&self) -> Duration {
         let now = Instant::now();
         let mut next_due: Option<Instant> = self.pending_status.as_ref().map(|s| s.due);
+
+        if let Some(multi) = &self.pending_multi_status {
+            next_due = Some(match next_due {
+                Some(existing) => existing.min(multi.due),
+                None => multi.due,
+            });
+        }
 
         for pending in self.pending_docs.values() {
             next_due = Some(match next_due {

@@ -26,6 +26,7 @@ pub struct GitIndexSnapshot {
 #[derive(Debug)]
 pub enum GitIndexRuntimeCommand {
     Refresh { project_root: PathBuf },
+    RefreshMulti { repos: Vec<PathBuf> },
     Shutdown,
 }
 
@@ -34,6 +35,9 @@ pub enum GitIndexRuntimeEvent {
     Ready {
         project_root: PathBuf,
         snapshot: GitIndexSnapshot,
+    },
+    MultiReady {
+        snapshots: Vec<(PathBuf, GitIndexSnapshot)>,
     },
 }
 
@@ -72,6 +76,7 @@ struct GitIndexRuntimeWorker {
     command_rx: mpsc::Receiver<GitIndexRuntimeCommand>,
     event_tx: mpsc::Sender<GitIndexRuntimeEvent>,
     pending_project_root: Option<PathBuf>,
+    pending_multi_repos: Option<Vec<PathBuf>>,
 }
 
 impl GitIndexRuntimeWorker {
@@ -83,6 +88,7 @@ impl GitIndexRuntimeWorker {
             command_rx,
             event_tx,
             pending_project_root: None,
+            pending_multi_repos: None,
         }
     }
 
@@ -94,6 +100,11 @@ impl GitIndexRuntimeWorker {
             {
                 Ok(GitIndexRuntimeCommand::Refresh { project_root }) => {
                     self.pending_project_root = Some(project_root);
+                    self.pending_multi_repos = None;
+                }
+                Ok(GitIndexRuntimeCommand::RefreshMulti { repos }) => {
+                    self.pending_multi_repos = Some(repos);
+                    self.pending_project_root = None;
                 }
                 Ok(GitIndexRuntimeCommand::Shutdown) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -137,6 +148,31 @@ impl GitIndexRuntimeWorker {
                     },
                 });
             }
+
+            if let Some(repos) = self.pending_multi_repos.take() {
+                // Collect basic snapshots for all repos (skip branch previews
+                // to keep multi-repo responsive).
+                let snapshots: Vec<(PathBuf, GitIndexSnapshot)> = repos
+                    .into_iter()
+                    .map(|repo| {
+                        let branch =
+                            git::git_branch_in(&repo).unwrap_or_else(|_| "???".to_string());
+                        let (changed, staged) =
+                            git::git_status_files_in(&repo).unwrap_or_default();
+                        let snapshot = GitIndexSnapshot {
+                            branch,
+                            changed,
+                            staged,
+                            branches: Vec::new(),
+                            branches_ready: true,
+                        };
+                        (repo, snapshot)
+                    })
+                    .collect();
+                let _ = self
+                    .event_tx
+                    .send(GitIndexRuntimeEvent::MultiReady { snapshots });
+            }
         }
     }
 
@@ -148,6 +184,10 @@ impl GitIndexRuntimeWorker {
             match cmd {
                 GitIndexRuntimeCommand::Refresh { project_root } => {
                     latest = Some(project_root);
+                }
+                GitIndexRuntimeCommand::RefreshMulti { repos } => {
+                    self.pending_multi_repos = Some(repos);
+                    latest = None;
                 }
                 GitIndexRuntimeCommand::Shutdown => {
                     // Put it back isn't possible, so set pending and let the
@@ -260,6 +300,9 @@ mod tests {
                 assert!(snapshot.branches.is_empty());
                 assert!(!snapshot.branches_ready);
             }
+            GitIndexRuntimeEvent::MultiReady { .. } => {
+                panic!("unexpected MultiReady event");
+            }
         }
 
         // Second event: full snapshot including branch previews.
@@ -280,6 +323,9 @@ mod tests {
                         .any(|entry| entry.name == "feature/ui")
                 );
                 assert!(snapshot.branches_ready);
+            }
+            GitIndexRuntimeEvent::MultiReady { .. } => {
+                panic!("unexpected MultiReady event");
             }
         }
     }

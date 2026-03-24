@@ -62,6 +62,32 @@ pub fn collect_files(root: &Path) -> Vec<String> {
     collect_files_walk(root, root)
 }
 
+/// Discover git repos accessible from `project_root`.
+/// If `project_root` itself is a git repo, returns `vec![project_root]`.
+/// Otherwise scans one level of subdirectories for git repos.
+pub fn discover_sub_repos(project_root: &Path) -> Vec<PathBuf> {
+    if has_git_marker(project_root) {
+        return vec![project_root.to_path_buf()];
+    }
+    let entries = match std::fs::read_dir(project_root) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut repos: Vec<PathBuf> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() && has_git_marker(&path) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect();
+    repos.sort();
+    repos
+}
+
 fn has_git_marker(dir: &Path) -> bool {
     let dot_git = dir.join(".git");
     dot_git.is_dir() || dot_git.is_file()

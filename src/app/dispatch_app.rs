@@ -500,20 +500,76 @@ impl App {
                     .git_view_diff_runtime
                     .as_ref()
                     .map(|runtime| runtime.command_tx.clone());
-                let repo_root = self.active_buffer_repo_root();
-                let preloaded_index = (!self.git_index_loading
-                    || self.git_index_matches_root(&repo_root))
-                .then(|| self.git_view_index_snapshot_for_root(&repo_root))
-                .flatten();
-                let git_view = GitView::new_with_runtime_prefetched(
-                    repo_root,
-                    diff_runtime_tx,
-                    self.config.git.git_view_diff_cache_max_entries,
-                    self.config.git.git_view_diff_prefetch_radius,
-                    preloaded_index,
-                    false,
-                );
-                self.compositor.open_git_view(git_view);
+
+                if self.is_multi_repo() {
+                    // Build a multi-repo git view
+                    let sections: Vec<RepoSection> = if !self.git_multi_index_snapshots.is_empty() {
+                        self.git_multi_index_snapshots
+                            .iter()
+                            .map(|(repo_root, snapshot)| {
+                                let display_name = repo_root
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
+                                RepoSection {
+                                    project_root: repo_root.clone(),
+                                    display_name,
+                                    branch: snapshot.branch.clone(),
+                                    changed: snapshot.changed.clone(),
+                                    staged: snapshot.staged.clone(),
+                                }
+                            })
+                            .collect()
+                    } else {
+                        // No preloaded snapshots; collect synchronously
+                        self.discovered_repos
+                            .iter()
+                            .map(|repo_root| {
+                                let display_name = repo_root
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                                    .to_string();
+                                let branch = crate::command::git::git_branch_in(repo_root)
+                                    .unwrap_or_else(|_| "???".to_string());
+                                let (changed, staged) =
+                                    crate::command::git::git_status_files_in(repo_root)
+                                        .unwrap_or_default();
+                                RepoSection {
+                                    project_root: repo_root.clone(),
+                                    display_name,
+                                    branch,
+                                    changed,
+                                    staged,
+                                }
+                            })
+                            .collect()
+                    };
+                    let git_view = GitView::new_multi_repo(
+                        self.project_root.clone(),
+                        sections,
+                        diff_runtime_tx,
+                        self.config.git.git_view_diff_cache_max_entries,
+                        self.config.git.git_view_diff_prefetch_radius,
+                    );
+                    self.compositor.open_git_view(git_view);
+                } else {
+                    let repo_root = self.active_buffer_repo_root();
+                    let preloaded_index = (!self.git_index_loading
+                        || self.git_index_matches_root(&repo_root))
+                    .then(|| self.git_view_index_snapshot_for_root(&repo_root))
+                    .flatten();
+                    let git_view = GitView::new_with_runtime_prefetched(
+                        repo_root,
+                        diff_runtime_tx,
+                        self.config.git.git_view_diff_cache_max_entries,
+                        self.config.git.git_view_diff_prefetch_radius,
+                        preloaded_index,
+                        false,
+                    );
+                    self.compositor.open_git_view(git_view);
+                }
             }
             AppAction::Workspace(WorkspaceAction::OpenGitCommitMessageBuffer) => {
                 self.compositor.apply(UiAction::CloseGitView);

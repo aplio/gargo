@@ -49,7 +49,7 @@ use crate::ui::framework::component::{EventResult, RenderContext};
 use crate::ui::framework::compositor::Compositor;
 use crate::ui::overlays::explorer::popup::ExplorerPopup;
 use crate::ui::overlays::explorer::sidebar::Explorer;
-use crate::ui::overlays::git::view::{GitView, GitViewIndexSnapshot};
+use crate::ui::overlays::git::view::{GitView, GitViewIndexSnapshot, RepoSection};
 use crate::ui::overlays::palette::Palette;
 use crate::ui::overlays::palette::{
     GitBranchPickerEntry, JumpPickerEntry, ReferencePickerEntry, SmartCopyPickerEntry,
@@ -127,8 +127,10 @@ pub struct App {
     last_explorer_selected: Option<String>,
     close_confirm: bool,
     git_status_cache: HashMap<String, GitFileStatus>,
+    discovered_repos: Vec<PathBuf>,
     git_index_snapshot: GitIndexSnapshot,
     git_index_snapshot_root: Option<PathBuf>,
+    git_multi_index_snapshots: Vec<(PathBuf, GitIndexSnapshot)>,
     git_index_loading: bool,
     git_index_loading_root: Option<PathBuf>,
     git_index_requested_for_root: bool,
@@ -178,6 +180,7 @@ impl App {
         );
 
         let git_status_cache = HashMap::new();
+        let discovered_repos = crate::project::discover_sub_repos(&project_root);
         let git_runtime = Self::build_git_runtime(&config).ok();
         let git_view_diff_runtime = Self::build_git_view_diff_runtime().ok();
         let commit_log_runtime = Self::build_commit_log_runtime().ok();
@@ -200,7 +203,9 @@ impl App {
             last_explorer_selected: None,
             close_confirm: false,
             git_status_cache,
+            discovered_repos,
             git_index_snapshot: GitIndexSnapshot::default(),
+            git_multi_index_snapshots: Vec::new(),
             git_index_snapshot_root: None,
             git_index_loading: false,
             git_index_loading_root: None,
@@ -313,14 +318,25 @@ impl App {
         path_is_within_project_root(&self.project_root, path)
     }
 
+    fn is_multi_repo(&self) -> bool {
+        self.discovered_repos.len() > 1
+    }
+
     fn queue_git_status_refresh(&self, high_priority: bool) {
         let Some(runtime) = &self.git_runtime else {
             return;
         };
-        let _ = runtime.command_tx.send(GitRuntimeCommand::RefreshStatus {
-            project_root: self.active_buffer_repo_root(),
-            high_priority,
-        });
+        if self.is_multi_repo() {
+            let _ = runtime.command_tx.send(GitRuntimeCommand::RefreshMultiStatus {
+                repos: self.discovered_repos.clone(),
+                high_priority,
+            });
+        } else {
+            let _ = runtime.command_tx.send(GitRuntimeCommand::RefreshStatus {
+                project_root: self.active_buffer_repo_root(),
+                high_priority,
+            });
+        }
     }
 
     fn queue_active_doc_git_refresh(&self, high_priority: bool) {
@@ -389,6 +405,36 @@ impl App {
 
     fn queue_git_index_refresh(&mut self) {
         self.git_index_requested_for_root = true;
+
+        if self.is_multi_repo() {
+            let Some(runtime) = &self.git_index_runtime else {
+                // Synchronous fallback for multi-repo
+                self.git_multi_index_snapshots = self
+                    .discovered_repos
+                    .iter()
+                    .map(|r| (r.clone(), collect_git_index_snapshot(r)))
+                    .collect();
+                self.git_index_loading = false;
+                self.git_index_loading_root = None;
+                self.refresh_git_index_consumers();
+                return;
+            };
+            self.git_index_loading = true;
+            self.git_index_loading_root = Some(self.project_root.clone());
+            if runtime
+                .command_tx
+                .send(GitIndexRuntimeCommand::RefreshMulti {
+                    repos: self.discovered_repos.clone(),
+                })
+                .is_err()
+            {
+                self.git_index_loading = false;
+                self.git_index_loading_root = None;
+                self.git_index_requested_for_root = false;
+            }
+            return;
+        }
+
         let repo_root = self.active_buffer_repo_root();
         let Some(runtime) = &self.git_index_runtime else {
             self.git_index_snapshot = collect_git_index_snapshot(&repo_root);
@@ -429,12 +475,17 @@ impl App {
         self.git_index_requested_for_root = true;
         self.git_index_loading = true;
         self.git_index_loading_root = Some(self.project_root.clone());
-        if command_tx
-            .send(GitIndexRuntimeCommand::Refresh {
+
+        let cmd = if self.is_multi_repo() {
+            GitIndexRuntimeCommand::RefreshMulti {
+                repos: self.discovered_repos.clone(),
+            }
+        } else {
+            GitIndexRuntimeCommand::Refresh {
                 project_root: self.project_root.clone(),
-            })
-            .is_err()
-        {
+            }
+        };
+        if command_tx.send(cmd).is_err() {
             self.git_index_loading = false;
             self.git_index_loading_root = None;
             self.git_index_requested_for_root = false;
@@ -442,6 +493,14 @@ impl App {
     }
 
     fn ensure_git_index_started_if_needed(&mut self) {
+        if self.is_multi_repo() {
+            // For multi-repo, check if we already have snapshots or are loading
+            if !self.git_multi_index_snapshots.is_empty() || self.git_index_loading {
+                return;
+            }
+            self.queue_git_index_refresh();
+            return;
+        }
         let repo_root = self.active_buffer_repo_root();
         if self.git_index_matches_root(&repo_root) || self.git_index_loading_for_root(&repo_root) {
             return;
@@ -461,15 +520,33 @@ impl App {
     }
 
     fn refresh_git_index_consumers(&mut self) {
+        // Prepare data before borrowing compositor mutably
         let snapshot = self.git_view_index_snapshot();
         let snapshot_root = self.git_index_snapshot_root.clone();
+        let multi_snapshots: Vec<(PathBuf, GitViewIndexSnapshot)> = self
+            .git_multi_index_snapshots
+            .iter()
+            .map(|(root, snap)| {
+                (
+                    root.clone(),
+                    GitViewIndexSnapshot {
+                        branch: snap.branch.clone(),
+                        changed: snap.changed.clone(),
+                        staged: snap.staged.clone(),
+                    },
+                )
+            })
+            .collect();
+
+        if let Some(git_view) = self.compositor.git_view_mut() {
+            if git_view.is_multi_repo() && !multi_snapshots.is_empty() {
+                git_view.apply_multi_index_snapshots(multi_snapshots);
+            } else if snapshot_root.as_deref() == Some(git_view.project_root()) {
+                git_view.apply_index_snapshot(snapshot);
+            }
+        }
         let active_repo_root = self.active_buffer_repo_root();
         let branch_entries = self.git_branch_picker_entries_for_root(&active_repo_root);
-        if let Some(git_view) = self.compositor.git_view_mut()
-            && snapshot_root.as_deref() == Some(git_view.project_root())
-        {
-            git_view.apply_index_snapshot(snapshot.clone());
-        }
         if let Some(palette) = self.compositor.palette_mut() {
             palette.set_git_branch_entries(branch_entries);
         }
@@ -501,6 +578,13 @@ impl App {
                         self.git_index_loading_root = Some(project_root.clone());
                     }
                     self.git_index_loading = self.git_index_loading_root.is_some();
+                    self.git_index_requested_for_root = true;
+                    updated = true;
+                }
+                GitIndexRuntimeEvent::MultiReady { snapshots } => {
+                    self.git_multi_index_snapshots = snapshots;
+                    self.git_index_loading = false;
+                    self.git_index_loading_root = None;
                     self.git_index_requested_for_root = true;
                     updated = true;
                 }
@@ -655,6 +739,30 @@ impl App {
             match event {
                 GitRuntimeEvent::FileStatusMapUpdated(map) => {
                     self.git_status_cache = map;
+                    if let Some(explorer) = self.compositor.explorer_mut() {
+                        explorer.set_git_status_map(&self.git_status_cache);
+                    }
+                    if let Some(popup) = self.compositor.explorer_popup_mut() {
+                        popup.set_git_status_map(&self.git_status_cache);
+                    }
+                    if let Some(palette) = self.compositor.palette_mut() {
+                        palette.set_git_status_map(&self.git_status_cache);
+                    }
+                    should_refresh_git_index = true;
+                }
+                GitRuntimeEvent::MultiFileStatusMapUpdated(repo_maps) => {
+                    self.git_status_cache.clear();
+                    for (repo_root, map) in repo_maps {
+                        let repo_name = repo_root
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        for (path, status) in map {
+                            let key = format!("{}/{}", repo_name, path);
+                            self.git_status_cache.insert(key, status);
+                        }
+                    }
                     if let Some(explorer) = self.compositor.explorer_mut() {
                         explorer.set_git_status_map(&self.git_status_cache);
                     }
@@ -2190,6 +2298,8 @@ impl App {
         }
 
         self.project_root = new_root;
+        self.discovered_repos = crate::project::discover_sub_repos(&self.project_root);
+        self.git_multi_index_snapshots.clear();
         self.command_history = Rc::new(CommandHistory::new(&self.project_root));
         self.refresh_file_index_for_current_root();
         self.refresh_git_index_for_current_root();

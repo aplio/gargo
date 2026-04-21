@@ -114,6 +114,22 @@ impl LanguageRegistry {
                 extensions: &["diff", "patch"],
             },
             LanguageDef {
+                name: "Java",
+                language_fn: tree_sitter_java::LANGUAGE,
+                highlight_query: tree_sitter_java::HIGHLIGHTS_QUERY,
+                indent_query: None,
+                tags_query: Some(tree_sitter_java::TAGS_QUERY),
+                extensions: &["java"],
+            },
+            LanguageDef {
+                name: "PHP",
+                language_fn: tree_sitter_php::LANGUAGE_PHP,
+                highlight_query: tree_sitter_php::HIGHLIGHTS_QUERY,
+                indent_query: None,
+                tags_query: Some(tree_sitter_php::TAGS_QUERY),
+                extensions: &["php", "phtml"],
+            },
+            LanguageDef {
                 name: "Markdown",
                 language_fn: tree_sitter_md::LANGUAGE,
                 highlight_query: tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
@@ -168,6 +184,22 @@ mod tests {
         let reg = LanguageRegistry::new();
         let lang = reg.detect_by_extension("Cargo.toml").unwrap();
         assert_eq!(lang.name, "TOML");
+    }
+
+    #[test]
+    fn detect_java() {
+        let reg = LanguageRegistry::new();
+        let lang = reg.detect_by_extension("Main.java").unwrap();
+        assert_eq!(lang.name, "Java");
+    }
+
+    #[test]
+    fn detect_php() {
+        let reg = LanguageRegistry::new();
+        let lang = reg.detect_by_extension("index.php").unwrap();
+        assert_eq!(lang.name, "PHP");
+        let lang = reg.detect_by_extension("page.phtml").unwrap();
+        assert_eq!(lang.name, "PHP");
     }
 
     #[test]

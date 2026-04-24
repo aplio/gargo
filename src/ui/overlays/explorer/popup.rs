@@ -115,21 +115,31 @@ const TREE_INDENT_STEP: usize = 2;
 const TREE_MIN_LABEL_COLUMNS: usize = 6;
 
 impl ExplorerPopup {
-    pub fn new(root: PathBuf, git_status_map: &HashMap<String, GitFileStatus>) -> Self {
-        Self::new_with_mode(root, git_status_map, ExplorerPopupMode::OpenFiles)
+    pub fn new(
+        root: PathBuf,
+        git_status_map: &HashMap<String, GitFileStatus>,
+        reveal: Option<&Path>,
+    ) -> Self {
+        Self::new_with_mode(root, git_status_map, ExplorerPopupMode::OpenFiles, reveal)
     }
 
     pub fn new_for_project_root(
         root: PathBuf,
         git_status_map: &HashMap<String, GitFileStatus>,
     ) -> Self {
-        Self::new_with_mode(root, git_status_map, ExplorerPopupMode::SelectProjectRoot)
+        Self::new_with_mode(
+            root,
+            git_status_map,
+            ExplorerPopupMode::SelectProjectRoot,
+            None,
+        )
     }
 
     fn new_with_mode(
         root: PathBuf,
         git_status_map: &HashMap<String, GitFileStatus>,
         mode: ExplorerPopupMode,
+        reveal: Option<&Path>,
     ) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<PreviewRequest>();
         let (res_tx, res_rx) = mpsc::channel::<PreviewResult>();
@@ -164,9 +174,32 @@ impl ExplorerPopup {
             current_preview_path: None,
             git_status_map: git_status_map.clone(),
         };
+        if let Some(target) = reveal {
+            popup.expand_ancestors_of(target);
+        }
         popup.rebuild_entries();
+        if let Some(target) = reveal {
+            popup.select_by_path(target);
+        }
         popup.update_preview();
         popup
+    }
+
+    /// Mark every ancestor directory of `target` (up to but not including the
+    /// popup root) as expanded so the subsequent `rebuild_entries` walk emits
+    /// the path down to `target`. A no-op when `target` lives outside the root.
+    fn expand_ancestors_of(&mut self, target: &Path) {
+        let Ok(rel) = target.strip_prefix(&self.root) else {
+            return;
+        };
+        let mut current = self.root.clone();
+        for component in rel.components() {
+            current = current.join(component);
+            if current == *target {
+                break;
+            }
+            self.expanded_dirs.insert(current.clone());
+        }
     }
 
     fn rebuild_entries(&mut self) {
@@ -1437,6 +1470,28 @@ mod tests {
         assert_eq!(popup.entries[1].name, "bbb.txt");
         assert!(!popup.entries[2].is_dir);
         assert_eq!(popup.entries[2].name, "ccc.rs");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn reveal_expands_ancestors_and_selects_file() {
+        let dir = setup("reveal");
+        let mut popup = ExplorerPopup::new_without_worker(dir.clone());
+        let target = dir.join("aaa_dir").join("inner.txt");
+
+        popup.expand_ancestors_of(&target);
+        popup.rebuild_entries();
+        popup.select_by_path(&target);
+
+        // aaa_dir is now expanded, so inner.txt appears between aaa_dir and bbb.txt.
+        assert_eq!(popup.entries.len(), 4);
+        assert_eq!(popup.entries[popup.selected].name, "inner.txt");
+        assert!(
+            popup.entries[popup.selected].path.ends_with("inner.txt"),
+            "selected path should be the revealed file, got {:?}",
+            popup.entries[popup.selected].path
+        );
 
         cleanup(&dir);
     }

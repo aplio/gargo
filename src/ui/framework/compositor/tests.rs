@@ -52,7 +52,7 @@ fn keys_fall_through_after_popup_closed() {
     let key_state = KeyState::Normal;
 
     let mut comp = Compositor::new();
-    comp.open_explorer_popup(ExplorerPopup::new(dir.clone(), &HashMap::new()));
+    comp.open_explorer_popup(ExplorerPopup::new(dir.clone(), &HashMap::new(), None));
 
     // Navigate to bbb.txt (index 1 — past the aaa_dir)
     let r = comp.handle_key(
@@ -111,7 +111,7 @@ fn popup_intercepts_all_keys() {
     let key_state = KeyState::Normal;
 
     let mut comp = Compositor::new();
-    comp.open_explorer_popup(ExplorerPopup::new(dir.clone(), &HashMap::new()));
+    comp.open_explorer_popup(ExplorerPopup::new(dir.clone(), &HashMap::new(), None));
 
     // Random keys should all be consumed or produce actions, never Ignored
     for code in [

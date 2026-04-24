@@ -481,7 +481,12 @@ impl App {
             }
             AppAction::Workspace(WorkspaceAction::OpenExplorerPopup) => {
                 self.queue_git_status_refresh(true);
-                let popup = ExplorerPopup::new(self.project_root.clone(), &self.git_status_cache);
+                let reveal = self.editor.active_buffer().file_path.clone();
+                let popup = ExplorerPopup::new(
+                    self.project_root.clone(),
+                    &self.git_status_cache,
+                    reveal.as_deref(),
+                );
                 self.compositor.open_explorer_popup(popup);
             }
             AppAction::Workspace(WorkspaceAction::OpenCommitLog) => {

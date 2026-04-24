@@ -158,6 +158,10 @@ pub struct App {
     last_term_cols: usize,
     last_term_rows: usize,
     expand_chain: Option<expand::ExpandChain>,
+    /// Anchor char position for an in-progress mouse drag selection. Set when
+    /// the left button goes down inside a buffer pane; consumed by
+    /// `Action::BufferDrag` events until the button is released.
+    drag_anchor: Option<(usize, usize)>,
 }
 
 impl App {
@@ -235,6 +239,7 @@ impl App {
             last_term_cols: 120,
             last_term_rows: 40,
             expand_chain: None,
+            drag_anchor: None,
         };
         app.start_lazy_file_index_prefetch_if_possible();
         app.start_git_index_prefetch_if_possible();
@@ -1854,6 +1859,14 @@ impl App {
                 screen_row,
             } => {
                 self.handle_buffer_click(buffer_id, screen_col, screen_row);
+                false
+            }
+            Action::BufferDrag {
+                buffer_id,
+                screen_col,
+                screen_row,
+            } => {
+                self.handle_buffer_drag(buffer_id, screen_col, screen_row);
                 false
             }
             Action::Noop => false,

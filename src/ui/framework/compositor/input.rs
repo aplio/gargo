@@ -252,6 +252,7 @@ impl Compositor {
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 self.mouse_drag = None;
+                self.text_drag = None;
                 if let Some(ref mut git_view) = self.git_view {
                     let result = git_view.handle_mouse_scroll(mouse.kind, cols, rows);
                     if !matches!(result, EventResult::Ignored) {
@@ -289,6 +290,7 @@ impl Compositor {
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 self.mouse_drag = None;
+                self.text_drag = None;
                 if self.has_modal_mouse_overlay() {
                     return EventResult::Ignored;
                 }
@@ -320,21 +322,33 @@ impl Compositor {
                         && row < p.rect.y + p.rect.height
                 });
                 match pane {
-                    Some(pane) => EventResult::Action(Action::BufferClick {
-                        buffer_id: pane.buffer_id,
-                        screen_col: mouse.column,
-                        screen_row: mouse.row,
-                    }),
+                    Some(pane) => {
+                        self.text_drag = Some(pane.buffer_id);
+                        EventResult::Action(Action::BufferClick {
+                            buffer_id: pane.buffer_id,
+                            screen_col: mouse.column,
+                            screen_row: mouse.row,
+                        })
+                    }
                     None => EventResult::Ignored,
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 if self.has_modal_mouse_overlay() {
                     self.mouse_drag = None;
+                    self.text_drag = None;
                     return EventResult::Ignored;
                 }
 
                 let Some(mut drag) = self.mouse_drag.take() else {
+                    // No divider drag in progress — check for a text-select drag.
+                    if let Some(buffer_id) = self.text_drag {
+                        return EventResult::Action(Action::BufferDrag {
+                            buffer_id,
+                            screen_col: mouse.column,
+                            screen_row: mouse.row,
+                        });
+                    }
                     return EventResult::Ignored;
                 };
 
@@ -371,7 +385,9 @@ impl Compositor {
                 EventResult::Consumed
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if self.mouse_drag.take().is_some() {
+                let was_divider_drag = self.mouse_drag.take().is_some();
+                let was_text_drag = self.text_drag.take().is_some();
+                if was_divider_drag || was_text_drag {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored

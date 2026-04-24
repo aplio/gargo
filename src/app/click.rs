@@ -54,6 +54,11 @@ impl App {
             return;
         };
 
+        // Seed the drag anchor for a potential drag-to-select gesture. Gutter
+        // clicks still record the line-start so dragging out into the content
+        // extends from there.
+        self.drag_anchor = Some((buffer_id, target.char_pos));
+
         let now = Instant::now();
         // Decide whether this click continues the current expand chain.
         let continues_chain = !switched
@@ -119,6 +124,66 @@ impl App {
                 last_click_pos: target.char_pos,
                 ..chain
             });
+        }
+    }
+
+    /// Extend selection from the drag anchor (seeded at mouse-down) to the
+    /// current pointer position. No-op until a buffer click has seeded the
+    /// anchor.
+    pub(super) fn handle_buffer_drag(
+        &mut self,
+        buffer_id: BufferId,
+        screen_col: u16,
+        screen_row: u16,
+    ) {
+        let Some((anchor_buffer, anchor_pos)) = self.drag_anchor else {
+            return;
+        };
+        if anchor_buffer != buffer_id {
+            return;
+        }
+
+        let cols = self.last_term_cols;
+        let rows = self.last_term_rows;
+        let Some(pane) = self.compositor.pane_at(screen_col, screen_row, cols, rows) else {
+            return;
+        };
+        if pane.buffer_id != buffer_id {
+            return;
+        }
+        if self.editor.active_buffer().id != buffer_id
+            && !self.editor.switch_to_buffer(buffer_id)
+        {
+            return;
+        }
+
+        let Some(target) = screen_to_doc_pos(
+            self.editor.active_buffer(),
+            pane.rect,
+            screen_col,
+            screen_row,
+            self.config.show_line_number,
+            self.config.line_number_width,
+        ) else {
+            return;
+        };
+
+        // Once the pointer has moved off the anchor, a drag selection starts.
+        // Any in-flight rapid-click expand chain is irrelevant here — clear it
+        // so the next click lands fresh.
+        self.expand_chain = None;
+
+        let head = target.char_pos;
+        let doc = self.editor.active_buffer_mut();
+        if head == anchor_pos {
+            doc.clear_anchor();
+            set_cursor_to_pos(doc, head);
+        } else {
+            // Selection keeps the mouse-down position as the anchor; `head`
+            // follows the pointer. `selection_range` normalises ordering,
+            // so this handles both forward and backward drags.
+            doc.selection = Some(Selection::tail_on_forward(anchor_pos, head));
+            set_cursor_to_pos(doc, head);
         }
     }
 }

@@ -93,6 +93,10 @@ pub struct Compositor {
     explorer: Option<Explorer>,
     command_helper: Option<CommandHelper>,
     mouse_drag: Option<MouseDividerDragState>,
+    /// Buffer id currently captured for a drag-to-select gesture. Set on left
+    /// mouse-down over a buffer pane; cleared on mouse-up. While `Some`, drag
+    /// motion events are forwarded to the dispatcher as `BufferDrag` actions.
+    text_drag: Option<BufferId>,
     window_manager: WindowManager,
     current: Surface,
     previous: Surface,
@@ -125,6 +129,7 @@ impl Compositor {
             explorer: None,
             command_helper: None,
             mouse_drag: None,
+            text_drag: None,
             window_manager: WindowManager::new(1),
             current: Surface::new(0, 0),
             previous: Surface::new(0, 0),

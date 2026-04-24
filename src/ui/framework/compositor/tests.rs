@@ -413,7 +413,12 @@ fn mouse_drag_non_divider_does_not_resize_windows() {
         start_col.saturating_add(4),
         start_row,
     ));
-    assert!(matches!(drag, EventResult::Ignored));
+    // Pane drag now emits a BufferDrag action (for text selection), but must
+    // never change the window layout.
+    assert!(matches!(
+        drag,
+        EventResult::Action(crate::input::action::Action::BufferDrag { .. })
+    ));
 
     let after = comp
         .window_layout_for_event_dims(80, 24)

@@ -15,6 +15,14 @@ pub enum Action {
         screen_col: u16,
         screen_row: u16,
     },
+    /// The pointer moved while the left button is held after a click landed in
+    /// a buffer pane. The dispatcher extends the selection from the original
+    /// click anchor to the current screen position.
+    BufferDrag {
+        buffer_id: usize,
+        screen_col: u16,
+        screen_row: u16,
+    },
     Noop,
 }
 

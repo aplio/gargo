@@ -242,7 +242,11 @@ fn test_github_preview_server_start_stop_and_mermaid_rendering() {
     let _lock = cwd_test_lock();
 
     let repo_dir = tempdir().expect("create temp repo");
-    let repo = repo_dir.path();
+    // Canonicalize because macOS tempdir lives under /var → /private/var; the
+    // preview server echoes whatever path is passed in, and this test later
+    // compares against `git rev-parse --show-toplevel`, which canonicalizes.
+    let canonical_repo = std::fs::canonicalize(repo_dir.path()).expect("canonicalize repo");
+    let repo = canonical_repo.as_path();
 
     // Initialize git repo
     run_git(repo, &["init"]);
@@ -399,7 +403,9 @@ fn test_github_preview_server_serves_tree_view() {
     let _lock = cwd_test_lock();
 
     let repo_dir = tempdir().expect("create temp repo");
-    let repo = repo_dir.path();
+    // Canonicalize — see comment in test_github_preview_server_start_stop_and_mermaid_rendering.
+    let canonical_repo = std::fs::canonicalize(repo_dir.path()).expect("canonicalize repo");
+    let repo = canonical_repo.as_path();
 
     // Initialize git repo
     run_git(repo, &["init"]);

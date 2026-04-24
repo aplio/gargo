@@ -1035,7 +1035,7 @@ async fn handle_blob(
         let bc = if st
             .active_rel_path
             .as_deref()
-            .map(|a| normalize_rel_path_for_compare(a))
+            .map(normalize_rel_path_for_compare)
             == Some(normalize_rel_path_for_compare(&path))
         {
             st.buffer_content.clone()
@@ -1067,7 +1067,7 @@ async fn handle_preview(
         let bc = if st
             .active_rel_path
             .as_deref()
-            .map(|a| normalize_rel_path_for_compare(a))
+            .map(normalize_rel_path_for_compare)
             == Some(normalize_rel_path_for_compare(&path))
         {
             st.buffer_content.clone()

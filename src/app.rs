@@ -2868,6 +2868,13 @@ mod tests {
         assert_eq!(args, vec!["https://example.com".to_string()]);
     }
 
+    /// Canonicalize a temp-dir path. On macOS `tempdir()` returns `/var/...`
+    /// but the app canonicalizes to `/private/var/...` internally — comparing
+    /// against the raw path would never match.
+    fn canonical(p: &Path) -> PathBuf {
+        std::fs::canonicalize(p).unwrap()
+    }
+
     fn repo_with_modified_file() -> (tempfile::TempDir, PathBuf) {
         let temp = tempdir().expect("create temp dir");
         run_git(temp.path(), &["init"]);
@@ -2883,7 +2890,8 @@ mod tests {
         run_git(temp.path(), &["commit", "-m", "init"]);
 
         fs::write(&file, "line1\nline2\n").expect("write modified file");
-        (temp, file)
+        let canonical_file = canonical(&file);
+        (temp, canonical_file)
     }
 
     fn drain_git_runtime_events(app: &App) -> Vec<GitRuntimeEvent> {
@@ -3122,7 +3130,7 @@ mod tests {
     fn home_screen_open_project_file_materializes_scratch() {
         let temp = tempdir().unwrap();
         fs::create_dir(temp.path().join(".git")).unwrap();
-        let file_path = temp.path().join("picked.txt");
+        let file_path = canonical(temp.path()).join("picked.txt");
         fs::write(&file_path, "hello").unwrap();
 
         let editor = Editor::new();
@@ -3339,8 +3347,9 @@ mod tests {
 
         let nested = temp.path().join("nested");
         fs::create_dir_all(&nested).expect("create nested dir");
-        let root_file = temp.path().join("root.txt");
-        fs::write(&root_file, "root-content\n").expect("write root file");
+        let root_file_raw = temp.path().join("root.txt");
+        fs::write(&root_file_raw, "root-content\n").expect("write root file");
+        let root_file = canonical(&root_file_raw);
 
         let mut config = Config::default();
         config.plugins.enabled.clear();
@@ -4809,10 +4818,11 @@ mod tests {
     fn jump_label_includes_word_under_cursor() {
         let temp = tempdir().unwrap();
         fs::create_dir(temp.path().join(".git")).unwrap();
+        let tmp_root = canonical(temp.path());
         let app = App::new(Editor::new(), Config::default(), Some(temp.path()));
         let location = JumpLocation {
             doc_id: 1,
-            file_path: Some(temp.path().join("src/main.rs")),
+            file_path: Some(tmp_root.join("src/main.rs")),
             cursor: 5,
             line: 0,
             char_col: 5,
@@ -4826,10 +4836,11 @@ mod tests {
     fn jump_label_omits_word_when_cursor_not_on_word_char() {
         let temp = tempdir().unwrap();
         fs::create_dir(temp.path().join(".git")).unwrap();
+        let tmp_root = canonical(temp.path());
         let app = App::new(Editor::new(), Config::default(), Some(temp.path()));
         let location = JumpLocation {
             doc_id: 1,
-            file_path: Some(temp.path().join("src/main.rs")),
+            file_path: Some(tmp_root.join("src/main.rs")),
             cursor: 3,
             line: 0,
             char_col: 3,

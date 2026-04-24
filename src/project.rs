@@ -167,10 +167,18 @@ mod tests {
         assert!(output.status.success());
     }
 
+    /// Canonicalize the tempdir path. On macOS `tempdir()` returns `/var/...`
+    /// but the project-root resolver canonicalizes to `/private/var/...`, so
+    /// assertions built from the raw tempdir path would never match.
+    fn canonical(p: &Path) -> PathBuf {
+        std::fs::canonicalize(p).unwrap()
+    }
+
     #[test]
     fn find_project_root_finds_git_from_nested_path() {
         let tmp = tempdir().unwrap();
-        let repo = tmp.path().join("repo");
+        let tmp_root = canonical(tmp.path());
+        let repo = tmp_root.join("repo");
         let nested = repo.join("a").join("b");
         std::fs::create_dir_all(&nested).unwrap();
         init_git_repo(&repo);
@@ -182,12 +190,13 @@ mod tests {
     #[test]
     fn find_project_root_with_non_git_arg_returns_explicit_directory() {
         let tmp = tempdir().unwrap();
-        let repo = tmp.path().join("cwd-repo");
+        let tmp_root = canonical(tmp.path());
+        let repo = tmp_root.join("cwd-repo");
         let cwd = repo.join("subdir");
         std::fs::create_dir_all(&cwd).unwrap();
         init_git_repo(&repo);
 
-        let non_git_arg = tmp.path().join("outside").join("a").join("b");
+        let non_git_arg = tmp_root.join("outside").join("a").join("b");
         std::fs::create_dir_all(&non_git_arg).unwrap();
 
         let root_with_arg = find_project_root_with_cwd(Some(&non_git_arg), &cwd);
@@ -199,7 +208,8 @@ mod tests {
     #[test]
     fn find_project_root_finds_git_from_file_path_parent_chain() {
         let tmp = tempdir().unwrap();
-        let repo = tmp.path().join("repo");
+        let tmp_root = canonical(tmp.path());
+        let repo = tmp_root.join("repo");
         let nested = repo.join("a").join("b");
         std::fs::create_dir_all(&nested).unwrap();
         init_git_repo(&repo);
@@ -214,9 +224,10 @@ mod tests {
     #[test]
     fn find_project_root_returns_explicit_file_parent_when_no_git_in_arg_chain() {
         let tmp = tempdir().unwrap();
-        let repo = tmp.path().join("cwd-repo");
+        let tmp_root = canonical(tmp.path());
+        let repo = tmp_root.join("cwd-repo");
         let cwd = repo.join("subdir");
-        let outside = tmp.path().join("outside").join("a");
+        let outside = tmp_root.join("outside").join("a");
         let file = outside.join("note.txt");
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
@@ -230,7 +241,8 @@ mod tests {
     #[test]
     fn find_project_root_resolves_relative_path_before_git_search() {
         let tmp = tempdir().unwrap();
-        let workspace = tmp.path().join("workspace");
+        let tmp_root = canonical(tmp.path());
+        let workspace = tmp_root.join("workspace");
         let repo_a = workspace.join("repo-a");
         let repo_b = workspace.join("repo-b");
         let cwd = repo_a.join("nested");

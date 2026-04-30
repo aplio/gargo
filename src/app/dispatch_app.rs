@@ -642,6 +642,11 @@ impl App {
                     }
                 }
             }
+            AppAction::Workspace(WorkspaceAction::OpenSearchResultsBuffer { query, entries }) => {
+                self.compositor.apply(UiAction::ClosePalette);
+                self.flush_insert_transaction_if_active();
+                self.open_search_results_scratch(&query, &entries);
+            }
             AppAction::Workspace(WorkspaceAction::OpenInEditorDiffView) => {
                 match self.open_in_editor_diff_view() {
                     Ok(()) => {
@@ -1084,6 +1089,12 @@ impl App {
                 {
                     return false;
                 }
+                if (id == "lsp.goto_definition" || id == "lsp.find_references")
+                    && self.is_active_search_results_buffer()
+                    && self.open_search_results_target_under_cursor()
+                {
+                    return false;
+                }
                 self.flush_insert_transaction_if_active();
                 let ctx = PluginContext::new(&self.editor, &self.project_root, &self.config);
                 let outputs = self.plugin_host.run_command(&id, &ctx);
@@ -1194,6 +1205,7 @@ impl App {
             }
         }
         self.prune_in_editor_diff_buffers();
+        self.prune_search_results_buffers();
         self.prune_git_commit_buffers();
         false
     }

@@ -222,6 +222,10 @@ pub enum WorkspaceAction {
     OpenBranchComparePicker,
     OpenBranchCompareView(String),
     OpenCommitDiffView(String),
+    OpenSearchResultsBuffer {
+        query: String,
+        entries: Vec<SearchResultEntry>,
+    },
     ExecuteFindReplace {
         find: String,
         replace: String,
@@ -237,6 +241,14 @@ pub enum WorkspaceAction {
     },
     SearchHistoryPrev,
     SearchHistoryNext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchResultEntry {
+    pub rel_path: String,
+    pub line: usize,
+    pub char_col: usize,
+    pub excerpt: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

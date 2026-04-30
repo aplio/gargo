@@ -263,6 +263,33 @@ impl Palette {
             })
     }
 
+    pub(super) fn search_result_entries_for_buffer(
+        &self,
+    ) -> Vec<crate::input::action::SearchResultEntry> {
+        self.global_search_entries
+            .iter()
+            .map(|entry| {
+                let excerpt = entry
+                    .preview_lines
+                    .get(1)
+                    .map(|s| {
+                        s.split_once('|')
+                            .map(|(_, right)| right.strip_prefix(' ').unwrap_or(right))
+                            .unwrap_or(s.as_str())
+                    })
+                    .unwrap_or("")
+                    .trim_end()
+                    .to_string();
+                crate::input::action::SearchResultEntry {
+                    rel_path: entry.rel_path.clone(),
+                    line: entry.line,
+                    char_col: entry.char_col,
+                    excerpt,
+                }
+            })
+            .collect()
+    }
+
     pub(super) fn selected_search_result(&self) -> Option<&GlobalSearchResultEntry> {
         self.candidates
             .get(self.selected)
@@ -412,6 +439,22 @@ impl Palette {
                     self.input.text,
                     self.candidates.len()
                 );
+                // Alt+Enter on global-search results dumps the full result set
+                // into a fresh scratch buffer instead of jumping to one match.
+                if self.mode == PaletteMode::GlobalSearch
+                    && key.modifiers.contains(KeyModifiers::ALT)
+                {
+                    if self.global_search_entries.is_empty() {
+                        return EventResult::Action(Action::Ui(UiAction::ClosePalette));
+                    }
+                    let entries = self.search_result_entries_for_buffer();
+                    return EventResult::Action(Action::App(AppAction::Workspace(
+                        WorkspaceAction::OpenSearchResultsBuffer {
+                            query: self.input.text.clone(),
+                            entries,
+                        },
+                    )));
+                }
                 // Determine action based on mode and selection
                 match self.mode {
                     PaletteMode::BufferPicker => {

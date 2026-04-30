@@ -181,6 +181,89 @@ fn global_search_enter_opens_selected_match() {
 }
 
 #[test]
+fn global_search_alt_enter_sends_results_to_buffer() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let registry = CommandRegistry::new();
+    let lang_registry = LanguageRegistry::new();
+    let config = Config::default();
+    let mut palette = Palette::new_global_search(vec![], Path::new(""), &HashMap::new());
+    palette.input.text = "let".to_string();
+
+    palette.global_search_entries = vec![
+        GlobalSearchResultEntry {
+            rel_path: "src/main.rs".to_string(),
+            line: 12,
+            char_col: 7,
+            preview_lines: vec![
+                "src/main.rs:13:8".to_string(),
+                "   13 | let x = 1;".to_string(),
+            ],
+        },
+        GlobalSearchResultEntry {
+            rel_path: "src/lib.rs".to_string(),
+            line: 0,
+            char_col: 4,
+            preview_lines: vec![
+                "src/lib.rs:1:5".to_string(),
+                "    1 | let y = 2;".to_string(),
+            ],
+        },
+    ];
+
+    let result = palette.handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        &registry,
+        &lang_registry,
+        &config,
+    );
+
+    let expected_entries = vec![
+        crate::input::action::SearchResultEntry {
+            rel_path: "src/main.rs".to_string(),
+            line: 12,
+            char_col: 7,
+            excerpt: "let x = 1;".to_string(),
+        },
+        crate::input::action::SearchResultEntry {
+            rel_path: "src/lib.rs".to_string(),
+            line: 0,
+            char_col: 4,
+            excerpt: "let y = 2;".to_string(),
+        },
+    ];
+    assert_eq!(
+        result,
+        EventResult::Action(Action::App(AppAction::Workspace(
+            WorkspaceAction::OpenSearchResultsBuffer {
+                query: "let".to_string(),
+                entries: expected_entries,
+            },
+        )))
+    );
+}
+
+#[test]
+fn global_search_alt_enter_with_no_results_closes_palette() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let registry = CommandRegistry::new();
+    let lang_registry = LanguageRegistry::new();
+    let config = Config::default();
+    let mut palette = Palette::new_global_search(vec![], Path::new(""), &HashMap::new());
+    palette.input.text = "nomatch".to_string();
+
+    let result = palette.handle_key_event(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+        &registry,
+        &lang_registry,
+        &config,
+    );
+
+    assert_eq!(result, EventResult::Action(Action::Ui(UiAction::ClosePalette)));
+}
+
+#[test]
 fn global_search_worker_error_updates_preview_message() {
     let mut palette = Palette::new_global_search(vec![], Path::new(""), &HashMap::new());
     let (tx, rx) = mpsc::channel::<GlobalSearchBatch>();

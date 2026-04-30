@@ -85,6 +85,17 @@ struct InEditorDiffBufferState {
     line_targets: HashMap<usize, DiffJumpTarget>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchResultsJumpTarget {
+    path: PathBuf,
+    line: usize,
+    char_col: usize,
+}
+
+struct SearchResultsBufferState {
+    line_targets: HashMap<usize, SearchResultsJumpTarget>,
+}
+
 struct GitCommitBufferState {
     project_root: PathBuf,
     commit_editmsg_path: PathBuf,
@@ -151,6 +162,7 @@ pub struct App {
     pending_edit_jump_locations: Vec<JumpLocation>,
     suspend_jump_recording: bool,
     in_editor_diff_buffers: HashMap<usize, InEditorDiffBufferState>,
+    search_results_buffers: HashMap<usize, SearchResultsBufferState>,
     git_commit_buffers: HashMap<usize, GitCommitBufferState>,
     home_screen_active: bool,
     home_screen_update_notice: Option<String>,
@@ -232,6 +244,7 @@ impl App {
             pending_edit_jump_locations: Vec::new(),
             suspend_jump_recording: false,
             in_editor_diff_buffers: HashMap::new(),
+            search_results_buffers: HashMap::new(),
             git_commit_buffers: HashMap::new(),
             home_screen_active,
             home_screen_update_notice,
@@ -1110,6 +1123,7 @@ impl App {
                     doc_id: self.editor.active_buffer().id,
                 });
                 self.prune_in_editor_diff_buffers();
+                self.prune_search_results_buffers();
                 self.prune_git_commit_buffers();
             }
             self.editor.message = None;
@@ -2068,6 +2082,92 @@ impl App {
         self.editor.mark_highlights_dirty();
     }
 
+    fn open_search_results_scratch(
+        &mut self,
+        query: &str,
+        entries: &[crate::input::action::SearchResultEntry],
+    ) {
+        let previous_buffer_id = self.editor.active_buffer().id;
+        if self.editor.active_buffer().file_path.is_some() {
+            self.editor.new_buffer();
+        }
+        self.materialize_scratch_from_home_if_needed();
+
+        let mut text = String::new();
+        text.push_str(&format!(
+            "Global search: {:?}  ({} matches)\n\n",
+            query,
+            entries.len()
+        ));
+        let header_lines = text.lines().count();
+        let mut line_targets: HashMap<usize, SearchResultsJumpTarget> = HashMap::new();
+        for (i, entry) in entries.iter().enumerate() {
+            text.push_str(&format!(
+                "{}:{}:{}: {}\n",
+                entry.rel_path,
+                entry.line + 1,
+                entry.char_col + 1,
+                entry.excerpt,
+            ));
+            line_targets.insert(
+                header_lines + i,
+                SearchResultsJumpTarget {
+                    path: self.project_root.join(&entry.rel_path),
+                    line: entry.line,
+                    char_col: entry.char_col,
+                },
+            );
+        }
+
+        {
+            let doc = self.editor.active_buffer_mut();
+            doc.rope = ropey::Rope::from_str(&text);
+            doc.cursors = vec![0];
+            doc.scroll_offset = 0;
+            doc.horizontal_scroll_offset = 0;
+            doc.selection = None;
+            doc.dirty = false;
+            doc.pending_edits.clear();
+            doc.history = crate::core::history::History::new();
+            doc.git_gutter.clear();
+        }
+        let active_id = self.editor.active_buffer().id;
+        self.search_results_buffers
+            .insert(active_id, SearchResultsBufferState { line_targets });
+        self.editor.mark_highlights_dirty();
+        if active_id != previous_buffer_id {
+            self.emit_plugin_event(PluginEvent::BufferActivated { doc_id: active_id });
+        } else {
+            self.emit_plugin_event(PluginEvent::BufferChanged { doc_id: active_id });
+        }
+        self.editor.message = Some(format!("Search results for {:?} sent to buffer", query));
+    }
+
+    fn is_active_search_results_buffer(&self) -> bool {
+        self.search_results_buffers
+            .contains_key(&self.editor.active_buffer().id)
+    }
+
+    fn open_search_results_target_under_cursor(&mut self) -> bool {
+        let buffer_id = self.editor.active_buffer().id;
+        let cursor_line = self.editor.active_buffer().cursor_line();
+        let target = self
+            .search_results_buffers
+            .get(&buffer_id)
+            .and_then(|state| state.line_targets.get(&cursor_line))
+            .cloned();
+        let Some(target) = target else {
+            return false;
+        };
+        self.open_file_at_char_location(&target.path, target.line, target.char_col);
+        true
+    }
+
+    fn prune_search_results_buffers(&mut self) {
+        self.search_results_buffers
+            .retain(|buffer_id, _| self.editor.buffer_by_id(*buffer_id).is_some());
+    }
+
     fn open_in_editor_diff_view(&mut self) -> Result<(), String> {
         let view = build_in_editor_diff_view(&self.project_root)?;
         let previous_buffer_id = self.editor.active_buffer().id;
@@ -2746,6 +2846,7 @@ fn app_action_refreshes_active_doc(action: &AppAction) -> bool {
             | AppAction::Project(ProjectAction::SwitchToRecentProject(_))
             | AppAction::Buffer(BufferAction::OpenProjectFileAt { .. })
             | AppAction::Workspace(WorkspaceAction::OpenInEditorDiffView)
+            | AppAction::Workspace(WorkspaceAction::OpenSearchResultsBuffer { .. })
             | AppAction::Workspace(WorkspaceAction::OpenGitCommitMessageBuffer)
             | AppAction::Buffer(BufferAction::SwitchBufferById(_))
             | AppAction::Navigation(NavigationAction::JumpOlder)
@@ -3699,6 +3800,133 @@ mod tests {
             },
         )));
 
+        assert!(app.editor.active_buffer().file_path.is_none());
+        assert_eq!(
+            app.editor.message.as_deref(),
+            Some("Unknown plugin command: lsp.goto_definition")
+        );
+    }
+
+    #[test]
+    fn gd_on_search_results_line_opens_file_at_target() {
+        let temp = tempdir().expect("temp dir");
+        let file = temp.path().join("hello.txt");
+        fs::write(&file, "alpha\nbeta\ngamma\n").expect("write file");
+
+        let mut config = Config::default();
+        config.plugins.enabled.clear();
+        let mut app = App::new(Editor::new(), config, Some(temp.path()));
+
+        let entries = vec![crate::input::action::SearchResultEntry {
+            rel_path: "hello.txt".to_string(),
+            line: 1,
+            char_col: 2,
+            excerpt: "beta".to_string(),
+        }];
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::OpenSearchResultsBuffer {
+                query: "beta".to_string(),
+                entries,
+            },
+        )));
+
+        // header is 2 lines ("Global search: ..." + blank), so result line is at index 2
+        app.editor.active_buffer_mut().set_cursor_line_char(2, 0);
+
+        app.dispatch(Action::App(AppAction::Integration(
+            IntegrationAction::RunPluginCommand {
+                id: "lsp.goto_definition".to_string(),
+            },
+        )));
+
+        let opened_path = app
+            .editor
+            .active_buffer()
+            .file_path
+            .as_ref()
+            .expect("gd should open the target file");
+        assert!(
+            opened_path.ends_with("hello.txt"),
+            "expected hello.txt, got {}",
+            opened_path.display()
+        );
+        assert_eq!(app.editor.active_buffer().cursor_line(), 1);
+    }
+
+    #[test]
+    fn gr_on_search_results_line_opens_file_at_target() {
+        let temp = tempdir().expect("temp dir");
+        let file = temp.path().join("foo.rs");
+        fs::write(&file, "fn one() {}\nfn two() {}\n").expect("write file");
+
+        let mut config = Config::default();
+        config.plugins.enabled.clear();
+        let mut app = App::new(Editor::new(), config, Some(temp.path()));
+
+        let entries = vec![crate::input::action::SearchResultEntry {
+            rel_path: "foo.rs".to_string(),
+            line: 1,
+            char_col: 3,
+            excerpt: "fn two() {}".to_string(),
+        }];
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::OpenSearchResultsBuffer {
+                query: "fn".to_string(),
+                entries,
+            },
+        )));
+
+        app.editor.active_buffer_mut().set_cursor_line_char(2, 0);
+
+        app.dispatch(Action::App(AppAction::Integration(
+            IntegrationAction::RunPluginCommand {
+                id: "lsp.find_references".to_string(),
+            },
+        )));
+
+        let opened_path = app
+            .editor
+            .active_buffer()
+            .file_path
+            .as_ref()
+            .expect("gr should open the target file");
+        assert!(
+            opened_path.ends_with("foo.rs"),
+            "expected foo.rs, got {}",
+            opened_path.display()
+        );
+        assert_eq!(app.editor.active_buffer().cursor_line(), 1);
+    }
+
+    #[test]
+    fn gd_on_search_results_header_falls_back_to_plugin() {
+        let temp = tempdir().expect("temp dir");
+        let mut config = Config::default();
+        config.plugins.enabled.clear();
+        let mut app = App::new(Editor::new(), config, Some(temp.path()));
+
+        let entries = vec![crate::input::action::SearchResultEntry {
+            rel_path: "hello.txt".to_string(),
+            line: 0,
+            char_col: 0,
+            excerpt: "x".to_string(),
+        }];
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::OpenSearchResultsBuffer {
+                query: "x".to_string(),
+                entries,
+            },
+        )));
+        // Cursor on header line — no jump target there
+        app.editor.active_buffer_mut().set_cursor_line_char(0, 0);
+
+        app.dispatch(Action::App(AppAction::Integration(
+            IntegrationAction::RunPluginCommand {
+                id: "lsp.goto_definition".to_string(),
+            },
+        )));
+
+        // Active buffer should still be the scratch (no file opened)
         assert!(app.editor.active_buffer().file_path.is_none());
         assert_eq!(
             app.editor.message.as_deref(),

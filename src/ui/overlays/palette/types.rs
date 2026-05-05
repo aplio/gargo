@@ -47,9 +47,16 @@ pub(super) struct PreviewResult {
 #[derive(Debug, Clone)]
 pub(super) struct GlobalSearchResultEntry {
     pub(super) rel_path: String,
+    pub(super) display_path: String,
     pub(super) line: usize,
     pub(super) char_col: usize,
     pub(super) preview_lines: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalSearchBufferSource {
+    pub path: PathBuf,
+    pub content: String,
 }
 
 #[derive(Debug, Clone)]
@@ -142,6 +149,7 @@ pub(super) struct GlobalSearchRequest {
 pub(super) struct GlobalSearchBatch {
     pub(super) generation: u64,
     pub(super) results: Vec<GlobalSearchResultEntry>,
+    pub(super) append: bool,
     pub(super) error: Option<String>,
 }
 

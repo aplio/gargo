@@ -1,14 +1,17 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::thread;
 
 use regex::{Regex, RegexBuilder};
 
 use crate::syntax::highlight::highlight_text;
 use crate::syntax::language::LanguageRegistry;
+use crate::ui::shared::filtering::fzf_style_match;
 
 use super::{
-    GlobalSearchBatch, GlobalSearchRequest, GlobalSearchResultEntry, PreviewRequest, PreviewResult,
+    GlobalSearchBatch, GlobalSearchBufferSource, GlobalSearchRequest, GlobalSearchResultEntry,
+    PreviewRequest, PreviewResult,
 };
 
 pub(super) const GLOBAL_SEARCH_DEBOUNCE_MS: u64 = 120;
@@ -98,6 +101,7 @@ pub(super) fn find_global_search_matches(
         let preview_lines = build_search_preview(&lines, line_idx);
         results.push(GlobalSearchResultEntry {
             rel_path: rel_path.to_string(),
+            display_path: rel_path.to_string(),
             line: line_idx,
             char_col,
             preview_lines: {
@@ -303,6 +307,7 @@ fn execute_global_search(
             return GlobalSearchBatch {
                 generation: req.generation,
                 results: Vec::new(),
+                append: false,
                 error: Some(err),
             };
         }
@@ -312,6 +317,7 @@ fn execute_global_search(
         return GlobalSearchBatch {
             generation: req.generation,
             results: Vec::new(),
+            append: false,
             error: None,
         };
     }
@@ -352,8 +358,90 @@ fn execute_global_search(
     GlobalSearchBatch {
         generation: req.generation,
         results,
+        append: false,
         error: None,
     }
+}
+
+fn current_file_fzf_results(
+    query: &str,
+    file_entries: &[String],
+    max_results: usize,
+) -> Vec<GlobalSearchResultEntry> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+
+    let mut scored: Vec<_> = file_entries
+        .iter()
+        .filter_map(|path| fzf_style_match(path, query).map(|(score, _)| (score, path)))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    scored
+        .into_iter()
+        .take(max_results)
+        .map(|(_, path)| GlobalSearchResultEntry {
+            rel_path: path.clone(),
+            display_path: path.clone(),
+            line: 0,
+            char_col: 0,
+            preview_lines: vec![format!("[files] {path}")],
+        })
+        .collect()
+}
+
+fn unsaved_buffer_results(
+    query: &str,
+    buffers: &[GlobalSearchBufferSource],
+    max_results: usize,
+) -> Vec<GlobalSearchResultEntry> {
+    let mut results = Vec::new();
+    if query.trim().is_empty() {
+        return results;
+    }
+    for buffer in buffers {
+        let path = buffer.path.to_string_lossy().to_string();
+        let remaining = max_results.saturating_sub(results.len());
+        if remaining == 0 {
+            break;
+        }
+        let mut entries = find_global_search_matches(&path, &buffer.content, query, remaining);
+        for entry in &mut entries {
+            entry.display_path = path.clone();
+            if let Some(first) = entry.preview_lines.first_mut() {
+                *first = format!(
+                    "[unsaved] {}:{}:{}",
+                    path,
+                    entry.line + 1,
+                    entry.char_col + 1
+                );
+            }
+        }
+        results.append(&mut entries);
+    }
+    results
+}
+
+fn current_content_results(
+    req: &GlobalSearchRequest,
+    project_root: &Path,
+    file_entries: &[String],
+    max_results: usize,
+) -> GlobalSearchBatch {
+    let mut batch = execute_global_search(req, project_root, file_entries);
+    batch.results.truncate(max_results);
+    for entry in &mut batch.results {
+        entry.display_path = entry.rel_path.clone();
+        if let Some(first) = entry.preview_lines.first_mut() {
+            *first = format!(
+                "[current] {}:{}:{}",
+                entry.rel_path,
+                entry.line + 1,
+                entry.char_col + 1
+            );
+        }
+    }
+    batch
 }
 
 pub(super) fn global_search_worker(
@@ -361,16 +449,113 @@ pub(super) fn global_search_worker(
     tx: mpsc::Sender<GlobalSearchBatch>,
     project_root: PathBuf,
     file_entries: Vec<String>,
+    unsaved_buffers: Vec<GlobalSearchBufferSource>,
 ) {
     while let Ok(mut req) = rx.recv() {
         while let Ok(next_req) = rx.try_recv() {
             req = next_req;
         }
 
-        let batch = execute_global_search(&req, &project_root, &file_entries);
-        if tx.send(batch).is_err() {
+        let parsed = match parse_global_search_request(&req.query, &project_root) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                let batch = GlobalSearchBatch {
+                    generation: req.generation,
+                    results: Vec::new(),
+                    append: false,
+                    error: Some(err),
+                };
+                if tx.send(batch).is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
+        let search_query = parsed.query.clone();
+
+        let mut initial = current_file_fzf_results(&search_query, &file_entries, 80);
+        let mut unsaved = unsaved_buffer_results(&search_query, &unsaved_buffers, 80);
+        initial.append(&mut unsaved);
+        if search_query.chars().count() >= 3 {
+            let mut current_batch =
+                current_content_results(&req, &project_root, &file_entries, 160);
+            if let Some(error) = current_batch.error.take() {
+                let batch = GlobalSearchBatch {
+                    generation: req.generation,
+                    results: Vec::new(),
+                    append: false,
+                    error: Some(error),
+                };
+                if tx.send(batch).is_err() {
+                    break;
+                }
+                continue;
+            }
+            initial.append(&mut current_batch.results);
+        }
+
+        if tx
+            .send(GlobalSearchBatch {
+                generation: req.generation,
+                results: initial,
+                append: false,
+                error: None,
+            })
+            .is_err()
+        {
             break;
         }
+
+        if search_query.chars().count() < 3 {
+            continue;
+        }
+
+        let current_canonical =
+            std::fs::canonicalize(&project_root).unwrap_or_else(|_| project_root.clone());
+        let repos: Vec<_> = crate::command::global_search_index::discover_recent_git_repos(200)
+            .into_iter()
+            .filter(|repo| repo.root != current_canonical)
+            .collect();
+        thread::scope(|scope| {
+            for repo in repos {
+                let query = search_query.clone();
+                let tx = tx.clone();
+                let generation = req.generation;
+                scope.spawn(move || {
+                    let hits = crate::command::global_search_index::search_repo(&repo, &query, 80);
+                    if hits.is_empty() {
+                        return;
+                    }
+                    let results = hits
+                        .into_iter()
+                        .map(|hit| {
+                            let full_path = hit.repo_root.join(&hit.rel_path);
+                            GlobalSearchResultEntry {
+                                rel_path: full_path.to_string_lossy().to_string(),
+                                display_path: hit.display_path.clone(),
+                                line: hit.line,
+                                char_col: hit.char_col,
+                                preview_lines: vec![
+                                    format!(
+                                        "[global] {}:{}:{}",
+                                        hit.display_path,
+                                        hit.line + 1,
+                                        hit.char_col + 1
+                                    ),
+                                    format!("{:>5} | {}", hit.line + 1, hit.excerpt),
+                                ],
+                            }
+                        })
+                        .collect();
+                    let _ = tx.send(GlobalSearchBatch {
+                        generation,
+                        results,
+                        append: true,
+                        error: None,
+                    });
+                });
+            }
+        });
     }
 }
 
@@ -536,5 +721,25 @@ mod tests {
         let batch = run_search(tmp.path(), &["src/lib.rs"], "--weird needle");
         assert!(batch.error.is_none());
         assert_eq!(batch.results.len(), 1);
+    }
+
+    #[test]
+    fn current_file_fzf_results_use_file_section() {
+        let results = current_file_fzf_results("main", &["src/main.rs".into()], 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].rel_path, "src/main.rs");
+        assert!(results[0].preview_lines[0].starts_with("[files]"));
+    }
+
+    #[test]
+    fn unsaved_buffer_results_search_memory_content() {
+        let buffer = GlobalSearchBufferSource {
+            path: PathBuf::from("/tmp/example.rs"),
+            content: "fn demo() {\n    let unsaved_needle = 1;\n}\n".to_string(),
+        };
+        let results = unsaved_buffer_results("unsaved_needle", &[buffer], 10);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].line, 1);
+        assert!(results[0].preview_lines[0].starts_with("[unsaved]"));
     }
 }

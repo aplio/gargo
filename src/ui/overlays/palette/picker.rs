@@ -99,6 +99,7 @@ pub struct Palette {
     reference_highlight_cache: HashMap<usize, HashMap<usize, Vec<HighlightSpan>>>,
     lang_registry_owned: Option<LanguageRegistry>,
     command_history: Option<Rc<CommandHistory>>,
+    global_search_unsaved_buffers: Vec<GlobalSearchBufferSource>,
     global_search_entries: Vec<GlobalSearchResultEntry>,
     global_search_request_tx: Option<mpsc::Sender<GlobalSearchRequest>>,
     global_search_result_rx: Option<mpsc::Receiver<GlobalSearchBatch>>,

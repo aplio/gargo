@@ -60,6 +60,7 @@ impl Palette {
             reference_highlight_cache: HashMap::new(),
             lang_registry_owned: None,
             command_history,
+            global_search_unsaved_buffers: Vec::new(),
             global_search_entries: Vec::new(),
             global_search_request_tx: None,
             global_search_result_rx: None,
@@ -118,6 +119,7 @@ impl Palette {
             reference_highlight_cache: HashMap::new(),
             lang_registry_owned: Some(LanguageRegistry::new()),
             command_history: None,
+            global_search_unsaved_buffers: Vec::new(),
             global_search_entries: Vec::new(),
             global_search_request_tx: None,
             global_search_result_rx: None,
@@ -189,6 +191,7 @@ impl Palette {
             reference_highlight_cache: HashMap::new(),
             lang_registry_owned: None,
             command_history: None,
+            global_search_unsaved_buffers: Vec::new(),
             global_search_entries: Vec::new(),
             global_search_request_tx: None,
             global_search_result_rx: None,
@@ -263,6 +266,7 @@ impl Palette {
             reference_highlight_cache: HashMap::new(),
             lang_registry_owned: None,
             command_history: None,
+            global_search_unsaved_buffers: Vec::new(),
             global_search_entries: Vec::new(),
             global_search_request_tx: None,
             global_search_result_rx: None,
@@ -336,6 +340,7 @@ impl Palette {
             reference_highlight_cache: HashMap::new(),
             lang_registry_owned: None,
             command_history: None,
+            global_search_unsaved_buffers: Vec::new(),
             global_search_entries: Vec::new(),
             global_search_request_tx: None,
             global_search_result_rx: None,
@@ -409,6 +414,7 @@ impl Palette {
             reference_highlight_cache: HashMap::new(),
             lang_registry_owned: None,
             command_history: None,
+            global_search_unsaved_buffers: Vec::new(),
             global_search_entries: Vec::new(),
             global_search_request_tx: None,
             global_search_result_rx: None,
@@ -480,6 +486,7 @@ impl Palette {
             reference_highlight_cache: HashMap::new(),
             lang_registry_owned: None,
             command_history: None,
+            global_search_unsaved_buffers: Vec::new(),
             global_search_entries: Vec::new(),
             global_search_request_tx: None,
             global_search_result_rx: None,
@@ -551,6 +558,7 @@ impl Palette {
             reference_highlight_cache: HashMap::new(),
             lang_registry_owned: None,
             command_history: None,
+            global_search_unsaved_buffers: Vec::new(),
             global_search_entries: Vec::new(),
             global_search_request_tx: None,
             global_search_result_rx: None,
@@ -575,13 +583,21 @@ impl Palette {
         files: Vec<String>,
         project_root: &Path,
         git_status_map: &HashMap<String, GitFileStatus>,
+        unsaved_buffers: Vec<GlobalSearchBufferSource>,
     ) -> Self {
         let (search_req_tx, search_req_rx) = mpsc::channel::<GlobalSearchRequest>();
         let (search_res_tx, search_res_rx) = mpsc::channel::<GlobalSearchBatch>();
         let root = project_root.to_path_buf();
         let worker_files = files.clone();
+        let worker_unsaved_buffers = unsaved_buffers.clone();
         let search_handle = thread::spawn(move || {
-            workers::global_search_worker(search_req_rx, search_res_tx, root, worker_files);
+            workers::global_search_worker(
+                search_req_rx,
+                search_res_tx,
+                root,
+                worker_files,
+                worker_unsaved_buffers,
+            );
         });
 
         Self {
@@ -617,6 +633,7 @@ impl Palette {
             reference_highlight_cache: HashMap::new(),
             lang_registry_owned: None,
             command_history: None,
+            global_search_unsaved_buffers: unsaved_buffers,
             global_search_entries: Vec::new(),
             global_search_request_tx: Some(search_req_tx),
             global_search_result_rx: Some(search_res_rx),

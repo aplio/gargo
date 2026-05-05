@@ -139,10 +139,12 @@ fn global_search_enter_opens_selected_match() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette = Palette::new_global_search(vec![], Path::new(""), &HashMap::new());
+    let mut palette =
+        Palette::new_global_search(vec![], Path::new(""), &HashMap::new(), Vec::new());
 
     palette.global_search_entries = vec![GlobalSearchResultEntry {
         rel_path: "src/main.rs".to_string(),
+        display_path: "src/main.rs".to_string(),
         line: 12,
         char_col: 7,
         preview_lines: vec![
@@ -187,12 +189,14 @@ fn global_search_alt_enter_sends_results_to_buffer() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette = Palette::new_global_search(vec![], Path::new(""), &HashMap::new());
+    let mut palette =
+        Palette::new_global_search(vec![], Path::new(""), &HashMap::new(), Vec::new());
     palette.input.text = "let".to_string();
 
     palette.global_search_entries = vec![
         GlobalSearchResultEntry {
             rel_path: "src/main.rs".to_string(),
+            display_path: "src/main.rs".to_string(),
             line: 12,
             char_col: 7,
             preview_lines: vec![
@@ -202,6 +206,7 @@ fn global_search_alt_enter_sends_results_to_buffer() {
         },
         GlobalSearchResultEntry {
             rel_path: "src/lib.rs".to_string(),
+            display_path: "src/lib.rs".to_string(),
             line: 0,
             char_col: 4,
             preview_lines: vec![
@@ -250,7 +255,8 @@ fn global_search_alt_enter_with_no_results_closes_palette() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette = Palette::new_global_search(vec![], Path::new(""), &HashMap::new());
+    let mut palette =
+        Palette::new_global_search(vec![], Path::new(""), &HashMap::new(), Vec::new());
     palette.input.text = "nomatch".to_string();
 
     let result = palette.handle_key_event(
@@ -260,18 +266,23 @@ fn global_search_alt_enter_with_no_results_closes_palette() {
         &config,
     );
 
-    assert_eq!(result, EventResult::Action(Action::Ui(UiAction::ClosePalette)));
+    assert_eq!(
+        result,
+        EventResult::Action(Action::Ui(UiAction::ClosePalette))
+    );
 }
 
 #[test]
 fn global_search_worker_error_updates_preview_message() {
-    let mut palette = Palette::new_global_search(vec![], Path::new(""), &HashMap::new());
+    let mut palette =
+        Palette::new_global_search(vec![], Path::new(""), &HashMap::new(), Vec::new());
     let (tx, rx) = mpsc::channel::<GlobalSearchBatch>();
     palette.global_search_result_rx = Some(rx);
 
     tx.send(GlobalSearchBatch {
         generation: 1,
         results: Vec::new(),
+        append: false,
         error: Some("bad global search filter".to_string()),
     })
     .unwrap();
@@ -1264,7 +1275,8 @@ fn release_key_events_are_ignored() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette = Palette::new_global_search(vec![], Path::new(""), &HashMap::new());
+    let mut palette =
+        Palette::new_global_search(vec![], Path::new(""), &HashMap::new(), Vec::new());
     palette.input.text = "test".to_string();
 
     // Simulate Enter key release (happens during IME composition confirmation)
@@ -1286,7 +1298,8 @@ fn palette_insert_text_japanese() {
     let registry = CommandRegistry::new();
     let lang_registry = LanguageRegistry::new();
     let config = Config::default();
-    let mut palette = Palette::new_global_search(vec![], Path::new(""), &HashMap::new());
+    let mut palette =
+        Palette::new_global_search(vec![], Path::new(""), &HashMap::new(), Vec::new());
 
     // Insert Japanese text (simulating IME composition result)
     palette.insert_text("日本語", &registry, &lang_registry, &config);

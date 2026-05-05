@@ -399,10 +399,24 @@ impl App {
                 debug_log!(&self.config, "palette: opened (global search)");
                 self.ensure_file_index_started_if_needed();
                 self.queue_git_status_refresh(true);
+                let unsaved_buffers = self
+                    .editor
+                    .buffers()
+                    .iter()
+                    .filter(|doc| doc.dirty)
+                    .filter_map(|doc| {
+                        let path = doc.file_path.clone()?;
+                        Some(GlobalSearchBufferSource {
+                            path,
+                            content: doc.rope.to_string(),
+                        })
+                    })
+                    .collect();
                 let palette = Palette::new_global_search(
                     self.file_list.clone(),
                     &self.project_root,
                     &self.git_status_cache,
+                    unsaved_buffers,
                 );
                 self.compositor.push_palette(palette);
                 if self.file_index_loading {

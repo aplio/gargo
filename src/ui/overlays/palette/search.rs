@@ -14,8 +14,15 @@ impl Palette {
         let (search_res_tx, search_res_rx) = mpsc::channel::<GlobalSearchBatch>();
         let root = self.project_root.clone();
         let worker_files = self.file_entries.clone();
+        let worker_unsaved_buffers = self.global_search_unsaved_buffers.clone();
         let search_handle = thread::spawn(move || {
-            workers::global_search_worker(search_req_rx, search_res_tx, root, worker_files);
+            workers::global_search_worker(
+                search_req_rx,
+                search_res_tx,
+                root,
+                worker_files,
+                worker_unsaved_buffers,
+            );
         });
 
         self.global_search_request_tx = Some(search_req_tx);
@@ -61,7 +68,11 @@ impl Palette {
                 continue;
             }
 
-            self.global_search_entries = batch.results;
+            if batch.append {
+                self.global_search_entries.extend(batch.results);
+            } else {
+                self.global_search_entries = batch.results;
+            }
             self.candidates = self
                 .global_search_entries
                 .iter()
@@ -78,7 +89,12 @@ impl Palette {
                         .unwrap_or("");
                     ScoredCandidate {
                         kind: CandidateKind::SearchResult(i),
-                        label: format!("{}:{} {}", entry.rel_path, entry.line + 1, excerpt.trim()),
+                        label: format!(
+                            "{}:{} {}",
+                            entry.display_path,
+                            entry.line + 1,
+                            excerpt.trim()
+                        ),
                         score: 0,
                         match_positions: Vec::new(),
                         preview_lines: entry.preview_lines.clone(),

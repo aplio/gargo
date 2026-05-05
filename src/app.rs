@@ -52,7 +52,8 @@ use crate::ui::overlays::explorer::sidebar::Explorer;
 use crate::ui::overlays::git::view::{GitView, GitViewIndexSnapshot, RepoSection};
 use crate::ui::overlays::palette::Palette;
 use crate::ui::overlays::palette::{
-    GitBranchPickerEntry, JumpPickerEntry, ReferencePickerEntry, SmartCopyPickerEntry,
+    GitBranchPickerEntry, GlobalSearchBufferSource, JumpPickerEntry, ReferencePickerEntry,
+    SmartCopyPickerEntry,
 };
 use crate::ui::overlays::project::root_picker::ProjectRootPopup;
 use crate::ui::overlays::project::save_as_popup::SaveAsPopup;

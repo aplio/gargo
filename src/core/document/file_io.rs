@@ -2,10 +2,13 @@ use super::*;
 
 impl Document {
     pub fn from_file(id: DocumentId, path: &str) -> Self {
-        let (rope, file_path) = if let Ok(contents) = fs::read_to_string(path) {
-            (Rope::from_str(&contents), PathBuf::from(path))
-        } else {
-            (Rope::new(), PathBuf::from(path))
+        let file_path = PathBuf::from(path);
+        let rope = match fs::read_to_string(path) {
+            Ok(contents) => Rope::from_str(&contents),
+            Err(_) => match fs::read(path) {
+                Ok(bytes) => Rope::from_str(&String::from_utf8_lossy(&bytes)),
+                Err(_) => Rope::new(),
+            },
         };
         let cached_status_bar_path = Self::compute_status_bar_path(&Some(file_path.clone()));
         Self {
@@ -77,7 +80,13 @@ impl Document {
             Some(p) => p.clone(),
             None => return Err("No file path to reload".to_string()),
         };
-        let contents = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let contents = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => {
+                let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+        };
         let old_cursor = self.cursors[0];
         self.rope = Rope::from_str(&contents);
         // Preserve cursor position if still valid, reset to single cursor

@@ -30,12 +30,18 @@ impl Palette {
                 let inner_w = right_w.saturating_sub(2);
                 let content_h = popup_h.saturating_sub(2);
                 if inner_w > 0 && content_h > 0 {
+                    let (cell_cols, cell_rows) = crate::ui::image::fit_cells(
+                        data.width,
+                        data.height,
+                        inner_w as u16,
+                        content_h as u16,
+                    );
                     self.pending_image_request = Some(ImageRenderRequest {
                         key: path,
                         col: (right_x + 1) as u16,
                         row: (offset_y + 1) as u16,
-                        cell_cols: inner_w as u16,
-                        cell_rows: content_h as u16,
+                        cell_cols,
+                        cell_rows,
                         data,
                     });
                 }

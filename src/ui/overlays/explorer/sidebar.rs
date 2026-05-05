@@ -288,12 +288,18 @@ impl Explorer {
             for row in 0..body_h {
                 surface.fill_region(x, body_y + row, width, ' ', &default_style);
             }
+            let (cell_cols, cell_rows) = crate::ui::image::fit_cells(
+                data.width,
+                data.height,
+                width as u16,
+                body_h as u16,
+            );
             self.pending_image_request = Some(crate::ui::image::ImageRenderRequest {
                 key: path,
                 col: x as u16,
                 row: body_y as u16,
-                cell_cols: width as u16,
-                cell_rows: body_h as u16,
+                cell_cols,
+                cell_rows,
                 data,
             });
             return;

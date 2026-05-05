@@ -17,6 +17,22 @@ pub struct ImageRenderRequest {
     pub data: Arc<EncodedImage>,
 }
 
+/// Compute cell dimensions for an image so it fits within `(max_cols, max_rows)`
+/// while preserving aspect ratio. Assumes a terminal cell is roughly twice as
+/// tall as it is wide (typical for monospace fonts).
+pub fn fit_cells(img_w: u32, img_h: u32, max_cols: u16, max_rows: u16) -> (u16, u16) {
+    if img_w == 0 || img_h == 0 || max_cols == 0 || max_rows == 0 {
+        return (max_cols.max(1), max_rows.max(1));
+    }
+    const CELL_HEIGHT_RATIO: f64 = 2.0;
+    let avail_w = max_cols as f64;
+    let avail_h = max_rows as f64 * CELL_HEIGHT_RATIO;
+    let scale = (avail_w / img_w as f64).min(avail_h / img_h as f64);
+    let cols = (img_w as f64 * scale).floor().max(1.0) as u16;
+    let rows = (img_h as f64 * scale / CELL_HEIGHT_RATIO).floor().max(1.0) as u16;
+    (cols.min(max_cols), rows.min(max_rows))
+}
+
 pub fn is_image_path(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;

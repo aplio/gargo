@@ -2,6 +2,7 @@ pub mod diff;
 pub mod framework;
 pub mod image;
 pub mod overlays;
+pub mod popup_layout;
 pub mod shared;
 pub mod text;
 pub mod text_input;

@@ -179,6 +179,10 @@ pub struct App {
 
 impl App {
     pub fn new(editor: Editor, config: Config, start_path: Option<&Path>) -> Self {
+        crate::ui::popup_layout::set_popup_percent(
+            config.ui.popup_width_percent,
+            config.ui.popup_height_percent,
+        );
         let project_root = crate::project::find_project_root(start_path);
         let file_index_runtime = Self::build_file_index_runtime().ok();
         let git_index_runtime = Self::build_git_index_runtime().ok();
@@ -1956,6 +1960,10 @@ impl App {
     }
 
     fn apply_config_runtime(&mut self, config: Config) -> Option<String> {
+        crate::ui::popup_layout::set_popup_percent(
+            config.ui.popup_width_percent,
+            config.ui.popup_height_percent,
+        );
         let theme = Theme::from_config(&config.theme);
         self.config = config;
         self.theme = theme;

@@ -477,8 +477,7 @@ fn jump_picker_preview_builds_syntax_spans() {
 }
 
 fn right_preview_panel_geometry(cols: usize, rows: usize) -> (usize, usize, usize) {
-    let popup_w = (cols * 80 / 100).max(3);
-    let popup_h = (rows * 80 / 100).max(3);
+    let (popup_w, popup_h) = crate::ui::popup_layout::popup_size(cols, rows);
     let offset_x = (cols.saturating_sub(popup_w)) / 2;
     let _offset_y = (rows.saturating_sub(popup_h)) / 2;
     let gap = 2;
@@ -492,6 +491,12 @@ fn reversed_columns_on_row(surface: &Surface, row: usize) -> Vec<usize> {
     (0..surface.width)
         .filter(|&x| surface.get(x, row).style.reverse)
         .collect()
+}
+
+/// Find the first row that contains any reversed cell. Used to locate the jump
+/// marker row independent of popup size / vertical centering.
+fn find_first_reversed_row(surface: &Surface) -> Option<usize> {
+    (0..surface.height).find(|&y| (0..surface.width).any(|x| surface.get(x, y).style.reverse))
 }
 
 #[test]
@@ -513,7 +518,8 @@ fn jump_picker_preview_auto_scrolls_to_center_marker() {
     let theme = Theme::dark();
     let _ = palette.render_overlay(&mut surface, &theme);
     let (preview_x, inner_w, _) = right_preview_panel_geometry(100, 20);
-    let reversed = reversed_columns_on_row(&surface, 4);
+    let marker_row = find_first_reversed_row(&surface).expect("marker row");
+    let reversed = reversed_columns_on_row(&surface, marker_row);
     assert!(!reversed.is_empty());
     let center = preview_x + inner_w / 2;
     assert!((reversed[0] as isize - center as isize).abs() <= 2);
@@ -542,9 +548,14 @@ fn jump_picker_preview_keeps_syntax_when_horizontally_sliced() {
     let mut surface = Surface::new(100, 20);
     let theme = Theme::dark();
     let _ = palette.render_overlay(&mut surface, &theme);
-    let styled_cells = (0..surface.width)
-        .filter(|&x| surface.get(x, 4).style.fg.is_some())
-        .count();
+    let styled_cells = (0..surface.height)
+        .map(|y| {
+            (0..surface.width)
+                .filter(|&x| surface.get(x, y).style.fg.is_some())
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
     assert!(styled_cells > 0);
 }
 
@@ -565,7 +576,8 @@ fn symbol_picker_preview_auto_scrolls_to_center_marker() {
     let theme = Theme::dark();
     let _ = palette.render_overlay(&mut surface, &theme);
     let (preview_x, inner_w, _) = right_preview_panel_geometry(100, 20);
-    let reversed = reversed_columns_on_row(&surface, 3);
+    let marker_row = find_first_reversed_row(&surface).expect("marker row");
+    let reversed = reversed_columns_on_row(&surface, marker_row);
     assert!(!reversed.is_empty());
     let center = preview_x + inner_w / 2;
     assert!((reversed[0] as isize - center as isize).abs() <= 2);
@@ -615,7 +627,11 @@ fn jump_picker_preview_defaults_to_no_horizontal_scroll_without_target() {
     let theme = Theme::dark();
     let _ = palette.render_overlay(&mut surface, &theme);
     let (preview_x, _, _) = right_preview_panel_geometry(100, 20);
-    assert_eq!(surface.get(preview_x, 3).symbol, "s");
+    // First content row inside the right panel is offset_y + 1, where
+    // offset_y depends on popup_h and rows.
+    let (_, popup_h) = crate::ui::popup_layout::popup_size(100, 20);
+    let offset_y = (20usize.saturating_sub(popup_h)) / 2;
+    assert_eq!(surface.get(preview_x, offset_y + 1).symbol, "s");
 }
 
 #[test]
@@ -820,8 +836,7 @@ fn reference_picker_renders_caller_label_on_top_border() {
     let theme = Theme::dark();
     let _ = palette.render_overlay(&mut surface, &theme);
 
-    let popup_w = 100 * 80 / 100;
-    let popup_h = 20 * 80 / 100;
+    let (popup_w, popup_h) = crate::ui::popup_layout::popup_size(100, 20);
     let offset_x = (100usize.saturating_sub(popup_w)) / 2;
     let offset_y = (20usize.saturating_sub(popup_h)) / 2;
     let left_w = (popup_w - 2) / 2;

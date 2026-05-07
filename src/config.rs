@@ -20,6 +20,7 @@ pub struct Config {
     pub git: GitConfig,
     pub performance: PerformanceConfig,
     pub theme: ThemeConfig,
+    pub ui: UiConfig,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -70,6 +71,13 @@ pub struct GitConfig {
     pub gutter_debounce_normal_ms: u64,
     pub git_view_diff_cache_max_entries: usize,
     pub git_view_diff_prefetch_radius: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
+pub struct UiConfig {
+    pub popup_width_percent: u8,
+    pub popup_height_percent: u8,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -157,6 +165,15 @@ impl Default for GitConfig {
     }
 }
 
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            popup_width_percent: 95,
+            popup_height_percent: 90,
+        }
+    }
+}
+
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
@@ -223,6 +240,7 @@ impl Default for Config {
             git: GitConfig::default(),
             performance: PerformanceConfig::default(),
             theme: ThemeConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }
@@ -545,5 +563,35 @@ line_number_min_width = 7
 "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.line_number_width, 7);
+    }
+
+    #[test]
+    fn test_ui_config_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.ui.popup_width_percent, 95);
+        assert_eq!(cfg.ui.popup_height_percent, 90);
+    }
+
+    #[test]
+    fn test_ui_config_parses_custom_values() {
+        let toml_str = r#"
+[ui]
+popup_width_percent = 80
+popup_height_percent = 75
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.ui.popup_width_percent, 80);
+        assert_eq!(cfg.ui.popup_height_percent, 75);
+    }
+
+    #[test]
+    fn test_ui_config_partial_keeps_defaults() {
+        let toml_str = r#"
+[ui]
+popup_width_percent = 92
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.ui.popup_width_percent, 92);
+        assert_eq!(cfg.ui.popup_height_percent, 90);
     }
 }

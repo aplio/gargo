@@ -8,8 +8,7 @@ impl Palette {
 
         let cols = surface.width;
         let rows = surface.height;
-        let popup_w = (cols * 80 / 100).max(3);
-        let popup_h = (rows * 80 / 100).max(3);
+        let (popup_w, popup_h) = crate::ui::popup_layout::popup_size(cols, rows);
         let offset_x = (cols.saturating_sub(popup_w)) / 2;
         let offset_y = (rows.saturating_sub(popup_h)) / 2;
 

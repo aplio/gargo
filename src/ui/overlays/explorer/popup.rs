@@ -384,7 +384,7 @@ impl ExplorerPopup {
     }
 
     fn popup_size(cols: usize, rows: usize) -> (usize, usize) {
-        ((cols * 80 / 100).max(3), (rows * 80 / 100).max(3))
+        crate::ui::popup_layout::popup_size(cols, rows)
     }
 
     fn preview_content_height_for_surface(cols: usize, rows: usize) -> Option<usize> {

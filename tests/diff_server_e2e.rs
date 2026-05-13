@@ -480,9 +480,21 @@ fn test_diff_server_status_sections_and_removed_endpoints() {
         mixed_untracked_diff
     );
 
-    let branches_status =
-        get_status_code_with_retry(&format!("http://127.0.0.1:{}/api/branches", port));
-    assert_eq!(branches_status, 404, "expected /api/branches to be removed");
+    let branches_body =
+        get_json_with_retry(&format!("http://127.0.0.1:{}/api/branches", port));
+    let branches_arr = branches_body["branches"]
+        .as_array()
+        .expect("branches should be an array");
+    assert!(
+        !branches_arr.is_empty(),
+        "expected at least one local branch in /api/branches response: {}",
+        branches_body
+    );
+    assert!(
+        branches_body.get("current").is_some(),
+        "expected /api/branches to include `current` field: {}",
+        branches_body
+    );
 
     let diff_status = get_status_code_with_retry(&format!("http://127.0.0.1:{}/api/diff", port));
     assert_eq!(diff_status, 404, "expected /api/diff to be removed");
@@ -617,5 +629,232 @@ fn test_diff_server_concurrent_instances_use_distinct_ports() {
     match read_event(&handle_b.event_rx) {
         DiffServerEvent::Stopped => {}
         event => panic!("expected second Stopped event, got: {:?}", event),
+    }
+}
+
+fn get_status_and_json_with_retry(url: &str) -> (u16, serde_json::Value) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match ureq::get(url).call() {
+            Ok(resp) => {
+                let code = resp.status();
+                let body = resp.into_json().expect("valid json body");
+                return (code, body);
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                let body = resp
+                    .into_json()
+                    .unwrap_or(serde_json::Value::Null);
+                return (code, body);
+            }
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    panic!("failed to call {}: {}", url, err);
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+fn make_compare_repo(repo: &Path) {
+    run_git(repo, &["init", "-b", "main"]);
+    run_git(repo, &["config", "user.name", "gargo-test"]);
+    run_git(repo, &["config", "user.email", "gargo-test@example.com"]);
+
+    fs::write(repo.join("base.txt"), "line1\n").expect("write base file");
+    run_git(repo, &["add", "base.txt"]);
+    run_git(repo, &["commit", "-m", "init"]);
+
+    run_git(repo, &["checkout", "-b", "feature"]);
+    fs::write(repo.join("base.txt"), "line1\nfeature-line\n").expect("write feature change");
+    fs::write(repo.join("feature-only.txt"), "feature-content\n").expect("write feature-only");
+    run_git(repo, &["add", "."]);
+    run_git(repo, &["commit", "-m", "feature work"]);
+
+    run_git(repo, &["checkout", "main"]);
+}
+
+#[test]
+fn test_diff_server_api_branches_lists_local_branches() {
+    let _cwd_lock = cwd_test_lock();
+    let repo_dir = tempdir().expect("create temp repo");
+    let repo = repo_dir.path();
+    make_compare_repo(repo);
+
+    let _cwd_guard = WorkingDirGuard::set(repo);
+    let handle = DiffServerHandle::new().expect("create diff server handle");
+    let Some(port) = start_diff_server(repo, &handle) else {
+        return;
+    };
+
+    let body = get_json_with_retry(&format!("http://127.0.0.1:{}/api/branches", port));
+    let branches: Vec<String> = body["branches"]
+        .as_array()
+        .expect("branches should be an array")
+        .iter()
+        .map(|v| v.as_str().expect("branch name should be string").to_string())
+        .collect();
+    assert!(
+        branches.contains(&"main".to_string()),
+        "expected main in branches: {:?}",
+        branches
+    );
+    assert!(
+        branches.contains(&"feature".to_string()),
+        "expected feature in branches: {:?}",
+        branches
+    );
+    assert_eq!(
+        body["current"].as_str(),
+        Some("main"),
+        "expected current branch to be main: {}",
+        body
+    );
+
+    stop_diff_server(&handle);
+    match read_event(&handle.event_rx) {
+        DiffServerEvent::Stopped => {}
+        event => panic!("expected Stopped event, got: {:?}", event),
+    }
+}
+
+#[test]
+fn test_diff_server_api_compare_returns_branch_diff() {
+    let _cwd_lock = cwd_test_lock();
+    let repo_dir = tempdir().expect("create temp repo");
+    let repo = repo_dir.path();
+    make_compare_repo(repo);
+
+    let _cwd_guard = WorkingDirGuard::set(repo);
+    let handle = DiffServerHandle::new().expect("create diff server handle");
+    let Some(port) = start_diff_server(repo, &handle) else {
+        return;
+    };
+
+    let url = format!(
+        "http://127.0.0.1:{}/api/compare?base=main&compare=feature",
+        port
+    );
+    let body = get_json_with_retry(&url);
+    assert_eq!(body["base"].as_str(), Some("main"));
+    assert_eq!(body["compare"].as_str(), Some("feature"));
+    let diff = body["diff"].as_str().expect("diff should be a string");
+    assert!(
+        diff.contains("+feature-line"),
+        "expected compare diff to include feature line: {}",
+        diff
+    );
+    assert!(
+        diff.contains("feature-only.txt"),
+        "expected compare diff to include new file: {}",
+        diff
+    );
+
+    let same_url = format!(
+        "http://127.0.0.1:{}/api/compare?base=main&compare=main",
+        port
+    );
+    let same_body = get_json_with_retry(&same_url);
+    assert_eq!(
+        same_body["diff"].as_str(),
+        Some(""),
+        "expected empty diff when comparing branch to itself: {}",
+        same_body
+    );
+
+    stop_diff_server(&handle);
+    match read_event(&handle.event_rx) {
+        DiffServerEvent::Stopped => {}
+        event => panic!("expected Stopped event, got: {:?}", event),
+    }
+}
+
+#[test]
+fn test_diff_server_api_compare_rejects_flag_injection() {
+    let _cwd_lock = cwd_test_lock();
+    let repo_dir = tempdir().expect("create temp repo");
+    let repo = repo_dir.path();
+    make_compare_repo(repo);
+
+    let _cwd_guard = WorkingDirGuard::set(repo);
+    let handle = DiffServerHandle::new().expect("create diff server handle");
+    let Some(port) = start_diff_server(repo, &handle) else {
+        return;
+    };
+
+    // Branch name starting with `-` (flag injection).
+    let inject_url = format!(
+        "http://127.0.0.1:{}/api/compare?base=--upload-pack=evil&compare=main",
+        port
+    );
+    let (code, body) = get_status_and_json_with_retry(&inject_url);
+    assert_eq!(code, 400, "expected 400 for flag injection: {}", body);
+    assert!(
+        body["error"].as_str().is_some(),
+        "expected error message in body: {}",
+        body
+    );
+
+    // Disallowed character (semicolon).
+    let bad_char_url = format!(
+        "http://127.0.0.1:{}/api/compare?base=main%3Brm&compare=main",
+        port
+    );
+    let (code, _body) = get_status_and_json_with_retry(&bad_char_url);
+    assert_eq!(code, 400, "expected 400 for disallowed character");
+
+    // Missing query parameter.
+    let missing_url = format!("http://127.0.0.1:{}/api/compare?base=main", port);
+    let (code, _body) = get_status_and_json_with_retry(&missing_url);
+    assert_eq!(code, 400, "expected 400 when compare param is missing");
+
+    stop_diff_server(&handle);
+    match read_event(&handle.event_rx) {
+        DiffServerEvent::Stopped => {}
+        event => panic!("expected Stopped event, got: {:?}", event),
+    }
+}
+
+#[test]
+fn test_diff_server_compare_html_page() {
+    let _cwd_lock = cwd_test_lock();
+    let repo_dir = tempdir().expect("create temp repo");
+    let repo = repo_dir.path();
+    make_compare_repo(repo);
+    let repo_root = run_git_output(repo, &["rev-parse", "--show-toplevel"]);
+
+    let _cwd_guard = WorkingDirGuard::set(repo);
+    let handle = DiffServerHandle::new().expect("create diff server handle");
+    let Some(port) = start_diff_server(repo, &handle) else {
+        return;
+    };
+
+    let html = get_text_with_retry(&format!("http://127.0.0.1:{}/compare", port));
+    assert!(
+        html.contains("Compare branches"),
+        "expected /compare HTML to include context label"
+    );
+    assert!(
+        html.contains("id=\"base-select\"") && html.contains("id=\"compare-select\""),
+        "expected /compare HTML to include base/compare selects"
+    );
+    assert!(
+        html.contains("id=\"swap-btn\""),
+        "expected /compare HTML to include swap button"
+    );
+    assert!(
+        html.contains("/api/branches") && html.contains("/api/compare"),
+        "expected /compare HTML to reference compare endpoints"
+    );
+    assert!(
+        html.contains(&format!(r#"<code id="root-path">{}</code>"#, repo_root)),
+        "expected /compare HTML to embed project root"
+    );
+
+    stop_diff_server(&handle);
+    match read_event(&handle.event_rx) {
+        DiffServerEvent::Stopped => {}
+        event => panic!("expected Stopped event, got: {:?}", event),
     }
 }

@@ -766,6 +766,591 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
+/// HTML template for the compare-branches page.
+const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Git Compare Branches</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css" />
+    <script src="https://cdn.jsdelivr.net/npm/diff2html/bundles/js/diff2html-ui.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        .header {
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .context-label {
+            margin: 0;
+            font-size: 13px;
+            font-weight: 600;
+            color: #555;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .context-row {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            font-size: 14px;
+            color: #4b5563;
+        }
+        .context-key {
+            font-weight: 600;
+            color: #1f2937;
+        }
+        .context-row code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            background: #f6f8fa;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 2px 8px;
+            color: #24292f;
+            word-break: break-all;
+        }
+        .controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .controls label {
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .controls select, .controls button {
+            padding: 6px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            background: white;
+            font-size: 14px;
+        }
+        .controls button {
+            cursor: pointer;
+        }
+        .range-arrow {
+            font-weight: 600;
+            color: #6b7280;
+        }
+        #error-banner {
+            display: none;
+            margin: 0 0 20px 0;
+            padding: 12px 16px;
+            border: 1px solid #fcc;
+            border-radius: 8px;
+            background: #fee;
+            color: #b20000;
+        }
+        .section {
+            background: white;
+            padding: 16px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        .section h2 {
+            margin: 0 0 12px 0;
+            font-size: 18px;
+        }
+        .loading, .empty {
+            padding: 20px;
+            color: #666;
+        }
+        .file-list {
+            margin: 0;
+            padding-left: 20px;
+        }
+        .file-list li {
+            margin: 4px 0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        }
+        .file-list a {
+            color: #0a58ca;
+            text-decoration: none;
+        }
+        .file-list a:hover {
+            text-decoration: underline;
+        }
+        .diff-toggle-btn {
+            float: right;
+            margin-left: 8px;
+            padding: 2px 8px;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            background: #f6f8fa;
+            color: #24292f;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .diff-toggle-btn:hover {
+            background: #eef2f7;
+        }
+        .diff-file-collapsed .d2h-file-diff {
+            display: none;
+        }
+        #go-top-btn {
+            position: fixed;
+            right: 20px;
+            bottom: 20px;
+            z-index: 1000;
+            padding: 8px 12px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            background: white;
+            color: #24292f;
+            font-size: 14px;
+            cursor: pointer;
+            opacity: 0;
+            pointer-events: none;
+            transform: translateY(8px);
+            transition: opacity 0.15s ease, transform 0.15s ease;
+        }
+        #go-top-btn.visible {
+            opacity: 1;
+            pointer-events: auto;
+            transform: translateY(0);
+        }
+        #go-top-btn:hover {
+            background: #eef2f7;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="context-label">Compare branches</div>
+        <div class="context-row"><span class="context-key">Root</span><code id="root-path">{{ROOT_PATH}}</code></div>
+        <div class="controls">
+            <label>
+                Base
+                <select id="base-select"><option value="">(loading...)</option></select>
+            </label>
+            <span class="range-arrow">...</span>
+            <label>
+                Compare
+                <select id="compare-select"><option value="">(loading...)</option></select>
+            </label>
+            <button id="swap-btn" type="button" title="Swap base and compare">Swap</button>
+            <label>
+                View mode
+                <select id="view-mode">
+                    <option value="unified">Unified</option>
+                    <option value="side-by-side">Side-by-side</option>
+                </select>
+            </label>
+            <button id="expand-all-btn" type="button">Expand all</button>
+            <button id="collapse-all-btn" type="button">Collapse all</button>
+            <button id="refresh-btn" type="button">Refresh</button>
+        </div>
+    </div>
+
+    <div id="error-banner"></div>
+
+    <section class="section">
+        <h2 id="files-heading">Files</h2>
+        <div id="files-list">
+            <div class="loading">Select a base and compare branch...</div>
+        </div>
+    </section>
+
+    <section class="section">
+        <h2>Compare Diff</h2>
+        <div id="compare-diff" class="diff-container">
+            <div class="loading">Select a base and compare branch...</div>
+        </div>
+    </section>
+    <button id="go-top-btn" type="button" aria-label="Go to top">Go top</button>
+
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const normalizeViewMode = (value) => value === "side-by-side" ? "side-by-side" : "unified";
+
+        const baseSelect = document.getElementById("base-select");
+        const compareSelect = document.getElementById("compare-select");
+        const swapButton = document.getElementById("swap-btn");
+        const viewModeSelect = document.getElementById("view-mode");
+        const expandAllButton = document.getElementById("expand-all-btn");
+        const collapseAllButton = document.getElementById("collapse-all-btn");
+        const refreshButton = document.getElementById("refresh-btn");
+        const errorBanner = document.getElementById("error-banner");
+        const rootPathCode = document.getElementById("root-path");
+        const filesHeading = document.getElementById("files-heading");
+        const filesListContainer = document.getElementById("files-list");
+        const compareDiffContainer = document.getElementById("compare-diff");
+        const goTopButton = document.getElementById("go-top-btn");
+        const GO_TOP_SHOW_SCROLL_Y = 240;
+        const COLLAPSED_FILES_STORAGE_KEY = `gargo.compare.collapsed.v1:${rootPathCode ? rootPathCode.textContent : "unknown-root"}`;
+
+        let latestDiff = null;
+        let isLoadingCompare = false;
+        let collapsedFileIds = loadCollapsedFileIds();
+        viewModeSelect.value = normalizeViewMode(urlParams.get("view"));
+
+        function loadCollapsedFileIds() {
+            try {
+                const raw = sessionStorage.getItem(COLLAPSED_FILES_STORAGE_KEY);
+                if (!raw) {
+                    return new Set();
+                }
+                const parsed = JSON.parse(raw);
+                if (!Array.isArray(parsed)) {
+                    return new Set();
+                }
+                const ids = parsed.filter((value) => typeof value === "string" && value.length > 0);
+                return new Set(ids);
+            } catch (_error) {
+                return new Set();
+            }
+        }
+
+        const persistCollapsedFileIds = () => {
+            try {
+                sessionStorage.setItem(
+                    COLLAPSED_FILES_STORAGE_KEY,
+                    JSON.stringify(Array.from(collapsedFileIds))
+                );
+            } catch (_error) {
+                // Ignore storage failures.
+            }
+        };
+
+        const showError = (message) => {
+            errorBanner.textContent = `Error: ${message}`;
+            errorBanner.style.display = "block";
+        };
+
+        const clearError = () => {
+            errorBanner.textContent = "";
+            errorBanner.style.display = "none";
+        };
+
+        const setLoading = (container, message) => {
+            container.innerHTML = `<div class="loading">${message}</div>`;
+        };
+
+        const setEmpty = (container, message) => {
+            container.innerHTML = `<div class="empty">${message}</div>`;
+        };
+
+        const updateGoTopButtonVisibility = () => {
+            if (window.scrollY > GO_TOP_SHOW_SCROLL_Y) {
+                goTopButton.classList.add("visible");
+            } else {
+                goTopButton.classList.remove("visible");
+            }
+        };
+
+        const renderDiffToggleButtonLabel = (button, collapsed) => {
+            button.textContent = collapsed ? "Show diff" : "Hide diff";
+            button.setAttribute("aria-expanded", collapsed ? "false" : "true");
+            button.setAttribute("aria-label", collapsed ? "Show diff" : "Hide diff");
+        };
+
+        const setDiffFileCollapsed = (wrapper, fileId, collapsed) => {
+            if (collapsed) {
+                collapsedFileIds.add(fileId);
+            } else {
+                collapsedFileIds.delete(fileId);
+            }
+            wrapper.classList.toggle("diff-file-collapsed", collapsed);
+            const button = wrapper.querySelector(".diff-toggle-btn");
+            if (button) {
+                renderDiffToggleButtonLabel(button, collapsed);
+            }
+        };
+
+        const updateBulkToggleAvailability = () => {
+            const wrappers = document.querySelectorAll(".diff-container .d2h-file-wrapper[data-diff-file-id]");
+            const disabled = wrappers.length === 0;
+            expandAllButton.disabled = disabled;
+            collapseAllButton.disabled = disabled;
+        };
+
+        const setAllRenderedDiffFilesCollapsed = (collapsed) => {
+            const wrappers = document.querySelectorAll(".diff-container .d2h-file-wrapper[data-diff-file-id]");
+            wrappers.forEach((wrapper) => {
+                const fileId = wrapper.dataset.diffFileId;
+                if (!fileId) {
+                    return;
+                }
+                setDiffFileCollapsed(wrapper, fileId, collapsed);
+            });
+            persistCollapsedFileIds();
+            updateBulkToggleAvailability();
+        };
+
+        const pruneCollapsedFileIds = (knownFileIds) => {
+            const next = new Set();
+            collapsedFileIds.forEach((fileId) => {
+                if (knownFileIds.has(fileId)) {
+                    next.add(fileId);
+                }
+            });
+            if (next.size !== collapsedFileIds.size) {
+                collapsedFileIds = next;
+                persistCollapsedFileIds();
+            }
+        };
+
+        const parseDiffFiles = (diff) => {
+            if (!diff || diff.trim() === "") {
+                return [];
+            }
+            const files = [];
+            for (const line of diff.split("\n")) {
+                if (!line.startsWith("diff --git ")) {
+                    continue;
+                }
+                const match = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+                if (!match) {
+                    continue;
+                }
+                files.push(match[2]);
+            }
+            return files;
+        };
+
+        const renderFileList = (diff) => {
+            const files = parseDiffFiles(diff);
+            filesHeading.textContent = files.length > 0 ? `Files (${files.length})` : "Files";
+            if (files.length === 0) {
+                setEmpty(filesListContainer, "No changes between branches");
+                return;
+            }
+            filesListContainer.innerHTML = "";
+            const list = document.createElement("ul");
+            list.className = "file-list";
+            for (let i = 0; i < files.length; i += 1) {
+                const item = document.createElement("li");
+                const link = document.createElement("a");
+                link.href = `#compare-diff-file-${i}`;
+                link.textContent = files[i];
+                item.appendChild(link);
+                list.appendChild(item);
+            }
+            filesListContainer.appendChild(list);
+        };
+
+        const decorateRenderedDiffFiles = (container, anchorPrefix, diffFiles, knownFileIds) => {
+            const wrappers = container.querySelectorAll(".d2h-file-wrapper");
+            wrappers.forEach((wrapper, index) => {
+                wrapper.id = `${anchorPrefix}-file-${index}`;
+                const filePath = diffFiles[index] || `file-${index}`;
+                const fileId = `${anchorPrefix}:${filePath}:${index}`;
+                wrapper.dataset.diffFileId = fileId;
+                knownFileIds.add(fileId);
+
+                const header = wrapper.querySelector(".d2h-file-header");
+                if (header && !header.querySelector(".diff-toggle-btn")) {
+                    const toggleButton = document.createElement("button");
+                    toggleButton.type = "button";
+                    toggleButton.className = "diff-toggle-btn";
+                    toggleButton.addEventListener("click", () => {
+                        const shouldCollapse = !wrapper.classList.contains("diff-file-collapsed");
+                        setDiffFileCollapsed(wrapper, fileId, shouldCollapse);
+                        persistCollapsedFileIds();
+                    });
+                    header.appendChild(toggleButton);
+                }
+
+                const isCollapsed = collapsedFileIds.has(fileId);
+                wrapper.classList.toggle("diff-file-collapsed", isCollapsed);
+                const toggleButton = wrapper.querySelector(".diff-toggle-btn");
+                if (toggleButton) {
+                    renderDiffToggleButtonLabel(toggleButton, isCollapsed);
+                }
+            });
+        };
+
+        const renderDiff = (diff) => {
+            const viewMode = normalizeViewMode(viewModeSelect.value);
+            const knownFileIds = new Set();
+            renderFileList(diff);
+            if (!diff || diff.trim() === "") {
+                setEmpty(compareDiffContainer, "No changes between branches");
+                pruneCollapsedFileIds(knownFileIds);
+                updateBulkToggleAvailability();
+                return;
+            }
+            compareDiffContainer.innerHTML = "";
+            const configuration = {
+                drawFileList: false,
+                fileListToggle: false,
+                fileListStartVisible: false,
+                fileContentToggle: false,
+                matching: "lines",
+                outputFormat: viewMode === "side-by-side" ? "side-by-side" : "line-by-line",
+                synchronisedScroll: true,
+                highlight: true,
+                renderNothingWhenEmpty: false,
+            };
+            const diff2htmlUi = new Diff2HtmlUI(compareDiffContainer, diff, configuration);
+            diff2htmlUi.draw();
+            diff2htmlUi.highlightCode();
+            const diffFiles = parseDiffFiles(diff);
+            decorateRenderedDiffFiles(compareDiffContainer, "compare-diff", diffFiles, knownFileIds);
+            pruneCollapsedFileIds(knownFileIds);
+            updateBulkToggleAvailability();
+        };
+
+        const persistControls = () => {
+            const params = new URLSearchParams();
+            if (baseSelect.value) params.set("base", baseSelect.value);
+            if (compareSelect.value) params.set("compare", compareSelect.value);
+            params.set("view", normalizeViewMode(viewModeSelect.value));
+            history.replaceState(null, "", `/compare?${params.toString()}`);
+        };
+
+        const populateSelect = (select, branches, preferred) => {
+            select.innerHTML = "";
+            if (branches.length === 0) {
+                const opt = document.createElement("option");
+                opt.value = "";
+                opt.textContent = "(no branches)";
+                select.appendChild(opt);
+                return;
+            }
+            for (const name of branches) {
+                const opt = document.createElement("option");
+                opt.value = name;
+                opt.textContent = name;
+                select.appendChild(opt);
+            }
+            if (preferred && branches.includes(preferred)) {
+                select.value = preferred;
+            } else {
+                select.value = branches[0];
+            }
+        };
+
+        async function loadBranches() {
+            try {
+                const response = await fetch("/api/branches", { cache: "no-store" });
+                const data = await response.json();
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                const branches = Array.isArray(data.branches) ? data.branches : [];
+                const current = typeof data.current === "string" ? data.current : null;
+
+                const baseParam = urlParams.get("base");
+                const compareParam = urlParams.get("compare");
+                const baseFallback = branches.find((b) => b !== current) || branches[0] || "";
+                populateSelect(baseSelect, branches, baseParam || baseFallback);
+                populateSelect(compareSelect, branches, compareParam || current || branches[0] || "");
+            } catch (error) {
+                showError(error.message);
+                baseSelect.innerHTML = '<option value="">(error)</option>';
+                compareSelect.innerHTML = '<option value="">(error)</option>';
+            }
+        }
+
+        async function loadCompare({ showLoading = true } = {}) {
+            const base = baseSelect.value;
+            const compare = compareSelect.value;
+            if (!base || !compare) {
+                setEmpty(filesListContainer, "Select a base and compare branch...");
+                setEmpty(compareDiffContainer, "Select a base and compare branch...");
+                updateBulkToggleAvailability();
+                return;
+            }
+            if (isLoadingCompare) {
+                return;
+            }
+            isLoadingCompare = true;
+            clearError();
+            if (showLoading) {
+                setLoading(filesListContainer, "Loading files...");
+                setLoading(compareDiffContainer, `Loading diff for ${base}...${compare}...`);
+            }
+            try {
+                const params = new URLSearchParams();
+                params.set("base", base);
+                params.set("compare", compare);
+                const response = await fetch(`/api/compare?${params.toString()}`, {
+                    cache: "no-store"
+                });
+                const data = await response.json();
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                latestDiff = typeof data.diff === "string" ? data.diff : "";
+                renderDiff(latestDiff);
+            } finally {
+                isLoadingCompare = false;
+            }
+        }
+
+        refreshButton.addEventListener("click", () => {
+            loadCompare().catch((error) => showError(error.message));
+        });
+
+        viewModeSelect.addEventListener("change", () => {
+            persistControls();
+            if (latestDiff !== null) {
+                renderDiff(latestDiff);
+            }
+        });
+
+        baseSelect.addEventListener("change", () => {
+            persistControls();
+            loadCompare().catch((error) => showError(error.message));
+        });
+
+        compareSelect.addEventListener("change", () => {
+            persistControls();
+            loadCompare().catch((error) => showError(error.message));
+        });
+
+        swapButton.addEventListener("click", () => {
+            const a = baseSelect.value;
+            const b = compareSelect.value;
+            baseSelect.value = b;
+            compareSelect.value = a;
+            persistControls();
+            loadCompare().catch((error) => showError(error.message));
+        });
+
+        expandAllButton.addEventListener("click", () => {
+            setAllRenderedDiffFilesCollapsed(false);
+        });
+
+        collapseAllButton.addEventListener("click", () => {
+            setAllRenderedDiffFilesCollapsed(true);
+        });
+
+        goTopButton.addEventListener("click", () => {
+            window.scrollTo({ top: 0, behavior: "smooth" });
+        });
+
+        window.addEventListener("scroll", updateGoTopButtonVisibility, { passive: true });
+
+        (async () => {
+            await loadBranches();
+            persistControls();
+            await loadCompare().catch((error) => showError(error.message));
+        })();
+
+        updateGoTopButtonVisibility();
+    </script>
+</body>
+</html>"#;
+
 /// Run the HTTP server
 async fn run_server(
     listener: tokio::net::TcpListener,
@@ -774,7 +1359,10 @@ async fn run_server(
 ) {
     let app = Router::new()
         .route("/diff", get(handle_html_request))
+        .route("/compare", get(handle_compare_html_request))
         .route("/api/status", get(handle_api_status_request))
+        .route("/api/branches", get(handle_api_branches_request))
+        .route("/api/compare", get(handle_api_compare_request))
         .with_state(state)
         .layer(CorsLayer::permissive());
 
@@ -936,6 +1524,130 @@ async fn handle_api_status_request(
     }))
 }
 
+/// Validate a git branch name to block flag injection and command injection.
+///
+/// Accepts the conservative subset `[A-Za-z0-9._/\-]`, rejects names that start
+/// with `-` (so they can never be parsed as a git CLI flag), and caps the length
+/// to bound the work git has to do on a malicious input.
+fn parse_branch_name(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() > 256 {
+        return None;
+    }
+    if value.starts_with('-') {
+        return None;
+    }
+    let ok = value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'));
+    if !ok {
+        return None;
+    }
+    Some(value.to_string())
+}
+
+fn bad_request(message: impl Into<String>) -> Response {
+    let payload = serde_json::json!({ "error": message.into() });
+    let mut response = (StatusCode::BAD_REQUEST, Json(payload)).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+    );
+    response
+}
+
+fn ok_json(payload: serde_json::Value) -> Response {
+    let mut response = (StatusCode::OK, Json(payload)).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, no-cache, must-revalidate"),
+    );
+    response
+}
+
+/// Serve the compare-branches HTML page.
+async fn handle_compare_html_request(
+    State(state): State<Arc<DiffServerState>>,
+) -> impl IntoResponse {
+    let root_path = state.project_root.display().to_string();
+    Html(COMPARE_HTML_TEMPLATE.replace("{{ROOT_PATH}}", &html_escape(&root_path)))
+}
+
+/// List the local branches in the repo and the current HEAD branch.
+async fn handle_api_branches_request(
+    State(state): State<Arc<DiffServerState>>,
+) -> Response {
+    let repo_root = &state.project_root;
+    let raw = match git_output_in_repo(
+        repo_root,
+        &["branch", "--format=%(refname:short)|%(HEAD)"],
+    )
+    .await
+    {
+        Ok(output) => output,
+        Err(error) => return bad_request(error),
+    };
+
+    let mut branches: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    for line in raw.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let (name, head) = match line.rsplit_once('|') {
+            Some((n, h)) => (n.trim(), h.trim()),
+            None => (line.trim(), ""),
+        };
+        if name.is_empty() {
+            continue;
+        }
+        if head == "*" {
+            current = Some(name.to_string());
+        }
+        branches.push(name.to_string());
+    }
+
+    ok_json(serde_json::json!({
+        "current": current,
+        "branches": branches,
+    }))
+}
+
+/// Compute `git diff base...compare` for the requested branches.
+async fn handle_api_compare_request(
+    State(state): State<Arc<DiffServerState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let base_raw = match params.get("base") {
+        Some(v) => v,
+        None => return bad_request("missing `base` query parameter"),
+    };
+    let compare_raw = match params.get("compare") {
+        Some(v) => v,
+        None => return bad_request("missing `compare` query parameter"),
+    };
+    let base = match parse_branch_name(base_raw) {
+        Some(name) => name,
+        None => return bad_request(format!("invalid branch name: {}", base_raw)),
+    };
+    let compare = match parse_branch_name(compare_raw) {
+        Some(name) => name,
+        None => return bad_request(format!("invalid branch name: {}", compare_raw)),
+    };
+
+    let range = format!("{}...{}", base, compare);
+    let diff = match git_output_in_repo(&state.project_root, &["diff", &range]).await {
+        Ok(output) => output,
+        Err(error) => return bad_request(error),
+    };
+
+    ok_json(serde_json::json!({
+        "base": base,
+        "compare": compare,
+        "diff": diff,
+    }))
+}
+
 /// Register diff server commands in the command palette
 pub fn register(registry: &mut CommandRegistry) {
     registry.register(CommandEntry {
@@ -959,6 +1671,19 @@ pub fn register(registry: &mut CommandRegistry) {
             CommandEffect::Action(Action::App(AppAction::Integration(
                 IntegrationAction::RunPluginCommand {
                     id: "server.stop_diff".to_string(),
+                },
+            )))
+        }),
+    });
+
+    registry.register(CommandEntry {
+        id: "server.open_compare".into(),
+        label: "Open Compare Branches".into(),
+        category: Some("Server".into()),
+        action: Box::new(|_ctx: &CommandContext| {
+            CommandEffect::Action(Action::App(AppAction::Integration(
+                IntegrationAction::RunPluginCommand {
+                    id: "server.open_compare".to_string(),
                 },
             )))
         }),

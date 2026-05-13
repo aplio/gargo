@@ -285,14 +285,50 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         .file-status.staged    { color: #2da44e; }
         .file-status.changed   { color: #d29922; }
         .file-status.untracked { color: #8b949e; }
+        .layout {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+        .sidebar {
+            width: 260px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 20px;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
+        }
+        .sidebar .files-section {
+            margin-bottom: 0;
+        }
+        .content {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        @media (max-width: 900px) {
+            .layout { flex-direction: column; }
+            .sidebar { position: static; width: auto; max-height: none; }
+        }
         .d2h-file-header {
             display: flex;
             align-items: center;
-            flex-wrap: wrap;
+            flex-wrap: nowrap;
             gap: 8px;
+            min-width: 0;
+        }
+        .d2h-file-header .d2h-file-name-wrapper {
+            min-width: 0;
+            overflow: hidden;
+            flex: 1 1 auto;
+        }
+        .d2h-file-header .d2h-file-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .diff-toggle-btn {
             order: -1;
+            flex-shrink: 0;
             padding: 0 6px;
             border: 1px solid transparent;
             border-radius: 6px;
@@ -309,6 +345,7 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         }
         .diff-viewed-label {
             margin-left: auto;
+            flex-shrink: 0;
             display: inline-flex;
             align-items: center;
             gap: 6px;
@@ -386,33 +423,38 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 
     <div id="error-banner"></div>
 
-    <section class="section">
-        <h2 id="files-heading">Files</h2>
-        <div id="files-list">
-            <div class="loading">Loading files...</div>
-        </div>
-    </section>
+    <div class="layout">
+        <aside class="sidebar">
+            <section class="section files-section">
+                <h2 id="files-heading">Files</h2>
+                <div id="files-list">
+                    <div class="loading">Loading files...</div>
+                </div>
+            </section>
+        </aside>
+        <main class="content">
+            <section class="section">
+                <h2>Changed Diff</h2>
+                <div id="changed-diff" class="diff-container">
+                    <div class="loading">Loading changed diff...</div>
+                </div>
+            </section>
 
-    <section class="section">
-        <h2>Changed Diff</h2>
-        <div id="changed-diff" class="diff-container">
-            <div class="loading">Loading changed diff...</div>
-        </div>
-    </section>
+            <section class="section">
+                <h2>Staged Diff</h2>
+                <div id="staged-diff" class="diff-container">
+                    <div class="loading">Loading staged diff...</div>
+                </div>
+            </section>
 
-    <section class="section">
-        <h2>Staged Diff</h2>
-        <div id="staged-diff" class="diff-container">
-            <div class="loading">Loading staged diff...</div>
-        </div>
-    </section>
-
-    <section class="section" id="untracked-diff-section">
-        <h2>Untracked Diff</h2>
-        <div id="untracked-diff" class="diff-container">
-            <div class="loading">Loading untracked diff...</div>
-        </div>
-    </section>
+            <section class="section" id="untracked-diff-section">
+                <h2>Untracked Diff</h2>
+                <div id="untracked-diff" class="diff-container">
+                    <div class="loading">Loading untracked diff...</div>
+                </div>
+            </section>
+        </main>
+    </div>
     <button id="go-top-btn" type="button" aria-label="Go to top">Go top</button>
 
     <script>
@@ -973,14 +1015,50 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         .file-list a:hover {
             text-decoration: underline;
         }
+        .layout {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+        .sidebar {
+            width: 260px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 20px;
+            max-height: calc(100vh - 40px);
+            overflow-y: auto;
+        }
+        .sidebar .files-section {
+            margin-bottom: 0;
+        }
+        .content {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        @media (max-width: 900px) {
+            .layout { flex-direction: column; }
+            .sidebar { position: static; width: auto; max-height: none; }
+        }
         .d2h-file-header {
             display: flex;
             align-items: center;
-            flex-wrap: wrap;
+            flex-wrap: nowrap;
             gap: 8px;
+            min-width: 0;
+        }
+        .d2h-file-header .d2h-file-name-wrapper {
+            min-width: 0;
+            overflow: hidden;
+            flex: 1 1 auto;
+        }
+        .d2h-file-header .d2h-file-name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .diff-toggle-btn {
             order: -1;
+            flex-shrink: 0;
             padding: 0 6px;
             border: 1px solid transparent;
             border-radius: 6px;
@@ -997,6 +1075,7 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         }
         .diff-viewed-label {
             margin-left: auto;
+            flex-shrink: 0;
             display: inline-flex;
             align-items: center;
             gap: 6px;
@@ -1080,19 +1159,24 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 
     <div id="error-banner"></div>
 
-    <section class="section">
-        <h2 id="files-heading">Files</h2>
-        <div id="files-list">
-            <div class="loading">Select a base and compare branch...</div>
-        </div>
-    </section>
-
-    <section class="section">
-        <h2>Compare Diff</h2>
-        <div id="compare-diff" class="diff-container">
-            <div class="loading">Select a base and compare branch...</div>
-        </div>
-    </section>
+    <div class="layout">
+        <aside class="sidebar">
+            <section class="section files-section">
+                <h2 id="files-heading">Files</h2>
+                <div id="files-list">
+                    <div class="loading">Select a base and compare branch...</div>
+                </div>
+            </section>
+        </aside>
+        <main class="content">
+            <section class="section">
+                <h2>Compare Diff</h2>
+                <div id="compare-diff" class="diff-container">
+                    <div class="loading">Select a base and compare branch...</div>
+                </div>
+            </section>
+        </main>
+    </div>
     <button id="go-top-btn" type="button" aria-label="Go to top">Go top</button>
 
     <script>

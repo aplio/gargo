@@ -259,6 +259,20 @@ fn test_diff_server_start_stop_and_status_api_results() {
         "expected diff UI to place the toggle chevron on the left of the file header"
     );
     assert!(
+        html.contains("class=\"layout\"")
+            && html.contains("class=\"sidebar\"")
+            && html.contains("class=\"content\""),
+        "expected diff UI to use sidebar + content layout"
+    );
+    assert!(
+        html.contains("flex-wrap: nowrap") && html.contains("text-overflow: ellipsis"),
+        "expected diff UI file header to use single-line ellipsis layout"
+    );
+    assert!(
+        html.contains("position: sticky"),
+        "expected diff UI sidebar to be sticky"
+    );
+    assert!(
         html.contains("id=\"files-list\"")
             && html.contains("id=\"files-heading\"")
             && html.contains("id=\"changed-diff\"")
@@ -892,6 +906,20 @@ fn test_diff_server_compare_html_page() {
     assert!(
         html.contains("header.insertBefore(toggleButton, header.firstChild)"),
         "expected /compare HTML to place the toggle chevron on the left of the file header"
+    );
+    assert!(
+        html.contains("class=\"layout\"")
+            && html.contains("class=\"sidebar\"")
+            && html.contains("class=\"content\""),
+        "expected /compare HTML to use sidebar + content layout"
+    );
+    assert!(
+        html.contains("flex-wrap: nowrap") && html.contains("text-overflow: ellipsis"),
+        "expected /compare HTML file header to use single-line ellipsis layout"
+    );
+    assert!(
+        html.contains("position: sticky"),
+        "expected /compare HTML sidebar to be sticky"
     );
 
     stop_diff_server(&handle);

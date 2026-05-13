@@ -280,6 +280,70 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         .file-status.staged    { color: #2da44e; }
         .file-status.changed   { color: #d29922; }
         .file-status.untracked { color: #8b949e; }
+        .file-tree { list-style: none; margin: 0; padding: 0; }
+        .file-tree li { margin: 0; }
+        .tree-dir { margin: 0; }
+        .tree-dir-children {
+            list-style: none;
+            margin: 0;
+            padding-left: 16px;
+        }
+        .tree-dir.tree-dir-collapsed > .tree-dir-children { display: none; }
+        .tree-dir-header {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 4px;
+            border-radius: 4px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .tree-dir-header:hover { background: #f6f8fa; }
+        .tree-dir-toggle {
+            flex-shrink: 0;
+            padding: 0 4px;
+            border: none;
+            background: transparent;
+            color: #57606a;
+            font-size: 12px;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .tree-dir-name {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            font-weight: 600;
+            color: #1f2328;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            min-width: 0;
+            flex: 1 1 auto;
+        }
+        .tree-dir-count {
+            flex-shrink: 0;
+            font-size: 11px;
+            color: #57606a;
+        }
+        .tree-file a {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: #0a58ca;
+            text-decoration: none;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+        .tree-file a:hover { background: #f6f8fa; text-decoration: underline; }
+        .tree-file .file-path-text {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
         .gr-file {
             background: white;
             border: 1px solid #d0d7de;
@@ -434,13 +498,15 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         const AUTO_REFRESH_INTERVAL_MS = 2000;
         const GO_TOP_SHOW_SCROLL_Y = 240;
         const STORAGE_ROOT = rootPathCode ? rootPathCode.textContent : "unknown-root";
-        const COLLAPSED_FILES_STORAGE_KEY = `gargo.diff.expanded.v1:${STORAGE_ROOT}`;
+        const COLLAPSED_FILES_STORAGE_KEY = `gargo.diff.collapsed.v3:${STORAGE_ROOT}`;
         const VIEWED_FILES_STORAGE_KEY = `gargo.diff.viewed.v2:${STORAGE_ROOT}`;
+        const SIDEBAR_COLLAPSED_KEY = `gargo.diff.sidebar.collapsed.v1:${STORAGE_ROOT}`;
 
         showUntrackedToggle.checked = parseBoolParam(urlParams.get("show_untracked"), true);
 
-        let expandedFileIds = loadIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY);
+        let collapsedFileIds = loadIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY);
         let viewedFileIds = loadIdSet(localStorage, VIEWED_FILES_STORAGE_KEY);
+        let sidebarCollapsedDirs = loadIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY);
         const bodyCache = new Map();
         let isLoading = false;
         let latestStatus = null;
@@ -468,8 +534,23 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         const persistIdSet = (storage, key, set) => {
             try { storage.setItem(key, JSON.stringify(Array.from(set))); } catch (_e) {}
         };
-        const persistExpandedFileIds = () => persistIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY, expandedFileIds);
+        const persistCollapsedFileIds = () => persistIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY, collapsedFileIds);
         const persistViewedFileIds = () => persistIdSet(localStorage, VIEWED_FILES_STORAGE_KEY, viewedFileIds);
+        const persistSidebarCollapsedDirs = () => persistIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY, sidebarCollapsedDirs);
+
+        const fileObserver = (typeof IntersectionObserver !== "undefined")
+            ? new IntersectionObserver((entries) => {
+                for (const e of entries) {
+                    if (e.isIntersecting) {
+                        const wrapper = e.target;
+                        if (!wrapper.classList.contains("gr-file-collapsed")
+                            && !wrapper.classList.contains("gr-file-viewed")) {
+                            ensureBodyLoaded(wrapper).catch((err) => showError(err.message));
+                        }
+                    }
+                }
+            }, { rootMargin: "600px 0px", threshold: 0 })
+            : null;
 
         const showError = (message) => {
             errorBanner.textContent = `Error: ${message}`;
@@ -571,6 +652,7 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             body.className = "gr-file-body";
             wrapper.appendChild(body);
 
+            if (fileObserver) fileObserver.observe(wrapper);
             return wrapper;
         }
 
@@ -599,12 +681,12 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             const button = wrapper.querySelector(".diff-toggle-btn");
             if (button) renderDiffToggleButtonLabel(button, isCollapsed);
             if (isCollapsed) {
-                expandedFileIds.delete(fileId);
+                collapsedFileIds.add(fileId);
             } else {
-                expandedFileIds.add(fileId);
+                collapsedFileIds.delete(fileId);
                 ensureBodyLoaded(wrapper).catch((e) => showError(e.message));
             }
-            persistExpandedFileIds();
+            persistCollapsedFileIds();
         }
 
         function setFileViewed(wrapper, isViewed) {
@@ -617,16 +699,23 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 viewedFileIds.add(fileId);
                 wrapper.classList.add("diff-file-collapsed");
                 wrapper.classList.add("gr-file-collapsed");
-                expandedFileIds.delete(fileId);
                 const button = wrapper.querySelector(".diff-toggle-btn");
                 if (button) renderDiffToggleButtonLabel(button, true);
                 const body = wrapper.querySelector(".gr-file-body");
                 if (body) { body.innerHTML = ""; delete body.dataset.loaded; }
             } else {
                 viewedFileIds.delete(fileId);
+                if (!collapsedFileIds.has(fileId)) {
+                    // Default-expand on un-viewed
+                    wrapper.classList.remove("diff-file-collapsed");
+                    wrapper.classList.remove("gr-file-collapsed");
+                    const button = wrapper.querySelector(".diff-toggle-btn");
+                    if (button) renderDiffToggleButtonLabel(button, false);
+                    ensureBodyLoaded(wrapper).catch((e) => showError(e.message));
+                }
             }
             persistViewedFileIds();
-            persistExpandedFileIds();
+            persistCollapsedFileIds();
         }
 
         async function ensureBodyLoaded(wrapper) {
@@ -668,6 +757,125 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             }
         }
 
+        function buildFileTree(entries) {
+            // Returns a root node { children: Map<name, node> }
+            // Internal nodes have `dirPath` (absolute dir path), file leaves carry the entry.
+            const root = { type: "dir", dirPath: "", children: new Map() };
+            for (const entry of entries) {
+                const parts = entry.meta.path.split("/").filter((p) => p.length > 0);
+                let node = root;
+                let dirPath = "";
+                for (let i = 0; i < parts.length - 1; i++) {
+                    const part = parts[i];
+                    dirPath = dirPath ? `${dirPath}/${part}` : part;
+                    let child = node.children.get(part);
+                    if (!child) {
+                        child = { type: "dir", dirPath, children: new Map() };
+                        node.children.set(part, child);
+                    }
+                    node = child;
+                }
+                const leafName = parts[parts.length - 1] || entry.meta.path;
+                node.children.set(`__file__${leafName}__${entry.section || ""}`, {
+                    type: "file", name: leafName, entry,
+                });
+            }
+            return root;
+        }
+
+        function appendTreeNode(parentUl, node) {
+            // Sort children: dirs first (alphabetical), then files (alphabetical)
+            const dirs = [];
+            const files = [];
+            for (const [, child] of node.children) {
+                if (child.type === "dir") dirs.push(child);
+                else files.push(child);
+            }
+            dirs.sort((a, b) => a.dirPath.localeCompare(b.dirPath));
+            files.sort((a, b) => a.name.localeCompare(b.name));
+            for (const dir of dirs) {
+                const li = document.createElement("li");
+                li.className = "tree-dir";
+                li.dataset.dirPath = dir.dirPath;
+                const fileCount = countLeaves(dir);
+                const headerEl = document.createElement("div");
+                headerEl.className = "tree-dir-header";
+                const toggle = document.createElement("button");
+                toggle.type = "button";
+                toggle.className = "tree-dir-toggle";
+                toggle.setAttribute("aria-expanded", "true");
+                toggle.textContent = "▾";
+                const nameEl = document.createElement("span");
+                nameEl.className = "tree-dir-name";
+                const segs = dir.dirPath.split("/");
+                nameEl.textContent = segs[segs.length - 1];
+                nameEl.title = dir.dirPath;
+                const countEl = document.createElement("span");
+                countEl.className = "tree-dir-count";
+                countEl.textContent = String(fileCount);
+                headerEl.appendChild(toggle);
+                headerEl.appendChild(nameEl);
+                headerEl.appendChild(countEl);
+                headerEl.addEventListener("click", (e) => {
+                    e.preventDefault();
+                    toggleDirCollapsed(li, dir.dirPath);
+                });
+                li.appendChild(headerEl);
+                const childrenUl = document.createElement("ul");
+                childrenUl.className = "tree-dir-children";
+                appendTreeNode(childrenUl, dir);
+                li.appendChild(childrenUl);
+                if (sidebarCollapsedDirs.has(dir.dirPath)) {
+                    li.classList.add("tree-dir-collapsed");
+                    toggle.textContent = "▸";
+                    toggle.setAttribute("aria-expanded", "false");
+                }
+                parentUl.appendChild(li);
+            }
+            for (const fileNode of files) {
+                const entry = fileNode.entry;
+                const section = entry.section;
+                const meta = entry.meta;
+                const li = document.createElement("li");
+                li.className = "tree-file";
+                const a = document.createElement("a");
+                a.href = `#${fileAnchorOf(section, meta.path)}`;
+                const badge = document.createElement("span");
+                badge.className = `file-status ${SECTION_LIST_CSS[section] || "changed"}`;
+                badge.textContent = SECTION_LIST_BADGE[section] || "M";
+                const text = document.createElement("span");
+                text.className = "file-path-text";
+                text.textContent = fileNode.name;
+                text.title = meta.path;
+                a.appendChild(badge);
+                a.appendChild(text);
+                li.appendChild(a);
+                parentUl.appendChild(li);
+            }
+        }
+
+        function countLeaves(node) {
+            let n = 0;
+            for (const [, child] of node.children) {
+                if (child.type === "file") n += 1;
+                else n += countLeaves(child);
+            }
+            return n;
+        }
+
+        function toggleDirCollapsed(li, dirPath) {
+            const collapsed = !li.classList.contains("tree-dir-collapsed");
+            li.classList.toggle("tree-dir-collapsed", collapsed);
+            const toggle = li.querySelector(".tree-dir-toggle");
+            if (toggle) {
+                toggle.textContent = collapsed ? "▸" : "▾";
+                toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+            }
+            if (collapsed) sidebarCollapsedDirs.add(dirPath);
+            else sidebarCollapsedDirs.delete(dirPath);
+            persistSidebarCollapsedDirs();
+        }
+
         function renderSidebar(allEntries) {
             if (allEntries.length === 0) {
                 filesHeading.textContent = "Files";
@@ -682,29 +890,20 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             if (counts.untracked) parts.push(`${counts.untracked} untracked`);
             filesHeading.textContent = parts.length > 0 ? `Files (${parts.join(", ")})` : "Files";
             filesListContainer.innerHTML = "";
+            const root = buildFileTree(allEntries);
             const ul = document.createElement("ul");
-            ul.className = "file-list";
-            for (const { section, meta } of allEntries) {
-                const li = document.createElement("li");
-                const a = document.createElement("a");
-                a.href = `#${fileAnchorOf(section, meta.path)}`;
-                const badge = document.createElement("span");
-                badge.className = `file-status ${SECTION_LIST_CSS[section] || "changed"}`;
-                badge.textContent = SECTION_LIST_BADGE[section] || "M";
-                const text = document.createElement("span");
-                text.className = "file-path-text";
-                text.textContent = meta.path;
-                text.title = meta.path;
-                a.appendChild(badge);
-                a.appendChild(text);
-                li.appendChild(a);
-                ul.appendChild(li);
-            }
+            ul.className = "file-tree";
+            appendTreeNode(ul, root);
             filesListContainer.appendChild(ul);
         }
 
         function renderMain(allEntries) {
             if (allEntries.length === 0) {
+                if (fileObserver) {
+                    for (const child of filesMain.children) {
+                        if (child.dataset && child.dataset.diffFileId) fileObserver.unobserve(child);
+                    }
+                }
                 filesMain.innerHTML = "";
                 setEmpty(filesMain, "No files changed");
                 return;
@@ -717,6 +916,7 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                     if (presentIds.has(child.dataset.diffFileId)) {
                         existing.set(child.dataset.diffFileId, child);
                     } else {
+                        if (fileObserver) fileObserver.unobserve(child);
                         child.remove();
                     }
                 } else {
@@ -727,10 +927,10 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             for (const id of Array.from(bodyCache.keys())) {
                 if (!presentIds.has(id)) bodyCache.delete(id);
             }
-            for (const id of Array.from(expandedFileIds)) {
-                if (!presentIds.has(id)) expandedFileIds.delete(id);
+            for (const id of Array.from(collapsedFileIds)) {
+                if (!presentIds.has(id)) collapsedFileIds.delete(id);
             }
-            persistExpandedFileIds();
+            persistCollapsedFileIds();
 
             let anchor = null;
             for (const { section, meta } of allEntries) {
@@ -749,18 +949,17 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 }
                 anchor = wrapper;
                 const isViewed = viewedFileIds.has(fileId);
-                const isExpanded = !isViewed && expandedFileIds.has(fileId);
+                const isCollapsed = isViewed || collapsedFileIds.has(fileId);
                 wrapper.classList.toggle("gr-file-viewed", isViewed);
                 wrapper.classList.toggle("diff-file-viewed", isViewed);
-                wrapper.classList.toggle("gr-file-collapsed", !isExpanded);
-                wrapper.classList.toggle("diff-file-collapsed", !isExpanded);
+                wrapper.classList.toggle("gr-file-collapsed", isCollapsed);
+                wrapper.classList.toggle("diff-file-collapsed", isCollapsed);
                 const checkbox = wrapper.querySelector(".diff-viewed-label input[type=checkbox]");
                 if (checkbox) checkbox.checked = isViewed;
                 const button = wrapper.querySelector(".diff-toggle-btn");
-                if (button) renderDiffToggleButtonLabel(button, !isExpanded);
-                if (isExpanded) {
-                    ensureBodyLoaded(wrapper).catch((e) => showError(e.message));
-                }
+                if (button) renderDiffToggleButtonLabel(button, isCollapsed);
+                // Body fetch happens lazily via IntersectionObserver when the
+                // wrapper scrolls into view. No eager fetch here.
             }
         }
 
@@ -933,6 +1132,70 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             flex: 1 1 auto;
             min-width: 0;
         }
+        .file-tree { list-style: none; margin: 0; padding: 0; }
+        .file-tree li { margin: 0; }
+        .tree-dir { margin: 0; }
+        .tree-dir-children {
+            list-style: none;
+            margin: 0;
+            padding-left: 16px;
+        }
+        .tree-dir.tree-dir-collapsed > .tree-dir-children { display: none; }
+        .tree-dir-header {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 4px;
+            border-radius: 4px;
+            cursor: pointer;
+            user-select: none;
+        }
+        .tree-dir-header:hover { background: #f6f8fa; }
+        .tree-dir-toggle {
+            flex-shrink: 0;
+            padding: 0 4px;
+            border: none;
+            background: transparent;
+            color: #57606a;
+            font-size: 12px;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .tree-dir-name {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            font-weight: 600;
+            color: #1f2328;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            min-width: 0;
+            flex: 1 1 auto;
+        }
+        .tree-dir-count {
+            flex-shrink: 0;
+            font-size: 11px;
+            color: #57606a;
+        }
+        .tree-file a {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: #0a58ca;
+            text-decoration: none;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 12px;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+        .tree-file a:hover { background: #f6f8fa; text-decoration: underline; }
+        .tree-file .file-path-text {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1 1 auto;
+            min-width: 0;
+        }
         .gr-file {
             background: white;
             border: 1px solid #d0d7de;
@@ -1093,11 +1356,13 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         const goTopButton = document.getElementById("go-top-btn");
         const GO_TOP_SHOW_SCROLL_Y = 240;
         const STORAGE_ROOT = rootPathCode ? rootPathCode.textContent : "unknown-root";
-        const COLLAPSED_FILES_STORAGE_KEY = `gargo.compare.expanded.v1:${STORAGE_ROOT}`;
+        const COLLAPSED_FILES_STORAGE_KEY = `gargo.compare.collapsed.v3:${STORAGE_ROOT}`;
         const VIEWED_FILES_STORAGE_KEY = `gargo.compare.viewed.v2:${STORAGE_ROOT}`;
+        const SIDEBAR_COLLAPSED_KEY = `gargo.compare.sidebar.collapsed.v1:${STORAGE_ROOT}`;
 
-        let expandedFileIds = loadIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY);
+        let collapsedFileIds = loadIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY);
         let viewedFileIds = loadIdSet(localStorage, VIEWED_FILES_STORAGE_KEY);
+        let sidebarCollapsedDirs = loadIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY);
         const bodyCache = new Map();
         let isLoadingCompare = false;
         let latestFiles = null;
@@ -1123,8 +1388,23 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         const persistIdSet = (storage, key, set) => {
             try { storage.setItem(key, JSON.stringify(Array.from(set))); } catch (_e) {}
         };
-        const persistExpandedFileIds = () => persistIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY, expandedFileIds);
+        const persistCollapsedFileIds = () => persistIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY, collapsedFileIds);
         const persistViewedFileIds = () => persistIdSet(localStorage, VIEWED_FILES_STORAGE_KEY, viewedFileIds);
+        const persistSidebarCollapsedDirs = () => persistIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY, sidebarCollapsedDirs);
+
+        const fileObserver = (typeof IntersectionObserver !== "undefined")
+            ? new IntersectionObserver((entries) => {
+                for (const e of entries) {
+                    if (e.isIntersecting) {
+                        const wrapper = e.target;
+                        if (!wrapper.classList.contains("gr-file-collapsed")
+                            && !wrapper.classList.contains("gr-file-viewed")) {
+                            ensureBodyLoaded(wrapper).catch((err) => showError(err.message));
+                        }
+                    }
+                }
+            }, { rootMargin: "600px 0px", threshold: 0 })
+            : null;
 
         const showError = (m) => { errorBanner.textContent = `Error: ${m}`; errorBanner.style.display = "block"; };
         const clearError = () => { errorBanner.textContent = ""; errorBanner.style.display = "none"; };
@@ -1215,6 +1495,7 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             body.className = "gr-file-body";
             wrapper.appendChild(body);
 
+            if (fileObserver) fileObserver.observe(wrapper);
             return wrapper;
         }
 
@@ -1238,12 +1519,12 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             const button = wrapper.querySelector(".diff-toggle-btn");
             if (button) renderDiffToggleButtonLabel(button, isCollapsed);
             if (isCollapsed) {
-                expandedFileIds.delete(fileId);
+                collapsedFileIds.add(fileId);
             } else {
-                expandedFileIds.add(fileId);
+                collapsedFileIds.delete(fileId);
                 ensureBodyLoaded(wrapper).catch((e) => showError(e.message));
             }
-            persistExpandedFileIds();
+            persistCollapsedFileIds();
         }
 
         function setFileViewed(wrapper, isViewed) {
@@ -1256,16 +1537,22 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 viewedFileIds.add(fileId);
                 wrapper.classList.add("diff-file-collapsed");
                 wrapper.classList.add("gr-file-collapsed");
-                expandedFileIds.delete(fileId);
                 const button = wrapper.querySelector(".diff-toggle-btn");
                 if (button) renderDiffToggleButtonLabel(button, true);
                 const body = wrapper.querySelector(".gr-file-body");
                 if (body) { body.innerHTML = ""; delete body.dataset.loaded; }
             } else {
                 viewedFileIds.delete(fileId);
+                if (!collapsedFileIds.has(fileId)) {
+                    wrapper.classList.remove("diff-file-collapsed");
+                    wrapper.classList.remove("gr-file-collapsed");
+                    const button = wrapper.querySelector(".diff-toggle-btn");
+                    if (button) renderDiffToggleButtonLabel(button, false);
+                    ensureBodyLoaded(wrapper).catch((e) => showError(e.message));
+                }
             }
             persistViewedFileIds();
-            persistExpandedFileIds();
+            persistCollapsedFileIds();
         }
 
         async function ensureBodyLoaded(wrapper) {
@@ -1308,6 +1595,114 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             }
         }
 
+        function buildFileTree(files) {
+            const root = { type: "dir", dirPath: "", children: new Map() };
+            for (const meta of files) {
+                const parts = meta.path.split("/").filter((p) => p.length > 0);
+                let node = root;
+                let dirPath = "";
+                for (let i = 0; i < parts.length - 1; i++) {
+                    const part = parts[i];
+                    dirPath = dirPath ? `${dirPath}/${part}` : part;
+                    let child = node.children.get(part);
+                    if (!child) {
+                        child = { type: "dir", dirPath, children: new Map() };
+                        node.children.set(part, child);
+                    }
+                    node = child;
+                }
+                const leafName = parts[parts.length - 1] || meta.path;
+                node.children.set(`__file__${leafName}`, { type: "file", name: leafName, meta });
+            }
+            return root;
+        }
+
+        function appendTreeNode(parentUl, node) {
+            const dirs = [];
+            const files = [];
+            for (const [, child] of node.children) {
+                if (child.type === "dir") dirs.push(child);
+                else files.push(child);
+            }
+            dirs.sort((a, b) => a.dirPath.localeCompare(b.dirPath));
+            files.sort((a, b) => a.name.localeCompare(b.name));
+            for (const dir of dirs) {
+                const li = document.createElement("li");
+                li.className = "tree-dir";
+                li.dataset.dirPath = dir.dirPath;
+                const fileCount = countLeaves(dir);
+                const headerEl = document.createElement("div");
+                headerEl.className = "tree-dir-header";
+                const toggle = document.createElement("button");
+                toggle.type = "button";
+                toggle.className = "tree-dir-toggle";
+                toggle.setAttribute("aria-expanded", "true");
+                toggle.textContent = "▾";
+                const nameEl = document.createElement("span");
+                nameEl.className = "tree-dir-name";
+                const segs = dir.dirPath.split("/");
+                nameEl.textContent = segs[segs.length - 1];
+                nameEl.title = dir.dirPath;
+                const countEl = document.createElement("span");
+                countEl.className = "tree-dir-count";
+                countEl.textContent = String(fileCount);
+                headerEl.appendChild(toggle);
+                headerEl.appendChild(nameEl);
+                headerEl.appendChild(countEl);
+                headerEl.addEventListener("click", (e) => {
+                    e.preventDefault();
+                    toggleDirCollapsed(li, dir.dirPath);
+                });
+                li.appendChild(headerEl);
+                const childrenUl = document.createElement("ul");
+                childrenUl.className = "tree-dir-children";
+                appendTreeNode(childrenUl, dir);
+                li.appendChild(childrenUl);
+                if (sidebarCollapsedDirs.has(dir.dirPath)) {
+                    li.classList.add("tree-dir-collapsed");
+                    toggle.textContent = "▸";
+                    toggle.setAttribute("aria-expanded", "false");
+                }
+                parentUl.appendChild(li);
+            }
+            for (const fileNode of files) {
+                const meta = fileNode.meta;
+                const li = document.createElement("li");
+                li.className = "tree-file";
+                const a = document.createElement("a");
+                a.href = `#${fileAnchorOf(meta.path)}`;
+                const text = document.createElement("span");
+                text.className = "file-path-text";
+                text.textContent = fileNode.name;
+                text.title = meta.path;
+                a.appendChild(text);
+                li.appendChild(a);
+                parentUl.appendChild(li);
+            }
+        }
+
+        function countLeaves(node) {
+            let n = 0;
+            for (const [, child] of node.children) {
+                if (child.type === "file") n += 1;
+                else n += countLeaves(child);
+            }
+            return n;
+        }
+
+        function toggleDirCollapsed(li, dirPath) {
+            const collapsed = !li.classList.contains("tree-dir-collapsed");
+            li.classList.toggle("tree-dir-collapsed", collapsed);
+            const toggle = li.querySelector(".tree-dir-toggle");
+            if (toggle) {
+                toggle.textContent = collapsed ? "▸" : "▾";
+                toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+            }
+            if (collapsed) sidebarCollapsedDirs.add(dirPath);
+            else sidebarCollapsedDirs.delete(dirPath);
+            persistSidebarCollapsedDirs();
+        }
+
         function renderSidebar(files) {
             if (files.length === 0) {
                 filesHeading.textContent = "Files";
@@ -1316,25 +1711,20 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             }
             filesHeading.textContent = `Files (${files.length})`;
             filesListContainer.innerHTML = "";
+            const root = buildFileTree(files);
             const ul = document.createElement("ul");
-            ul.className = "file-list";
-            for (const meta of files) {
-                const li = document.createElement("li");
-                const a = document.createElement("a");
-                a.href = `#${fileAnchorOf(meta.path)}`;
-                const text = document.createElement("span");
-                text.className = "file-path-text";
-                text.textContent = meta.path;
-                text.title = meta.path;
-                a.appendChild(text);
-                li.appendChild(a);
-                ul.appendChild(li);
-            }
+            ul.className = "file-tree";
+            appendTreeNode(ul, root);
             filesListContainer.appendChild(ul);
         }
 
         function renderMain(files) {
             if (files.length === 0) {
+                if (fileObserver) {
+                    for (const child of filesMain.children) {
+                        if (child.dataset && child.dataset.diffFileId) fileObserver.unobserve(child);
+                    }
+                }
                 filesMain.innerHTML = "";
                 setEmpty(filesMain, "No changes between branches");
                 return;
@@ -1346,6 +1736,7 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                     if (presentIds.has(child.dataset.diffFileId)) {
                         existing.set(child.dataset.diffFileId, child);
                     } else {
+                        if (fileObserver) fileObserver.unobserve(child);
                         child.remove();
                     }
                 } else {
@@ -1355,10 +1746,10 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             for (const id of Array.from(bodyCache.keys())) {
                 if (!presentIds.has(id)) bodyCache.delete(id);
             }
-            for (const id of Array.from(expandedFileIds)) {
-                if (!presentIds.has(id)) expandedFileIds.delete(id);
+            for (const id of Array.from(collapsedFileIds)) {
+                if (!presentIds.has(id)) collapsedFileIds.delete(id);
             }
-            persistExpandedFileIds();
+            persistCollapsedFileIds();
 
             let anchor = null;
             for (const meta of files) {
@@ -1377,18 +1768,16 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 }
                 anchor = wrapper;
                 const isViewed = viewedFileIds.has(fileId);
-                const isExpanded = !isViewed && expandedFileIds.has(fileId);
+                const isCollapsed = isViewed || collapsedFileIds.has(fileId);
                 wrapper.classList.toggle("gr-file-viewed", isViewed);
                 wrapper.classList.toggle("diff-file-viewed", isViewed);
-                wrapper.classList.toggle("gr-file-collapsed", !isExpanded);
-                wrapper.classList.toggle("diff-file-collapsed", !isExpanded);
+                wrapper.classList.toggle("gr-file-collapsed", isCollapsed);
+                wrapper.classList.toggle("diff-file-collapsed", isCollapsed);
                 const checkbox = wrapper.querySelector(".diff-viewed-label input[type=checkbox]");
                 if (checkbox) checkbox.checked = isViewed;
                 const button = wrapper.querySelector(".diff-toggle-btn");
-                if (button) renderDiffToggleButtonLabel(button, !isExpanded);
-                if (isExpanded) {
-                    ensureBodyLoaded(wrapper).catch((e) => showError(e.message));
-                }
+                if (button) renderDiffToggleButtonLabel(button, isCollapsed);
+                // Body fetch happens lazily via IntersectionObserver.
             }
         }
 
@@ -1481,13 +1870,7 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 
         refreshButton.addEventListener("click", () => {
             bodyCache.clear();
-            const expandedSnapshot = new Set(expandedFileIds);
-            loadCompare().then(() => {
-                // Re-fetch any files that should still be expanded
-                expandedFileIds = expandedSnapshot;
-                persistExpandedFileIds();
-                if (latestFiles) renderMain(latestFiles);
-            }).catch((e) => showError(e.message));
+            loadCompare().catch((e) => showError(e.message));
         });
         baseSelect.addEventListener("change", () => {
             persistControls();

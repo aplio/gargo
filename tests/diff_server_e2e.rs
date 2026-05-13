@@ -319,6 +319,28 @@ fn test_diff_server_start_stop_and_status_api_results() {
         html.contains(".gr-diff-body") && html.contains(".gr-line-add"),
         "expected diff UI to embed Rust-rendered diff styles"
     );
+    assert!(
+        html.contains("gargo.diff.collapsed.v3:")
+            && !html.contains("gargo.diff.expanded.v1:"),
+        "expected diff UI to default-expand (collapsedFileIds tracks explicit collapse)"
+    );
+    assert!(
+        html.contains("IntersectionObserver") && html.contains("rootMargin"),
+        "expected diff UI to use IntersectionObserver for lazy on-scroll fetch"
+    );
+    assert!(
+        html.contains("SIDEBAR_COLLAPSED_KEY")
+            && html.contains("loadIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY)")
+            && html.contains("persistIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY"),
+        "expected diff UI to persist sidebar tree collapse state"
+    );
+    assert!(
+        html.contains("ul.className = \"file-tree\"")
+            && html.contains("\"tree-dir\"")
+            && html.contains("\"tree-file\"")
+            && html.contains("tree-dir-toggle"),
+        "expected diff UI sidebar to render a tree view"
+    );
 
     handle
         .command_tx
@@ -841,6 +863,28 @@ fn test_diff_server_compare_html_page() {
     assert!(
         html.contains(".gr-diff-body") && html.contains(".gr-line-add"),
         "expected /compare HTML to embed Rust-rendered diff styles"
+    );
+    assert!(
+        html.contains("gargo.compare.collapsed.v3:")
+            && !html.contains("gargo.compare.expanded.v1:"),
+        "expected /compare HTML to default-expand (collapsedFileIds tracks explicit collapse)"
+    );
+    assert!(
+        html.contains("IntersectionObserver") && html.contains("rootMargin"),
+        "expected /compare HTML to use IntersectionObserver for lazy on-scroll fetch"
+    );
+    assert!(
+        html.contains("SIDEBAR_COLLAPSED_KEY")
+            && html.contains("loadIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY)")
+            && html.contains("persistIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY"),
+        "expected /compare HTML to persist sidebar tree collapse state"
+    );
+    assert!(
+        html.contains("ul.className = \"file-tree\"")
+            && html.contains("\"tree-dir\"")
+            && html.contains("\"tree-file\"")
+            && html.contains("tree-dir-toggle"),
+        "expected /compare HTML sidebar to render a tree view"
     );
 
     stop_diff_server(&handle);

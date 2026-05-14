@@ -356,7 +356,7 @@ impl TextView {
             }
         }
 
-        if let Some((sel_start, sel_end)) = buf.selection_range() {
+        for (sel_start, sel_end) in buf.selection_ranges() {
             for row in 0..view_height {
                 let line_idx = buf.scroll_offset + row;
                 if line_idx >= total_lines {
@@ -416,13 +416,19 @@ impl TextView {
         // Secondary cursors overlay pass
         if buf.cursors.len() > 1 {
             let available = area_w.saturating_sub(gutter_w);
-            let forward_sel = buf.selection.is_some_and(|s| {
-                s.head > s.anchor
-                    && matches!(s.cursor_display, SelectionCursorDisplay::TailOnForward)
-            });
             let rope_len = buf.rope.len_chars();
-            for &cursor_pos in buf.cursors.iter().skip(1) {
-                // Apply same adjustment as display_cursor() for the primary cursor
+            for (i, &cursor_pos) in buf.cursors.iter().enumerate().skip(1) {
+                // Each cursor decides its own one-back display adjustment based
+                // on its own selection (not the primary's).
+                let forward_sel = buf
+                    .selections
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|s| {
+                        s.head > s.anchor
+                            && matches!(s.cursor_display, SelectionCursorDisplay::TailOnForward)
+                    });
                 let cursor_pos = if forward_sel {
                     cursor_pos.saturating_sub(1)
                 } else {

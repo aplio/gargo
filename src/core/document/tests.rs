@@ -772,6 +772,7 @@ fn multi_cursor_undo_insert_char() {
     let mut doc = doc_from_str("ab\ncd\n");
     doc.cursors[0] = 0; // before 'a'
     doc.cursors.push(3); // before 'c'
+    doc.selections.push(None);
     doc.sort_and_dedup_cursors();
     assert_eq!(doc.cursor_count(), 2);
 
@@ -792,6 +793,7 @@ fn multi_cursor_undo_delete_backward() {
     let mut doc = doc_from_str("ab\ncd\n");
     doc.cursors[0] = 1; // after 'a'
     doc.cursors.push(4); // after 'c'
+    doc.selections.push(None);
     doc.sort_and_dedup_cursors();
     assert_eq!(doc.cursor_count(), 2);
 
@@ -812,6 +814,7 @@ fn multi_cursor_redo_insert_char() {
     let mut doc = doc_from_str("ab\ncd\n");
     doc.cursors[0] = 0;
     doc.cursors.push(3);
+    doc.selections.push(None);
     doc.sort_and_dedup_cursors();
 
     doc.insert_char('X');
@@ -1101,7 +1104,7 @@ fn clear_anchor_after_shift_word_forward_keeps_cursor_position() {
 #[test]
 fn selection_range_forward() {
     let mut doc = doc_from_str("hello\n");
-    doc.selection = Some(Selection::tail_on_forward(1, 3));
+    doc.selections[0] = Some(Selection::tail_on_forward(1, 3));
     doc.cursors[0] = 3;
     assert_eq!(doc.selection_range(), Some((1, 3)));
 }
@@ -1109,7 +1112,7 @@ fn selection_range_forward() {
 #[test]
 fn selection_range_backward() {
     let mut doc = doc_from_str("hello\n");
-    doc.selection = Some(Selection::tail_on_forward(4, 1));
+    doc.selections[0] = Some(Selection::tail_on_forward(4, 1));
     doc.cursors[0] = 1;
     assert_eq!(doc.selection_range(), Some((1, 4)));
 }
@@ -1123,7 +1126,7 @@ fn selection_range_none() {
 #[test]
 fn selection_text_basic() {
     let mut doc = doc_from_str("hello world\n");
-    doc.selection = Some(Selection::tail_on_forward(0, 5));
+    doc.selections[0] = Some(Selection::tail_on_forward(0, 5));
     doc.cursors[0] = 4;
     assert_eq!(doc.selection_text(), Some("hello".to_string()));
 }
@@ -1678,6 +1681,7 @@ fn multi_cursor_word_backward() {
     let mut doc = doc_from_str("hello world\nfoo bar\n");
     doc.cursors[0] = 6; // start of "world"
     doc.cursors.push(16); // start of "bar"
+    doc.selections.push(None);
     doc.sort_and_dedup_cursors();
     assert_eq!(doc.cursor_count(), 2);
     doc.move_word_backward();
@@ -1693,6 +1697,7 @@ fn multi_cursor_word_forward_identical_lines() {
     let mut doc = doc_from_str("123 4\n123 4\n");
     doc.cursors[0] = 0; // line 0, col 0
     doc.cursors.push(6); // line 1, col 0
+    doc.selections.push(None);
     doc.sort_and_dedup_cursors();
     assert_eq!(doc.cursor_count(), 2);
 
@@ -1710,6 +1715,7 @@ fn clear_anchor_adjusts_all_cursors_forward() {
     let mut doc = doc_from_str("123 4\n123 4\n");
     doc.cursors[0] = 0;
     doc.cursors.push(6);
+    doc.selections.push(None);
     doc.sort_and_dedup_cursors();
 
     // Simulate the normal-mode word-forward flow: set_anchor then move
@@ -1719,7 +1725,7 @@ fn clear_anchor_adjusts_all_cursors_forward() {
     // Before clear_anchor: raw positions one past display position
     assert_eq!(doc.cursors[0], 4);
     assert_eq!(doc.cursors[1], 10);
-    assert!(doc.selection.is_some());
+    assert!(doc.has_selection());
 
     doc.clear_anchor();
 
@@ -1729,7 +1735,7 @@ fn clear_anchor_adjusts_all_cursors_forward() {
     assert_eq!(col_a, 3, "Primary should commit to display column");
     assert_eq!(col_b, 3, "Secondary should also be adjusted");
     assert_eq!(col_a, col_b, "Both cursors at same column after clear");
-    assert!(doc.selection.is_none());
+    assert!(!doc.has_selection());
 }
 
 #[test]
@@ -1737,6 +1743,7 @@ fn clear_anchor_no_adjust_for_backward_selection() {
     let mut doc = doc_from_str("123 4\n123 4\n");
     doc.cursors[0] = 4; // on '4' line 0
     doc.cursors.push(10); // on '4' line 1
+    doc.selections.push(None);
     doc.sort_and_dedup_cursors();
 
     doc.set_anchor();
@@ -1792,3 +1799,156 @@ fn dedent_after_select_line_multibyte_no_panic() {
 
     assert_eq!(doc.rope.to_string(), "    alpha\ncafé bravo\n    charlie\n");
 }
+
+// -------------------------------------------------------------------------
+// Multi-cursor selection invariants
+// -------------------------------------------------------------------------
+
+#[test]
+fn select_line_with_multiple_cursors_selects_each_cursors_line() {
+    let mut doc = doc_from_str("alpha\nbeta\ngamma\n");
+    doc.cursors[0] = 0; // line 0
+    doc.cursors.push(6); // line 1
+    doc.selections.push(None);
+    doc.sort_and_dedup_cursors();
+
+    doc.select_line();
+
+    let ranges = doc.selection_ranges();
+    assert_eq!(
+        ranges.len(),
+        2,
+        "select_line must give every cursor its own selection"
+    );
+    assert!(ranges.contains(&(0, 6)), "line 0 selected: got {ranges:?}");
+    assert!(ranges.contains(&(6, 11)), "line 1 selected: got {ranges:?}");
+}
+
+#[test]
+fn set_anchor_with_multiple_cursors_sets_anchor_per_cursor() {
+    let mut doc = doc_from_str("hello world\nfoo bar\n");
+    doc.cursors[0] = 0; // before "hello"
+    doc.cursors.push(12); // before "foo"
+    doc.selections.push(None);
+    doc.sort_and_dedup_cursors();
+
+    doc.set_anchor();
+
+    let anchors: Vec<usize> = doc
+        .selections
+        .iter()
+        .map(|s| s.expect("every cursor has anchor").anchor)
+        .collect();
+    assert!(anchors.contains(&0), "primary anchor at 0: {anchors:?}");
+    assert!(anchors.contains(&12), "secondary anchor at 12: {anchors:?}");
+}
+
+#[test]
+fn extend_word_forward_per_cursor_anchors_independently() {
+    let mut doc = doc_from_str("hello world\nfoo bar\n");
+    doc.cursors[0] = 0;
+    doc.cursors.push(12);
+    doc.selections.push(None);
+    doc.sort_and_dedup_cursors();
+
+    doc.set_anchor();
+    doc.move_word_forward();
+
+    // Both selections extend from their own anchor through the first word.
+    let anchors: Vec<usize> = doc
+        .selections
+        .iter()
+        .map(|s| s.unwrap().anchor)
+        .collect();
+    assert!(anchors.contains(&0));
+    assert!(anchors.contains(&12));
+}
+
+#[test]
+fn clear_anchor_per_cursor_forward_adjustment() {
+    // Primary has a forward selection; secondary has a backward selection.
+    // clear_anchor must only adjust the forward one back by 1.
+    let mut doc = doc_from_str("abcdef\nuvwxyz\n");
+    doc.cursors[0] = 0;
+    doc.cursors.push(7);
+    doc.selections.push(None);
+    doc.sort_and_dedup_cursors();
+
+    doc.selections[0] = Some(Selection::tail_on_forward(0, 3)); // forward
+    doc.cursors[0] = 3;
+    doc.selections[1] = Some(Selection::tail_on_forward(12, 7)); // backward (anchor > head)
+    doc.cursors[1] = 7;
+
+    doc.clear_anchor();
+
+    // Forward selection: cursor stepped back by one (3 -> 2).
+    // Backward selection: cursor unchanged (7).
+    assert!(doc.cursors.contains(&2), "forward steps back: {:?}", doc.cursors);
+    assert!(doc.cursors.contains(&7), "backward unchanged: {:?}", doc.cursors);
+    assert!(!doc.has_selection());
+}
+
+#[test]
+fn add_cursor_below_pushes_none_to_selections() {
+    let mut doc = doc_from_str("line1\nline2\n");
+    doc.cursors[0] = 0;
+    doc.set_anchor();
+    assert!(doc.add_cursor_below());
+
+    assert_eq!(doc.cursors.len(), 2);
+    assert_eq!(doc.selections.len(), 2, "selections grew with cursors");
+    // The newly added cursor starts with no selection.
+    assert!(doc.selections.iter().any(|s| s.is_none()));
+}
+
+#[test]
+fn remove_secondary_cursors_truncates_selections() {
+    let mut doc = doc_from_str("alpha\nbeta\ngamma\n");
+    doc.cursors[0] = 0;
+    doc.add_cursor_below();
+    doc.add_cursor_below();
+    doc.set_anchor();
+    assert_eq!(doc.cursors.len(), doc.selections.len());
+
+    doc.remove_secondary_cursors();
+    assert_eq!(doc.cursors.len(), 1);
+    assert_eq!(doc.selections.len(), 1);
+}
+
+#[test]
+fn sort_and_dedup_cursors_reorders_selections_in_parallel() {
+    let mut doc = doc_from_str("abcdef\n");
+    doc.cursors = vec![4, 1, 2];
+    doc.selections = vec![
+        Some(Selection::tail_on_forward(4, 5)),
+        Some(Selection::tail_on_forward(1, 2)),
+        Some(Selection::tail_on_forward(2, 3)),
+    ];
+
+    doc.sort_and_dedup_cursors();
+
+    // Primary (originally at index 0, cursor=4) stays at index 0.
+    assert_eq!(doc.cursors[0], 4);
+    assert_eq!(doc.selections[0], Some(Selection::tail_on_forward(4, 5)));
+    // The remaining cursors are sorted; their selections track them.
+    assert_eq!(doc.cursors.len(), 3);
+    for (cursor, sel) in doc.cursors.iter().zip(doc.selections.iter()) {
+        let s = sel.expect("every cursor still has its selection");
+        assert_eq!(*cursor, s.anchor, "selection paired with right cursor");
+    }
+}
+
+#[test]
+fn selection_text_combined_joins_with_newline() {
+    let mut doc = doc_from_str("foo bar baz\n");
+    doc.cursors = vec![0];
+    doc.selections = vec![Some(Selection::tail_on_forward(0, 3))];
+    doc.cursors.push(8);
+    doc.selections.push(Some(Selection::tail_on_forward(8, 11)));
+
+    assert_eq!(
+        doc.selection_text_combined(),
+        Some("foo\nbaz".to_string())
+    );
+}
+

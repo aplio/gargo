@@ -68,8 +68,10 @@ pub struct Document {
     pub dirty: bool,
     pub pending_edits: Vec<EditEvent>,
     pub history: History,
-    /// Selection for the primary cursor only
-    pub selection: Option<Selection>,
+    /// Per-cursor selections, parallel to `cursors`. `selections[i]` is the
+    /// selection for `cursors[i]`. `None` means no active selection for that
+    /// cursor. Invariant: `selections.len() == cursors.len()`.
+    pub(crate) selections: Vec<Option<Selection>>,
     pub git_gutter: HashMap<usize, GitLineStatus>,
     cached_status_bar_path: String,
 }
@@ -106,7 +108,7 @@ impl Document {
             dirty: false,
             pending_edits: Vec::new(),
             history: History::new(),
-            selection: None,
+            selections: vec![None],
             git_gutter: HashMap::new(),
             cached_status_bar_path: "[scratch]".to_string(),
         }

@@ -295,8 +295,9 @@ impl App {
                 self.editor.mode = mode::Mode::Insert;
             }
             CoreAction::Yank => {
-                // Normal mode: yank active selection if present; otherwise yank current line.
-                if let Some(text) = self.editor.active_buffer().selection_text() {
+                // Normal mode: yank every cursor's selection (joined with `\n`)
+                // when any cursor has a selection; otherwise yank current line.
+                if let Some(text) = self.editor.active_buffer().selection_text_combined() {
                     let len = text.chars().count();
                     let _ = copy_to_clipboard(&text);
                     self.editor.register = Some(text);
@@ -364,28 +365,37 @@ impl App {
                 self.editor.active_buffer_mut().extend_long_word_backward();
             }
             CoreAction::DeleteSelection => {
-                if let Some((start, end)) = self.editor.active_buffer().selection_range() {
-                    let deleted = {
-                        let buf = self.editor.active_buffer_mut();
-                        let deleted = buf.delete_range(start, end);
-                        buf.clear_anchor();
-                        deleted
-                    };
+                // Build a per-cursor range vector aligned with `cursors`, so
+                // `delete_ranges` can preserve the multi-cursor state.
+                let buf = self.editor.active_buffer();
+                let ranges: Vec<(usize, usize)> = buf
+                    .selections
+                    .iter()
+                    .zip(buf.cursors.iter())
+                    .map(|(sel, &cursor)| {
+                        if let Some(s) = sel {
+                            let start = s.anchor.min(s.head);
+                            let end = s.anchor.max(s.head).min(buf.rope.len_chars());
+                            (start, end)
+                        } else {
+                            (cursor, cursor)
+                        }
+                    })
+                    .collect();
+                let has_any_selection = ranges.iter().any(|&(s, e)| s < e);
+
+                if has_any_selection {
+                    let buf = self.editor.active_buffer_mut();
+                    let deleted = buf.delete_ranges(&ranges);
+                    buf.clear_anchor();
                     let _ = copy_to_clipboard(&deleted);
                     self.editor.register = Some(deleted);
                     self.editor.mode = mode::Mode::Normal;
                     self.editor.mark_highlights_dirty();
                 } else if self.editor.mode == mode::Mode::Visual {
-                    // Visual: yank then delete selection
-                    let buf = self.editor.active_buffer_mut();
-                    if let Some((start, end)) = buf.selection_range() {
-                        let deleted = buf.delete_range(start, end);
-                        buf.clear_anchor();
-                        let _ = copy_to_clipboard(&deleted);
-                        self.editor.register = Some(deleted);
-                        self.editor.mode = mode::Mode::Normal;
-                        self.editor.mark_highlights_dirty();
-                    }
+                    // Visual mode with empty selections: clear and exit.
+                    self.editor.active_buffer_mut().clear_anchor();
+                    self.editor.mode = mode::Mode::Normal;
                 } else {
                     // Normal mode: delete char under cursor (like old 'x')
                     self.editor.active_buffer_mut().delete_forward();
@@ -395,7 +405,7 @@ impl App {
             CoreAction::YankSelection => {
                 if self.editor.mode == mode::Mode::Visual {
                     let buf = self.editor.active_buffer();
-                    if let Some(text) = buf.selection_text() {
+                    if let Some(text) = buf.selection_text_combined() {
                         let len = text.chars().count();
                         let _ = copy_to_clipboard(&text);
                         self.editor.register = Some(text);
@@ -596,7 +606,9 @@ impl App {
                         let buf = self.editor.active_buffer_mut();
                         let new_anchor = anchor + anchor_shift;
                         let new_cursor = cursor + cursor_shift;
-                        buf.selection = Some(Selection::tail_on_forward(new_anchor, new_cursor));
+                        // Indent in Visual mode operates on the primary selection only.
+                        buf.selections[0] =
+                            Some(Selection::tail_on_forward(new_anchor, new_cursor));
                         buf.cursors[0] = new_cursor;
                         buf.commit_transaction();
                     }
@@ -650,7 +662,9 @@ impl App {
                         let buf = self.editor.active_buffer_mut();
                         let new_anchor = anchor.saturating_sub(anchor_shift);
                         let new_cursor = cursor.saturating_sub(cursor_shift);
-                        buf.selection = Some(Selection::tail_on_forward(new_anchor, new_cursor));
+                        // Dedent in Visual mode operates on the primary selection only.
+                        buf.selections[0] =
+                            Some(Selection::tail_on_forward(new_anchor, new_cursor));
                         buf.cursors[0] = new_cursor;
                         buf.commit_transaction();
                     }

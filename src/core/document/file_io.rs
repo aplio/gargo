@@ -21,7 +21,7 @@ impl Document {
             dirty: false,
             pending_edits: Vec::new(),
             history: History::new(),
-            selection: None,
+            selections: vec![None],
             git_gutter: HashMap::new(),
             cached_status_bar_path,
         }
@@ -94,7 +94,7 @@ impl Document {
         self.dirty = false;
         self.pending_edits.clear();
         self.history = History::new();
-        self.selection = None;
+        self.selections = vec![None];
         Ok(format!("Reloaded {}", path.display()))
     }
 }

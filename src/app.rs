@@ -2075,7 +2075,7 @@ impl App {
             doc.cursors = vec![0];
             doc.scroll_offset = 0;
             doc.horizontal_scroll_offset = 0;
-            doc.selection = None;
+            doc.selections = vec![None];
             doc.dirty = false;
             doc.pending_edits.clear();
             doc.history = crate::core::history::History::new();
@@ -2134,7 +2134,7 @@ impl App {
             doc.cursors = vec![0];
             doc.scroll_offset = 0;
             doc.horizontal_scroll_offset = 0;
-            doc.selection = None;
+            doc.selections = vec![None];
             doc.dirty = false;
             doc.pending_edits.clear();
             doc.history = crate::core::history::History::new();
@@ -4879,7 +4879,7 @@ mod tests {
 
         // User moves cursor (e.g. with l): selection extends, but chain anchor changes.
         app.editor.active_buffer_mut().cursors[0] = 12; // inside "gamma"
-        app.editor.active_buffer_mut().selection = None;
+        app.editor.active_buffer_mut().selections[0] = None;
 
         // Next v should restart at the new cursor and select word "gamma".
         app.dispatch(Action::Core(CoreAction::VisualExpand));

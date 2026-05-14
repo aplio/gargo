@@ -438,8 +438,11 @@ impl Document {
             });
         }
 
-        // Undo restores all cursor positions from before the edit
+        // Undo restores all cursor positions from before the edit.
+        // History does not track selections; reset to a clean (None) state for
+        // every restored cursor.
         self.cursors = tx.cursors_before.clone();
+        self.selections = vec![None; self.cursors.len()];
         self.sync_selection_head();
         self.dirty = true;
 
@@ -491,8 +494,10 @@ impl Document {
             });
         }
 
-        // Redo restores all cursor positions from after the edit
+        // Redo restores all cursor positions from after the edit. History
+        // does not track selections; reset to a clean (None) state.
         self.cursors = tx.cursors_after.clone();
+        self.selections = vec![None; self.cursors.len()];
         self.sync_selection_head();
         self.dirty = true;
 
@@ -526,7 +531,7 @@ impl Document {
 
         // Place cursor at start of deleted range (single cursor after delete_range)
         self.cursors = vec![start.min(self.rope.len_chars())];
-        self.sync_selection_head();
+        self.selections = vec![None];
 
         let edit_event = EditEvent {
             start_byte,
@@ -550,6 +555,118 @@ impl Document {
         );
 
         deleted
+    }
+
+    /// Delete multiple char ranges in one transaction, returning each deleted
+    /// segment joined with `\n` (Helix-style). Cursor count is preserved:
+    /// every cursor is placed at the start of its corresponding deleted range,
+    /// or shifted to account for earlier deletions. `ranges` is assumed to be
+    /// non-overlapping and aligned with `self.cursors` (one range per cursor
+    /// that has a selection). Cursors without a corresponding range are
+    /// shifted to account for earlier deletions only.
+    pub fn delete_ranges(&mut self, ranges: &[(usize, usize)]) -> String {
+        if ranges.is_empty() {
+            return String::new();
+        }
+
+        // Sort ranges by start descending so deletions don't invalidate later
+        // offsets. Collect deleted text in original (ascending) order for the
+        // returned clipboard string.
+        let mut indexed: Vec<(usize, (usize, usize))> =
+            ranges.iter().copied().enumerate().collect();
+        indexed.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+
+        let cursors_before = self.cursors.clone();
+        let started_transaction = self.history.begin_transaction(&cursors_before);
+
+        let mut deleted_segments: Vec<(usize, String)> = Vec::with_capacity(ranges.len());
+
+        for &(orig_idx, (start, end)) in &indexed {
+            if start >= end || start >= self.rope.len_chars() {
+                deleted_segments.push((orig_idx, String::new()));
+                continue;
+            }
+            let end = end.min(self.rope.len_chars());
+            let deleted: String = self.rope.slice(start..end).to_string();
+
+            let start_byte = self.rope.char_to_byte(start);
+            let end_byte = self.rope.char_to_byte(end);
+            let start_line = self.rope.char_to_line(start);
+            let start_line_byte = self.rope.line_to_byte(start_line);
+            let start_col_byte = start_byte - start_line_byte;
+
+            let end_line = self.rope.char_to_line(end);
+            let end_line_byte = self.rope.line_to_byte(end_line);
+            let end_col_byte = end_byte - end_line_byte;
+
+            self.rope.remove(start..end);
+
+            let edit_event = EditEvent {
+                start_byte,
+                old_end_byte: end_byte,
+                new_end_byte: start_byte,
+                start_position: (start_line, start_col_byte),
+                old_end_position: (end_line, end_col_byte),
+                new_end_position: (start_line, start_col_byte),
+            };
+            self.pending_edits.push(edit_event.clone());
+
+            self.history.record(
+                EditRecord {
+                    char_offset: start,
+                    old_text: Rc::from(deleted.as_str()),
+                    new_text: Rc::from(""),
+                    edit_event,
+                },
+                &cursors_before,
+                &cursors_before,
+            );
+
+            deleted_segments.push((orig_idx, deleted));
+        }
+
+        // Re-sort segments to original cursor order for the returned text.
+        deleted_segments.sort_by_key(|&(idx, _)| idx);
+        let combined = deleted_segments
+            .iter()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(_, s)| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Build new cursors: each cursor moves to the start of its own deleted
+        // range (clamped to current document length), with deletions occurring
+        // earlier in the document shifting it back.
+        let new_len = self.rope.len_chars();
+        let mut new_cursors: Vec<usize> = Vec::with_capacity(self.cursors.len());
+        for (i, &cursor) in self.cursors.iter().enumerate() {
+            let (start, end) = ranges.get(i).copied().unwrap_or((cursor, cursor));
+            // How much earlier deleted text shifts this cursor: sum of ranges
+            // strictly before this cursor's range (after sorting we already
+            // applied them, but counting in original space):
+            let shift: usize = ranges
+                .iter()
+                .filter(|&&(s, e)| e <= cursor && s != start)
+                .map(|&(s, e)| e - s)
+                .sum();
+            let target = if start < end {
+                start
+            } else {
+                cursor.saturating_sub(shift)
+            };
+            new_cursors.push(target.min(new_len));
+        }
+        self.cursors = new_cursors;
+        self.selections = vec![None; self.cursors.len()];
+        self.sort_and_dedup_cursors();
+
+        self.history.update_cursors_after(&self.cursors);
+        if started_transaction {
+            self.history.commit_transaction();
+        }
+
+        self.dirty = true;
+        combined
     }
 
     /// Insert text at a given char position with full undo/redo recording.

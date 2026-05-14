@@ -107,7 +107,7 @@ impl App {
             expand_selection(&self.editor, buffer_id, chain.origin, chain.last_range);
         if let Some((s, e)) = new_range {
             let doc = self.editor.active_buffer_mut();
-            doc.selection = Some(Selection::tail_on_forward(s, e));
+            doc.selections[0] = Some(Selection::tail_on_forward(s, e));
             doc.cursors[0] = e;
             self.expand_chain = Some(ExpandChain {
                 buffer: buffer_id,
@@ -182,7 +182,7 @@ impl App {
             // Selection keeps the mouse-down position as the anchor; `head`
             // follows the pointer. `selection_range` normalises ordering,
             // so this handles both forward and backward drags.
-            doc.selection = Some(Selection::tail_on_forward(anchor_pos, head));
+            doc.selections[0] = Some(Selection::tail_on_forward(anchor_pos, head));
             set_cursor_to_pos(doc, head);
         }
     }

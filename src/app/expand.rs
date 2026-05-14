@@ -124,7 +124,7 @@ impl App {
         };
 
         let doc = self.editor.active_buffer_mut();
-        doc.selection = Some(Selection::tail_on_forward(s, e));
+        doc.selections[0] = Some(Selection::tail_on_forward(s, e));
         doc.cursors[0] = e;
 
         self.expand_chain = Some(ExpandChain {

@@ -1,20 +1,34 @@
 use super::*;
 
 impl Document {
+    /// True if any cursor has an active selection.
     pub fn has_selection(&self) -> bool {
-        self.selection.is_some()
+        self.selections.iter().any(|s| s.is_some())
     }
 
+    /// True if the primary cursor (index 0) has an active selection.
+    pub fn primary_has_selection(&self) -> bool {
+        self.selections[0].is_some()
+    }
+
+    /// The primary cursor's selection, if any.
+    pub fn primary_selection(&self) -> Option<Selection> {
+        self.selections[0]
+    }
+
+    /// Primary cursor's selection anchor, if any.
     pub fn selection_anchor(&self) -> Option<usize> {
-        self.selection.map(|s| s.anchor)
+        self.selections[0].map(|s| s.anchor)
     }
 
     fn set_anchor_with_display(&mut self, cursor_display: SelectionCursorDisplay) {
-        self.selection = Some(Selection {
-            anchor: self.cursors[0],
-            head: self.cursors[0],
-            cursor_display,
-        });
+        for i in 0..self.cursors.len() {
+            self.selections[i] = Some(Selection {
+                anchor: self.cursors[i],
+                head: self.cursors[i],
+                cursor_display,
+            });
+        }
     }
 
     pub fn set_anchor(&mut self) {
@@ -26,27 +40,24 @@ impl Document {
     }
 
     pub fn clear_anchor(&mut self) {
-        if let Some(selection) = self.selection
-            && matches!(
-                selection.cursor_display,
-                SelectionCursorDisplay::TailOnForward
-            )
-            && selection.head > selection.anchor
-        {
-            // Forward selection: all cursors are "one past" their display
-            // position (exclusive end).  Adjust every cursor back by one so
-            // that subsequent motions start from the displayed position.
-            for cursor in &mut self.cursors {
-                *cursor = cursor.saturating_sub(1);
+        // Per-cursor: forward TailOnForward selections render with the head one
+        // past the displayed cursor, so step each such cursor back by one when
+        // collapsing so subsequent motions begin at the displayed position.
+        for i in 0..self.cursors.len() {
+            if let Some(sel) = self.selections[i]
+                && matches!(sel.cursor_display, SelectionCursorDisplay::TailOnForward)
+                && sel.head > sel.anchor
+            {
+                self.cursors[i] = self.cursors[i].saturating_sub(1);
             }
+            self.selections[i] = None;
         }
-        self.selection = None;
         self.sort_and_dedup_cursors();
     }
 
-    /// Returns the half-open selection range `[start, end)`.
+    /// Returns the half-open selection range `[start, end)` for the primary cursor.
     pub fn selection_range(&self) -> Option<(usize, usize)> {
-        let selection = self.selection?;
+        let selection = self.selections[0]?;
         let start = selection.anchor.min(selection.head);
         let end = selection
             .anchor
@@ -55,66 +66,146 @@ impl Document {
         Some((start, end))
     }
 
+    /// Returns the primary cursor's selection text, if any.
     pub fn selection_text(&self) -> Option<String> {
         let (start, end) = self.selection_range()?;
         Some(self.rope.slice(start..end).to_string())
     }
 
+    /// Returns every cursor's selection range, in cursor order. Cursors with no
+    /// active selection are skipped. Zero-width ranges (`anchor == head`) are
+    /// included so callers can distinguish "anchor set but empty" from "no
+    /// selection".
+    pub fn selection_ranges(&self) -> Vec<(usize, usize)> {
+        let len = self.rope.len_chars();
+        self.selections
+            .iter()
+            .filter_map(|sel| {
+                sel.map(|s| {
+                    let start = s.anchor.min(s.head);
+                    let end = s.anchor.max(s.head).min(len);
+                    (start, end)
+                })
+            })
+            .collect()
+    }
+
+    /// Returns text for every cursor's selection (non-empty ranges only),
+    /// in cursor order.
+    pub fn selection_texts(&self) -> Vec<String> {
+        self.selection_ranges()
+            .into_iter()
+            .filter(|(s, e)| s < e)
+            .map(|(s, e)| self.rope.slice(s..e).to_string())
+            .collect()
+    }
+
+    /// Helix-style: joins every cursor's selection text with `\n`. Returns
+    /// `None` when no cursor has a selection.
+    pub fn selection_text_combined(&self) -> Option<String> {
+        let texts = self.selection_texts();
+        if texts.is_empty() {
+            return None;
+        }
+        Some(texts.join("\n"))
+    }
+
     /// Select the word (or whitespace/punctuation run) at `pos`.
     /// Newlines are hard boundaries so a click on EOL whitespace stays on its line.
     /// No-op when the document is empty or `pos` lands on a newline.
+    /// Collapses to a single cursor (mouse semantics).
     pub fn select_word_at(&mut self, pos: usize) {
         if let Some((start, end)) = super::expand::word_range_at(&self.rope, pos) {
-            self.selection = Some(Selection::tail_on_forward(start, end));
-            self.cursors[0] = end;
+            self.cursors = vec![end];
+            self.selections = vec![Some(Selection::tail_on_forward(start, end))];
         }
     }
 
     /// Select the current line as a linewise span:
-    /// includes trailing newline when present.
+    /// includes trailing newline when present. Operates on every cursor.
     pub fn select_line(&mut self) {
-        let line = self.cursor_line();
-        let line_start = self.rope.line_to_char(line);
-        let line_end = if line + 1 < self.rope.len_lines() {
-            self.rope.line_to_char(line + 1)
-        } else {
-            self.rope.len_chars()
-        };
-        let head = line_end;
-        self.selection = Some(Selection::tail_on_forward(line_start, head));
-        // Head is one-past-the-end; display cursor shows the last selected char.
-        self.cursors[0] = head;
+        let total_lines = self.rope.len_lines();
+        let total_chars = self.rope.len_chars();
+        for i in 0..self.cursors.len() {
+            let line = self.rope.char_to_line(self.cursors[i]);
+            let line_start = self.rope.line_to_char(line);
+            let line_end = if line + 1 < total_lines {
+                self.rope.line_to_char(line + 1)
+            } else {
+                total_chars
+            };
+            // Head is one-past-the-end; display cursor shows the last selected char.
+            self.selections[i] = Some(Selection::tail_on_forward(line_start, line_end));
+            self.cursors[i] = line_end;
+        }
+        self.sort_and_dedup_cursors();
     }
 
-    /// Extend line selection down by one line. Keeps anchor, moves cursor to
-    /// end of next line.
+    /// Extend line selection down by one line for every cursor. Keeps each
+    /// anchor, moves each cursor to end of the next line.
     pub fn extend_line_selection_down(&mut self) {
-        let line = self.display_cursor_line();
-        if line + 1 < self.rope.len_lines() {
-            let next_line = line + 1;
-            let next_end = if next_line + 1 < self.rope.len_lines() {
-                self.rope.line_to_char(next_line + 1)
-            } else {
-                self.rope.len_chars()
-            };
-            self.cursors[0] = next_end;
-            self.sync_selection_head();
+        let total_lines = self.rope.len_lines();
+        let total_chars = self.rope.len_chars();
+        // Use each cursor's *display* line (one back when forward TailOnForward).
+        let new_positions: Vec<usize> = (0..self.cursors.len())
+            .map(|i| {
+                let raw = self.cursors[i];
+                let display = if let Some(sel) = self.selections[i] {
+                    if matches!(sel.cursor_display, SelectionCursorDisplay::TailOnForward)
+                        && sel.head > sel.anchor
+                    {
+                        raw.saturating_sub(1)
+                    } else {
+                        raw
+                    }
+                } else {
+                    raw
+                };
+                let line = self.rope.char_to_line(display);
+                if line + 1 < total_lines {
+                    let next_line = line + 1;
+                    if next_line + 1 < total_lines {
+                        self.rope.line_to_char(next_line + 1)
+                    } else {
+                        total_chars
+                    }
+                } else {
+                    raw
+                }
+            })
+            .collect();
+        for (i, pos) in new_positions.into_iter().enumerate() {
+            self.cursors[i] = pos;
         }
+        self.sync_selection_head();
     }
 
     fn ensure_anchor_for_extend(&mut self) {
-        if self.selection.is_none() {
-            self.set_anchor();
+        for i in 0..self.cursors.len() {
+            if self.selections[i].is_none() {
+                self.selections[i] = Some(Selection {
+                    anchor: self.cursors[i],
+                    head: self.cursors[i],
+                    cursor_display: SelectionCursorDisplay::TailOnForward,
+                });
+            }
         }
     }
 
     fn ensure_anchor_for_shift_extend(&mut self) {
-        if self.selection.is_none() {
-            self.set_anchor_for_shift_extend();
-            return;
-        }
-        if let Some(selection) = self.selection.as_mut() {
-            selection.cursor_display = SelectionCursorDisplay::Head;
+        for i in 0..self.cursors.len() {
+            match self.selections[i].as_mut() {
+                None => {
+                    self.selections[i] = Some(Selection {
+                        anchor: self.cursors[i],
+                        head: self.cursors[i],
+                        cursor_display: SelectionCursorDisplay::Head,
+                    });
+                }
+                Some(sel) => {
+                    sel.cursor_display = SelectionCursorDisplay::Head;
+                }
+            }
         }
     }
 

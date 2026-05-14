@@ -14,7 +14,7 @@ impl Document {
     }
 
     pub fn display_cursor(&self) -> usize {
-        if let Some(selection) = self.selection {
+        if let Some(selection) = self.selections[0] {
             if matches!(
                 selection.cursor_display,
                 SelectionCursorDisplay::TailOnForward
@@ -28,9 +28,11 @@ impl Document {
     }
 
     pub(super) fn sync_selection_head(&mut self) {
-        if let Some(mut sel) = self.selection {
-            sel.head = self.cursors[0];
-            self.selection = Some(sel);
+        for i in 0..self.cursors.len() {
+            if let Some(mut sel) = self.selections[i] {
+                sel.head = self.cursors[i];
+                self.selections[i] = Some(sel);
+            }
         }
     }
 

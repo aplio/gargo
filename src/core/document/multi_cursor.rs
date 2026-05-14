@@ -11,21 +11,46 @@ impl Document {
         self.cursors.len() > 1
     }
 
-    /// Sort cursors by position and remove duplicates.
-    /// Keeps the primary cursor at index 0.
+    /// Sort cursors by position and remove duplicates, keeping `selections`
+    /// aligned. Primary (originally index 0) stays at index 0 in both vectors.
     pub(super) fn sort_and_dedup_cursors(&mut self) {
+        debug_assert_eq!(self.cursors.len(), self.selections.len());
         if self.cursors.len() <= 1 {
             return;
         }
-        let primary = self.cursors[0];
-        self.cursors.sort_unstable();
-        self.cursors.dedup();
-        // Restore primary to front
-        if let Some(idx) = self.cursors.iter().position(|&c| c == primary)
-            && idx != 0
-        {
-            self.cursors.swap(0, idx);
+        // Build a permutation of indices sorted by cursor position. Keep the
+        // primary's index identifiable so we can swap it back to the front.
+        let mut indices: Vec<usize> = (0..self.cursors.len()).collect();
+        indices.sort_by_key(|&i| self.cursors[i]);
+
+        // Dedup by cursor position. Prefer keeping the original primary (idx 0)
+        // when duplicates collapse so the primary's selection survives.
+        let mut deduped: Vec<usize> = Vec::with_capacity(indices.len());
+        for &i in &indices {
+            match deduped.last() {
+                Some(&last) if self.cursors[last] == self.cursors[i] => {
+                    if i == 0 {
+                        *deduped.last_mut().unwrap() = 0;
+                    }
+                }
+                _ => deduped.push(i),
+            }
         }
+
+        let new_cursors: Vec<usize> = deduped.iter().map(|&i| self.cursors[i]).collect();
+        let new_selections: Vec<Option<Selection>> =
+            deduped.iter().map(|&i| self.selections[i]).collect();
+        self.cursors = new_cursors;
+        self.selections = new_selections;
+
+        // Restore primary (original index 0) to the front.
+        if let Some(new_primary_idx) = deduped.iter().position(|&i| i == 0)
+            && new_primary_idx != 0
+        {
+            self.cursors.swap(0, new_primary_idx);
+            self.selections.swap(0, new_primary_idx);
+        }
+        debug_assert_eq!(self.cursors.len(), self.selections.len());
     }
 
     /// Add a cursor at the given char offset.
@@ -36,6 +61,7 @@ impl Document {
             return false;
         }
         self.cursors.push(pos);
+        self.selections.push(None);
         self.sort_and_dedup_cursors();
         true
     }
@@ -69,6 +95,7 @@ impl Document {
         }
 
         self.cursors.push(new_pos);
+        self.selections.push(None);
         self.sort_and_dedup_cursors();
         true
     }
@@ -102,6 +129,7 @@ impl Document {
         }
 
         self.cursors.push(new_pos);
+        self.selections.push(None);
         self.sort_and_dedup_cursors();
         true
     }
@@ -122,6 +150,7 @@ impl Document {
             let new_pos = line_start + clamped_col;
             if !self.cursors.contains(&new_pos) {
                 self.cursors.push(new_pos);
+                self.selections.push(None);
             }
         }
         self.sort_and_dedup_cursors();
@@ -144,6 +173,7 @@ impl Document {
             let new_pos = line_start + clamped_col;
             if !self.cursors.contains(&new_pos) {
                 self.cursors.push(new_pos);
+                self.selections.push(None);
             }
         }
         self.sort_and_dedup_cursors();
@@ -152,5 +182,6 @@ impl Document {
     /// Remove all secondary cursors, keeping only the primary cursor.
     pub fn remove_secondary_cursors(&mut self) {
         self.cursors.truncate(1);
+        self.selections.truncate(1);
     }
 }

@@ -226,11 +226,14 @@ impl Document {
     }
 
     pub(super) fn move_word_forward_end_impl(&mut self, long_word: bool) {
-        let in_selection = self.selection.is_some();
         let new_positions: Vec<usize> = self
             .cursors
             .iter()
-            .map(|&pos| self.word_forward_end_pos(pos, long_word, in_selection))
+            .enumerate()
+            .map(|(i, &pos)| {
+                let in_selection = self.selections[i].is_some();
+                self.word_forward_end_pos(pos, long_word, in_selection)
+            })
             .collect();
         self.cursors = new_positions;
         self.sort_and_dedup_cursors();

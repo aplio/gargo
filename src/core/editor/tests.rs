@@ -399,6 +399,48 @@ fn add_cursor_to_prev_search_match_treats_cursor_inside_match_as_occupied() {
     assert_eq!(sorted, vec![0, 14]);
 }
 
+#[test]
+fn add_cursor_to_all_search_matches_adds_every_unoccupied_match() {
+    let mut ed = editor_with_text("foo bar foo baz foo");
+    ed.search_update("foo");
+    ed.active_buffer_mut().cursors[0] = 0;
+    let added = ed.add_cursor_to_all_search_matches();
+    assert_eq!(added, 2);
+    let mut sorted = ed.active_buffer().cursors.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, vec![0, 8, 16]);
+}
+
+#[test]
+fn add_cursor_to_all_search_matches_returns_zero_when_all_occupied() {
+    let mut ed = editor_with_text("foo bar foo");
+    ed.search_update("foo");
+    ed.active_buffer_mut().cursors[0] = 0;
+    // First pass adds the second occurrence; second pass should add nothing.
+    assert_eq!(ed.add_cursor_to_all_search_matches(), 1);
+    assert_eq!(ed.add_cursor_to_all_search_matches(), 0);
+}
+
+#[test]
+fn add_cursor_to_all_search_matches_with_no_matches_returns_zero() {
+    let mut ed = editor_with_text("foo bar baz");
+    ed.search_update("qux");
+    assert_eq!(ed.add_cursor_to_all_search_matches(), 0);
+}
+
+#[test]
+fn add_cursor_to_all_search_matches_skips_cursor_inside_match() {
+    let mut ed = editor_with_text("hello world hello hello");
+    ed.search_update("hello");
+    // Primary cursor inside the first match.
+    ed.active_buffer_mut().cursors[0] = 2;
+    let added = ed.add_cursor_to_all_search_matches();
+    assert_eq!(added, 2);
+    let mut sorted = ed.active_buffer().cursors.clone();
+    sorted.sort_unstable();
+    assert_eq!(sorted, vec![2, 12, 18]);
+}
+
 // -------------------------------------------------------
 // Integration tests
 // -------------------------------------------------------

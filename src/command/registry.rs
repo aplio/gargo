@@ -422,6 +422,15 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     });
 
     registry.register(CommandEntry {
+        id: "cursor.add_all_matches".into(),
+        label: "Add Cursor to All Matches".into(),
+        category: Some("Cursor".into()),
+        action: Box::new(|_ctx| {
+            CommandEffect::Action(Action::Core(CoreAction::AddCursorToAllMatches))
+        }),
+    });
+
+    registry.register(CommandEntry {
         id: "cursor.add_to_top".into(),
         label: "Add Cursors to Top".into(),
         category: Some("Cursor".into()),
@@ -610,6 +619,7 @@ mod tests {
         assert!(ids.contains(&"file.save_as"));
         assert!(ids.contains(&"cursor.add_next_match"));
         assert!(ids.contains(&"cursor.add_prev_match"));
+        assert!(ids.contains(&"cursor.add_all_matches"));
     }
 
     #[test]

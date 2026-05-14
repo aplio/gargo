@@ -5272,6 +5272,61 @@ mod tests {
     }
 
     #[test]
+    fn add_cursor_to_all_matches_adds_a_cursor_at_every_occurrence() {
+        let mut app = test_app_with_text("foo bar foo baz foo");
+        app.editor.mode = mode::Mode::Visual;
+        {
+            let buf = app.editor.active_buffer_mut();
+            buf.cursors[0] = 0;
+            buf.set_anchor();
+            buf.move_right();
+            buf.move_right();
+            buf.move_right();
+        }
+
+        app.dispatch(Action::Core(CoreAction::AddCursorToAllMatches));
+
+        assert_eq!(app.editor.mode, mode::Mode::Normal);
+        assert!(!app.editor.active_buffer().has_selection());
+        assert_eq!(app.editor.search.pattern, "foo");
+        // The primary cursor sits inside the first match, so a cursor is added
+        // at every other occurrence.
+        assert_eq!(app.editor.active_buffer().cursor_count(), 3);
+        assert!(app.editor.active_buffer().cursors.contains(&8));
+        assert!(app.editor.active_buffer().cursors.contains(&16));
+    }
+
+    #[test]
+    fn add_cursor_to_all_matches_without_selection_or_search_shows_message() {
+        let mut app = test_app_with_text("hello world");
+        app.editor.mode = mode::Mode::Normal;
+        app.editor.search.clear();
+
+        app.dispatch(Action::Core(CoreAction::AddCursorToAllMatches));
+
+        assert_eq!(
+            app.editor.message.as_deref(),
+            Some("No selection or active search pattern")
+        );
+        assert_eq!(app.editor.active_buffer().cursor_count(), 1);
+    }
+
+    #[test]
+    fn add_cursor_to_all_matches_reuses_existing_search_pattern() {
+        let mut app = test_app_with_text("foo bar foo baz foo");
+        app.editor.mode = mode::Mode::Normal;
+        app.editor.search_update("foo");
+        app.editor.active_buffer_mut().cursors[0] = 0;
+
+        app.dispatch(Action::Core(CoreAction::AddCursorToAllMatches));
+
+        assert_eq!(app.editor.active_buffer().cursor_count(), 3);
+        let mut sorted = app.editor.active_buffer().cursors.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 8, 16]);
+    }
+
+    #[test]
     fn normal_word_motion_matches_flowchart_tb_example() {
         let mut app = test_app_with_text("flowchart TB\n    Start[hourly_flow start]\n");
         app.editor.mode = mode::Mode::Normal;

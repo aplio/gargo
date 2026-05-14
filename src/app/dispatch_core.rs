@@ -529,6 +529,9 @@ impl App {
             CoreAction::AddCursorToPrevMatch => {
                 self.add_cursor_to_search_match(false);
             }
+            CoreAction::AddCursorToAllMatches => {
+                self.add_cursor_to_all_search_matches();
+            }
             CoreAction::MacroRecord(reg) => {
                 self.editor.macro_recorder.start_recording(reg);
                 self.editor.message = Some(format!("Recording @{}", reg));
@@ -746,6 +749,7 @@ impl App {
                 | CoreAction::SearchPrev
                 | CoreAction::AddCursorToNextMatch
                 | CoreAction::AddCursorToPrevMatch
+                | CoreAction::AddCursorToAllMatches
                 | CoreAction::Noop
         ) {
             self.emit_plugin_event(PluginEvent::BufferChanged {
@@ -804,5 +808,40 @@ impl App {
         if !added {
             self.editor.message = Some("No more unmatched occurrences".to_string());
         }
+    }
+
+    fn add_cursor_to_all_search_matches(&mut self) {
+        let selection_pattern = self
+            .editor
+            .active_buffer()
+            .selection_text()
+            .filter(|text| !text.is_empty());
+
+        if let Some(pattern) = selection_pattern {
+            self.editor.search_update(&pattern);
+        } else if self.editor.search.pattern.is_empty() {
+            self.editor.message = Some("No selection or active search pattern".to_string());
+            return;
+        } else {
+            let pattern = self.editor.search.pattern.clone();
+            self.editor.search_update(&pattern);
+        }
+
+        if self.editor.mode == mode::Mode::Visual {
+            self.editor.active_buffer_mut().clear_anchor();
+            self.editor.mode = mode::Mode::Normal;
+        }
+
+        if self.editor.search.matches.is_empty() {
+            self.editor.message = Some("No matches found".to_string());
+            return;
+        }
+
+        let added = self.editor.add_cursor_to_all_search_matches();
+        self.editor.message = Some(if added == 0 {
+            "All matches already have cursors".to_string()
+        } else {
+            format!("Added {} cursors", added)
+        });
     }
 }

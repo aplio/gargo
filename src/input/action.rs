@@ -78,6 +78,7 @@ pub enum CoreAction {
     SearchPrev,
     AddCursorToNextMatch,
     AddCursorToPrevMatch,
+    AddCursorToAllMatches,
 
     // Selection / Visual mode
     SelectLine,
@@ -394,6 +395,7 @@ mod tests {
         let _prev = CoreAction::SearchPrev;
         let _add_next = CoreAction::AddCursorToNextMatch;
         let _add_prev = CoreAction::AddCursorToPrevMatch;
+        let _add_all = CoreAction::AddCursorToAllMatches;
     }
 
     #[test]

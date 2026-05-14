@@ -174,6 +174,42 @@ impl Editor {
         false
     }
 
+    /// Add a secondary cursor at every search match. Skips matches that are
+    /// already occupied (or overlap an existing cursor). Returns the number
+    /// of cursors added.
+    pub fn add_cursor_to_all_search_matches(&mut self) -> usize {
+        self.prune_stale_search_matches_for_active_buffer();
+        if self.search.matches.is_empty() {
+            return 0;
+        }
+        let match_len = self.search.pattern.chars().count();
+        if match_len == 0 {
+            return 0;
+        }
+        // Snapshot the match list; `add_cursor_at` mutates document state
+        // (and may shift surrounding cursor metadata) so we walk a stable
+        // copy in document order.
+        let matches: Vec<usize> = self.search.matches.clone();
+        let mut added = 0usize;
+        let mut last_idx = self.search.current_match;
+        for (idx, &pos) in matches.iter().enumerate() {
+            let end = pos.saturating_add(match_len);
+            let occupied = self.documents[self.active_index]
+                .cursors
+                .iter()
+                .any(|&cursor_pos| cursor_pos >= pos && cursor_pos < end);
+            if occupied {
+                continue;
+            }
+            if self.documents[self.active_index].add_cursor_at(pos) {
+                added += 1;
+                last_idx = Some(idx);
+            }
+        }
+        self.search.current_match = last_idx;
+        added
+    }
+
     pub fn reset_search(&mut self) {
         self.search.clear();
     }

@@ -25,8 +25,18 @@ pub struct GitIndexSnapshot {
 
 #[derive(Debug)]
 pub enum GitIndexRuntimeCommand {
-    Refresh { project_root: PathBuf },
-    RefreshMulti { repos: Vec<PathBuf> },
+    Refresh {
+        project_root: PathBuf,
+    },
+    RefreshMulti {
+        repos: Vec<PathBuf>,
+    },
+    /// Recompute the list of files changed between `base_branch` and HEAD
+    /// for the given repo. Sends a `BranchDiffReady` event with the result.
+    RefreshBranchDiff {
+        project_root: PathBuf,
+        base_branch: String,
+    },
     Shutdown,
 }
 
@@ -38,6 +48,11 @@ pub enum GitIndexRuntimeEvent {
     },
     MultiReady {
         snapshots: Vec<(PathBuf, GitIndexSnapshot)>,
+    },
+    BranchDiffReady {
+        project_root: PathBuf,
+        base_branch: String,
+        files: Vec<GitFileEntry>,
     },
 }
 
@@ -77,6 +92,7 @@ struct GitIndexRuntimeWorker {
     event_tx: mpsc::Sender<GitIndexRuntimeEvent>,
     pending_project_root: Option<PathBuf>,
     pending_multi_repos: Option<Vec<PathBuf>>,
+    pending_branch_diffs: Vec<(PathBuf, String)>,
 }
 
 impl GitIndexRuntimeWorker {
@@ -89,6 +105,7 @@ impl GitIndexRuntimeWorker {
             event_tx,
             pending_project_root: None,
             pending_multi_repos: None,
+            pending_branch_diffs: Vec::new(),
         }
     }
 
@@ -106,10 +123,18 @@ impl GitIndexRuntimeWorker {
                     self.pending_multi_repos = Some(repos);
                     self.pending_project_root = None;
                 }
+                Ok(GitIndexRuntimeCommand::RefreshBranchDiff {
+                    project_root,
+                    base_branch,
+                }) => {
+                    self.queue_branch_diff(project_root, base_branch);
+                }
                 Ok(GitIndexRuntimeCommand::Shutdown) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
+
+            self.process_branch_diffs();
 
             if let Some(project_root) = self.pending_project_root.take() {
                 // Send basic snapshot (branch + status) immediately so the
@@ -188,6 +213,12 @@ impl GitIndexRuntimeWorker {
                     self.pending_multi_repos = Some(repos);
                     latest = None;
                 }
+                GitIndexRuntimeCommand::RefreshBranchDiff {
+                    project_root,
+                    base_branch,
+                } => {
+                    self.queue_branch_diff(project_root, base_branch);
+                }
                 GitIndexRuntimeCommand::Shutdown => {
                     // Put it back isn't possible, so set pending and let the
                     // outer loop handle it on next iteration.
@@ -200,6 +231,31 @@ impl GitIndexRuntimeWorker {
             self.pending_project_root = Some(root.clone());
         }
         latest
+    }
+
+    /// Queue a branch-diff refresh, coalescing duplicate (repo, branch) pairs.
+    fn queue_branch_diff(&mut self, project_root: PathBuf, base_branch: String) {
+        if self
+            .pending_branch_diffs
+            .iter()
+            .any(|(p, b)| p == &project_root && b == &base_branch)
+        {
+            return;
+        }
+        self.pending_branch_diffs.push((project_root, base_branch));
+    }
+
+    fn process_branch_diffs(&mut self) {
+        let pending = std::mem::take(&mut self.pending_branch_diffs);
+        for (project_root, base_branch) in pending {
+            let files = git::git_branch_diff_files_in(&project_root, &base_branch)
+                .unwrap_or_default();
+            let _ = self.event_tx.send(GitIndexRuntimeEvent::BranchDiffReady {
+                project_root,
+                base_branch,
+                files,
+            });
+        }
     }
 }
 
@@ -299,8 +355,8 @@ mod tests {
                 assert!(snapshot.branches.is_empty());
                 assert!(!snapshot.branches_ready);
             }
-            GitIndexRuntimeEvent::MultiReady { .. } => {
-                panic!("unexpected MultiReady event");
+            other => {
+                panic!("unexpected event: {:?}", other);
             }
         }
 
@@ -323,8 +379,8 @@ mod tests {
                 );
                 assert!(snapshot.branches_ready);
             }
-            GitIndexRuntimeEvent::MultiReady { .. } => {
-                panic!("unexpected MultiReady event");
+            other => {
+                panic!("unexpected event: {:?}", other);
             }
         }
     }

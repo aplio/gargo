@@ -147,6 +147,7 @@ impl Palette {
 
         if self.mode == PaletteMode::GitBranchPicker
             || self.mode == PaletteMode::GitBranchComparePicker
+            || self.mode == PaletteMode::GitBranchCompareSidebarPicker
         {
             self.filter_git_branch_candidates();
             self.update_git_branch_preview();

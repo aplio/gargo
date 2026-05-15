@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::command::git::{GitFileStatus, dir_git_status};
+use crate::command::git::{GitFileEntry, GitFileStatus, dir_git_status};
 use crate::input::action::{Action, AppAction, BufferAction, IntegrationAction, WorkspaceAction};
 use crate::input::chord::KeyState;
 use crate::syntax::highlight::{HighlightSpan, highlight_text};
@@ -35,6 +35,9 @@ struct DirEntry {
 enum ExplorerMode {
     AllFiles,
     ChangedOnly,
+    /// Files that differ between a base branch and HEAD. The branch name
+    /// and file list are stored separately on `Explorer`.
+    BranchCompare,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +64,9 @@ pub struct Explorer {
     delete_confirm_active: bool,
     project_root: PathBuf,
     git_status_map: HashMap<String, GitFileStatus>,
+    // Populated only when mode == BranchCompare.
+    branch_compare_base: Option<String>,
+    branch_compare_files: Vec<GitFileEntry>,
     // preview
     preview_mode: bool,
     preview_lines: Vec<String>,
@@ -114,6 +120,8 @@ impl Explorer {
             delete_confirm_active: false,
             project_root: project_root.to_path_buf(),
             git_status_map: git_status_map.clone(),
+            branch_compare_base: None,
+            branch_compare_files: Vec::new(),
             preview_mode: false,
             preview_lines: Vec::new(),
             preview_spans: HashMap::new(),
@@ -127,6 +135,70 @@ impl Explorer {
         };
         explorer.read_directory();
         explorer
+    }
+
+    /// Sidebar showing files that differ between `base_branch` and HEAD.
+    /// The file list is supplied directly; refresh later via
+    /// [`apply_branch_diff_files`] to update without rebuilding.
+    pub fn new_branch_compare(
+        project_root: PathBuf,
+        base_branch: String,
+        files: Vec<GitFileEntry>,
+    ) -> Self {
+        let mut explorer = Self {
+            mode: ExplorerMode::BranchCompare,
+            current_dir: project_root.clone(),
+            entries: Vec::new(),
+            visible_entries: Vec::new(),
+            selected: 0,
+            scroll_offset: 0,
+            find_active: false,
+            find_input: String::new(),
+            copy_menu_active: false,
+            rename_active: false,
+            rename_input: String::new(),
+            add_active: false,
+            add_input: String::new(),
+            delete_confirm_active: false,
+            project_root,
+            git_status_map: HashMap::new(),
+            branch_compare_base: Some(base_branch),
+            branch_compare_files: files,
+            preview_mode: false,
+            preview_lines: Vec::new(),
+            preview_spans: HashMap::new(),
+            preview_path: None,
+            preview_kind: PreviewKind::None,
+            preview_scroll: 0,
+            preview_horizontal_scroll: 0,
+            preview_image: None,
+            preview_image_cache: HashMap::new(),
+            pending_image_request: None,
+        };
+        explorer.read_directory();
+        explorer
+    }
+
+    pub fn is_branch_compare(&self) -> bool {
+        self.mode == ExplorerMode::BranchCompare
+    }
+
+    pub fn branch_compare_base(&self) -> Option<&str> {
+        self.branch_compare_base.as_deref()
+    }
+
+    /// Replace the branch-compare file list and reread entries. Preserves
+    /// the selected file by path when possible.
+    pub fn apply_branch_diff_files(&mut self, files: Vec<GitFileEntry>) {
+        if !self.is_branch_compare() {
+            return;
+        }
+        let selected_name = self.selected_name().map(|s| s.to_string());
+        self.branch_compare_files = files;
+        self.read_directory();
+        if let Some(name) = selected_name {
+            self.select_by_name(&name);
+        }
     }
 
     /// Enable or disable the preview pane. When enabled, the editor area shows
@@ -385,6 +457,11 @@ impl Explorer {
             return;
         }
 
+        if self.mode == ExplorerMode::BranchCompare {
+            self.read_branch_compare_entries();
+            return;
+        }
+
         let mut dirs = Vec::new();
         let mut files = Vec::new();
 
@@ -529,6 +606,22 @@ impl Explorer {
                     diff_stats: stats,
                 });
             }
+        }
+        self.visible_entries = (0..self.entries.len()).collect();
+    }
+
+    fn read_branch_compare_entries(&mut self) {
+        let mut files: Vec<&GitFileEntry> = self.branch_compare_files.iter().collect();
+        sort_by_name_case_insensitive(&mut files, |entry| entry.path.as_str());
+        for entry in files {
+            let status = branch_diff_status_char_to_file_status(entry.status_char);
+            self.entries.push(DirEntry {
+                name: entry.path.clone(),
+                is_dir: false,
+                git_status: Some(status),
+                is_repo_header: false,
+                diff_stats: Some((entry.additions, entry.deletions)),
+            });
         }
         self.visible_entries = (0..self.entries.len()).collect();
     }
@@ -1011,7 +1104,9 @@ impl Explorer {
     }
 
     fn go_parent(&mut self) {
-        if self.mode == ExplorerMode::ChangedOnly {
+        if self.mode == ExplorerMode::ChangedOnly
+            || self.mode == ExplorerMode::BranchCompare
+        {
             return;
         }
         if let Some(parent) = self.current_dir.parent() {
@@ -1176,7 +1271,9 @@ impl Explorer {
         for (vis_idx, &entry_idx) in self.visible_entries.iter().enumerate() {
             entry_to_primary.push(plan.len());
             plan.push(RenderRow::Entry { vis_idx });
-            if self.mode == ExplorerMode::ChangedOnly {
+            if self.mode == ExplorerMode::ChangedOnly
+                || self.mode == ExplorerMode::BranchCompare
+            {
                 let entry = &self.entries[entry_idx];
                 if !entry.is_repo_header && !entry.is_dir {
                     let (adds, dels) = entry.diff_stats.unwrap_or((0, 0));
@@ -1229,7 +1326,9 @@ impl Explorer {
                     let prefix = if is_selected { "> " } else { "  " };
                     let display = if entry.is_repo_header {
                         format!("{}\u{e0a0} {}/", prefix, entry.name)
-                    } else if self.mode == ExplorerMode::ChangedOnly {
+                    } else if self.mode == ExplorerMode::ChangedOnly
+                        || self.mode == ExplorerMode::BranchCompare
+                    {
                         let status = entry.git_status.map_or(' ', |s| s.indicator());
                         format!("{}[{}] {}", prefix, status, entry.name)
                     } else {
@@ -1545,6 +1644,19 @@ fn format_mtime(t: SystemTime) -> String {
         "{:04}-{:02}-{:02} {:02}:{:02}",
         year, m, d, hour, minute
     )
+}
+
+/// Map the single-char status from `git diff --name-status` to the
+/// `GitFileStatus` enum used by the sidebar's display layer. Anything we
+/// don't recognise falls back to `Modified` (the explorer's most common
+/// rendering style).
+fn branch_diff_status_char_to_file_status(status_char: char) -> GitFileStatus {
+    match status_char.to_ascii_uppercase() {
+        'A' => GitFileStatus::Added,
+        'D' => GitFileStatus::Deleted,
+        'U' => GitFileStatus::Conflict,
+        _ => GitFileStatus::Modified,
+    }
 }
 
 fn collect_diff_stats(project_root: &Path) -> HashMap<String, (usize, usize)> {
@@ -1884,6 +1996,96 @@ mod tests {
         let _ = explorer.handle_key(key(KeyCode::Char('d')), &KeyState::Normal);
         let _ = explorer.handle_key(key(KeyCode::Char('y')), &KeyState::Normal);
         assert!(!dir.join("bbb.txt").exists());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_mode_lists_supplied_files_with_stats() {
+        let dir = setup("branch_compare_list");
+        let files = vec![
+            GitFileEntry {
+                path: "src/a.rs".to_string(),
+                status_char: 'M',
+                staged: false,
+                additions: 3,
+                deletions: 1,
+            },
+            GitFileEntry {
+                path: "README.md".to_string(),
+                status_char: 'A',
+                staged: false,
+                additions: 5,
+                deletions: 0,
+            },
+        ];
+        let explorer =
+            Explorer::new_branch_compare(dir.clone(), "main".to_string(), files);
+        assert!(explorer.is_branch_compare());
+        assert_eq!(explorer.branch_compare_base(), Some("main"));
+        // Files appear sorted case-insensitively.
+        let names: Vec<&str> = explorer
+            .entries
+            .iter()
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["README.md", "src/a.rs"]);
+        // diff_stats are populated.
+        assert_eq!(
+            explorer
+                .entries
+                .iter()
+                .find(|e| e.name == "src/a.rs")
+                .and_then(|e| e.diff_stats),
+            Some((3, 1)),
+        );
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_refresh_keeps_selection_by_name() {
+        let dir = setup("branch_compare_refresh");
+        let initial = vec![
+            GitFileEntry {
+                path: "a.rs".to_string(),
+                status_char: 'M',
+                staged: false,
+                additions: 0,
+                deletions: 0,
+            },
+            GitFileEntry {
+                path: "b.rs".to_string(),
+                status_char: 'M',
+                staged: false,
+                additions: 0,
+                deletions: 0,
+            },
+        ];
+        let mut explorer =
+            Explorer::new_branch_compare(dir.clone(), "main".to_string(), initial);
+        // Move selection to b.rs.
+        let _ = explorer.handle_key(key(KeyCode::Char('j')), &KeyState::Normal);
+        assert_eq!(explorer.selected_name(), Some("b.rs"));
+
+        // Refresh: a.rs removed, c.rs added, b.rs still present.
+        let refreshed = vec![
+            GitFileEntry {
+                path: "b.rs".to_string(),
+                status_char: 'M',
+                staged: false,
+                additions: 0,
+                deletions: 0,
+            },
+            GitFileEntry {
+                path: "c.rs".to_string(),
+                status_char: 'A',
+                staged: false,
+                additions: 0,
+                deletions: 0,
+            },
+        ];
+        explorer.apply_branch_diff_files(refreshed);
+        assert_eq!(explorer.selected_name(), Some("b.rs"));
 
         cleanup(&dir);
     }

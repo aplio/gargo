@@ -222,6 +222,8 @@ pub enum WorkspaceAction {
     RefreshInEditorDiffView,
     OpenBranchComparePicker,
     OpenBranchCompareView(String),
+    OpenBranchCompareSidebarPicker,
+    OpenBranchCompareSidebar(String),
     OpenCommitDiffView(String),
     ShowLastUsedSidebar,
     OpenSearchResultsBuffer {

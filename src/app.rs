@@ -115,6 +115,7 @@ enum LastUsedSidebar {
     ExplorerChangedFiles,
     GitView,
     CommitLog,
+    BranchCompare,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,6 +151,10 @@ pub struct App {
     last_explorer_dir: Option<PathBuf>,
     last_explorer_selected: Option<String>,
     last_used_sidebar: Option<LastUsedSidebar>,
+    /// The most-recently-closed sidebar Explorer (regular / changed-files /
+    /// branch-compare), kept whole so Ctrl+0 can restore it with its
+    /// selection and scroll position intact.
+    stashed_explorer: Option<Explorer>,
     close_confirm: bool,
     git_status_cache: HashMap<String, GitFileStatus>,
     discovered_repos: Vec<PathBuf>,
@@ -237,6 +242,7 @@ impl App {
             last_explorer_dir: None,
             last_explorer_selected: None,
             last_used_sidebar: None,
+            stashed_explorer: None,
             close_confirm: false,
             git_status_cache,
             discovered_repos,
@@ -637,12 +643,37 @@ impl App {
                     self.git_index_requested_for_root = true;
                     updated = true;
                 }
+                GitIndexRuntimeEvent::BranchDiffReady {
+                    project_root,
+                    base_branch,
+                    files,
+                } => {
+                    if let Some(explorer) = self.compositor.explorer_mut()
+                        && explorer.is_branch_compare()
+                        && explorer.branch_compare_base() == Some(base_branch.as_str())
+                        && explorer.current_dir() == project_root.as_path()
+                    {
+                        explorer.apply_branch_diff_files(files);
+                    }
+                }
             }
         }
 
         if updated {
             self.refresh_git_index_consumers();
         }
+    }
+
+    fn queue_branch_diff_refresh(&self, repo_root: PathBuf, base_branch: String) {
+        let Some(runtime) = &self.git_index_runtime else {
+            return;
+        };
+        let _ = runtime
+            .command_tx
+            .send(GitIndexRuntimeCommand::RefreshBranchDiff {
+                project_root: repo_root,
+                base_branch,
+            });
     }
 
     fn refresh_git_index_for_current_root(&mut self) {
@@ -1048,12 +1079,11 @@ impl App {
     }
 
     /// Close whichever sidebar (Explorer, Git view, or Commit log) is open.
-    /// Preserves Explorer's directory and selection so the next open lands
-    /// in the same spot. Returns true when something was actually closed.
+    /// A closed Explorer is stashed whole so Ctrl+0 can restore it with its
+    /// selection intact. Returns true when something was actually closed.
     fn close_active_sidebar(&mut self) -> bool {
         if let Some(explorer) = self.compositor.close_explorer() {
-            self.last_explorer_dir = Some(explorer.current_dir().to_path_buf());
-            self.last_explorer_selected = explorer.selected_name().map(|s| s.to_string());
+            self.stash_closed_explorer(explorer);
             return true;
         }
         if self.compositor.has_git_view() {
@@ -1065,6 +1095,36 @@ impl App {
             return true;
         }
         false
+    }
+
+    /// Stash a just-closed Explorer whole, so Ctrl+0 can bring it back with
+    /// its selection and scroll position preserved. Also records the last
+    /// dir + selection for regular/changed-files Explorers so a fresh open
+    /// (when there is no stash to restore) still lands in the right spot.
+    fn stash_closed_explorer(&mut self, explorer: Explorer) {
+        if !explorer.is_branch_compare() {
+            self.last_explorer_dir = Some(explorer.current_dir().to_path_buf());
+            self.last_explorer_selected = explorer.selected_name().map(|s| s.to_string());
+        }
+        self.stashed_explorer = Some(explorer);
+    }
+
+    /// Take the stashed Explorer if its kind matches `variant` — used by
+    /// Ctrl+0 to restore the last sidebar with focus intact.
+    fn take_stashed_explorer_matching(&mut self, variant: LastUsedSidebar) -> Option<Explorer> {
+        let matches = match (&self.stashed_explorer, variant) {
+            (Some(e), LastUsedSidebar::ExplorerRegular) => {
+                !e.is_changed_only() && !e.is_branch_compare()
+            }
+            (Some(e), LastUsedSidebar::ExplorerChangedFiles) => e.is_changed_only(),
+            (Some(e), LastUsedSidebar::BranchCompare) => e.is_branch_compare(),
+            _ => false,
+        };
+        if matches {
+            self.stashed_explorer.take()
+        } else {
+            None
+        }
     }
 
     fn close_active_buffer_with_reconciliation(
@@ -2308,6 +2368,27 @@ impl App {
         Ok(())
     }
 
+    fn open_git_branch_compare_sidebar_picker(&mut self) -> Result<(), String> {
+        self.ensure_git_index_started_if_needed();
+        let repo_root = self.active_buffer_repo_root();
+        let entries = self.git_branch_picker_entries_for_root(&repo_root);
+        if entries.is_empty() {
+            if self.git_index_loading_for_root(&repo_root)
+                || (self.git_index_matches_root(&repo_root)
+                    && !self.git_index_snapshot.branches_ready)
+            {
+                let palette = Palette::new_git_branch_compare_sidebar_picker(Vec::new());
+                self.compositor.push_palette(palette);
+                self.editor.message = Some("Indexing git branches...".to_string());
+                return Ok(());
+            }
+            return Err("No local branches found".to_string());
+        }
+        let palette = Palette::new_git_branch_compare_sidebar_picker(entries);
+        self.compositor.push_palette(palette);
+        Ok(())
+    }
+
     fn open_branch_compare_view(&mut self, other_branch: &str) -> Result<(), String> {
         let repo_root = self.active_buffer_repo_root();
         let view = crate::command::in_editor_diff::build_branch_compare_diff_view(
@@ -2469,6 +2550,8 @@ impl App {
         self.compositor.close_explorer();
         self.last_explorer_dir = None;
         self.last_explorer_selected = None;
+        // The stashed sidebar belonged to the old project; drop it.
+        self.stashed_explorer = None;
 
         if self.project_root == new_root {
             self.editor.message = Some(format!(

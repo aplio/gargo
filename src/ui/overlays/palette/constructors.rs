@@ -377,6 +377,13 @@ impl Palette {
         palette
     }
 
+    pub fn new_git_branch_compare_sidebar_picker(entries: Vec<GitBranchPickerEntry>) -> Self {
+        let mut palette = Self::new_git_branch_compare_picker(entries);
+        palette.mode = PaletteMode::GitBranchCompareSidebarPicker;
+        palette.caller_label = Some("Branch Compare Sidebar".to_string());
+        palette
+    }
+
     pub fn new_git_branch_compare_picker(entries: Vec<GitBranchPickerEntry>) -> Self {
         let git_branch_entries: Vec<GitBranchEntry> = entries
             .into_iter()

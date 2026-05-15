@@ -61,7 +61,11 @@ impl CommandHelper {
                     },
                     KeyBinding {
                         key: "d".to_string(),
-                        description: "Compare branch".to_string(),
+                        description: "Compare branch (sidebar)".to_string(),
+                    },
+                    KeyBinding {
+                        key: "D".to_string(),
+                        description: "Compare branch (buffer)".to_string(),
                     },
                 ],
             ),

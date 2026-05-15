@@ -285,6 +285,86 @@ fn git_diff_in_impl(
     }
 }
 
+/// List of files that differ between `base_branch` and HEAD, parsed
+/// from `git diff --name-status <base>...HEAD`.
+pub fn git_branch_diff_files_in(
+    project_root: &Path,
+    base_branch: &str,
+) -> Result<Vec<GitFileEntry>, String> {
+    let range = format!("{}...HEAD", base_branch);
+    let raw = git_output_in_allow_codes(
+        Some(project_root),
+        &["diff", "--name-status", &range],
+        &[0, 1],
+    )?;
+
+    let mut entries = Vec::new();
+    for line in raw.lines() {
+        // Format: "<status>\t<path>" or "R100\t<old>\t<new>" for renames.
+        let mut parts = line.split('\t');
+        let status_field = match parts.next() {
+            Some(s) if !s.is_empty() => s,
+            _ => continue,
+        };
+        let status_char = status_field
+            .chars()
+            .next()
+            .unwrap_or('M')
+            .to_ascii_uppercase();
+        let path = match status_char {
+            'R' | 'C' => {
+                // Rename/copy: keep the new path.
+                parts.next();
+                match parts.next() {
+                    Some(p) if !p.is_empty() => p.to_string(),
+                    _ => continue,
+                }
+            }
+            _ => match parts.next() {
+                Some(p) if !p.is_empty() => p.to_string(),
+                _ => continue,
+            },
+        };
+        entries.push(GitFileEntry {
+            path,
+            status_char,
+            staged: false,
+            additions: 0,
+            deletions: 0,
+        });
+    }
+
+    // Per-file numstat for additions/deletions.
+    let numstat_raw = git_output_in_allow_codes(
+        Some(project_root),
+        &["diff", "--numstat", &range],
+        &[0, 1],
+    )
+    .unwrap_or_default();
+    let mut stats: HashMap<String, (usize, usize)> = HashMap::new();
+    for line in numstat_raw.lines() {
+        let mut parts = line.splitn(3, '\t');
+        let adds = parts.next().unwrap_or("0");
+        let dels = parts.next().unwrap_or("0");
+        let path = match parts.next() {
+            Some(p) => p,
+            None => continue,
+        };
+        let adds = adds.parse::<usize>().unwrap_or(0);
+        let dels = dels.parse::<usize>().unwrap_or(0);
+        stats.insert(path.to_string(), (adds, dels));
+    }
+    for entry in entries.iter_mut() {
+        if let Some(&(adds, dels)) = stats.get(&entry.path) {
+            entry.additions = adds;
+            entry.deletions = dels;
+        }
+    }
+
+    Ok(entries)
+}
+
+
 pub fn git_local_branches_in(project_root: &Path) -> Result<Vec<(String, bool)>, String> {
     let raw = git_output_in(
         Some(project_root),
@@ -648,6 +728,28 @@ fn git_output_in(project_root: Option<&Path>, args: &[&str]) -> Result<String, S
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!("git error: {}", stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string())
+}
+
+fn git_output_in_allow_codes(
+    project_root: Option<&Path>,
+    args: &[&str],
+    allowed_codes: &[i32],
+) -> Result<String, String> {
+    let mut cmd = ProcessCommand::new("git");
+    cmd.args(["-c", "core.quotepath=off"]);
+    cmd.args(args);
+    if let Some(root) = project_root {
+        cmd.current_dir(root);
+    }
+    let output = cmd.output().map_err(|e| format!("git error: {}", e))?;
+    let code = output.status.code().unwrap_or(-1);
+    if !allowed_codes.contains(&code) {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("git error (code {}): {}", code, stderr));
     }
     Ok(String::from_utf8_lossy(&output.stdout)
         .trim_end()

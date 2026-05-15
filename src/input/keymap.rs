@@ -174,6 +174,9 @@ pub fn resolve(key: KeyEvent, state: &mut KeyState, mode: &Mode, is_recording: b
             KeyCode::Char('G') => app(AppAction::Workspace(WorkspaceAction::OpenGitView)),
             KeyCode::Char('l') => app(AppAction::Workspace(WorkspaceAction::OpenCommitLog)),
             KeyCode::Char('d') => app(AppAction::Workspace(
+                WorkspaceAction::OpenBranchCompareSidebarPicker,
+            )),
+            KeyCode::Char('D') => app(AppAction::Workspace(
                 WorkspaceAction::OpenBranchComparePicker,
             )),
             _ => core(CoreAction::Noop),
@@ -1543,5 +1546,29 @@ mod tests {
             action,
             app(AppAction::Window(WindowAction::WindowFocusByCreationIndex(2)))
         );
+    }
+
+    #[test]
+    fn space_d_opens_branch_compare_sidebar_picker() {
+        let mut state = KeyState::Space;
+        let action = resolve(key('d'), &mut state, &Mode::Normal, false);
+        assert_eq!(
+            action,
+            app(AppAction::Workspace(
+                WorkspaceAction::OpenBranchCompareSidebarPicker
+            ))
+        );
+        assert_eq!(state, KeyState::Normal);
+    }
+
+    #[test]
+    fn space_capital_d_opens_branch_compare_buffer_picker() {
+        let mut state = KeyState::Space;
+        let action = resolve(key('D'), &mut state, &Mode::Normal, false);
+        assert_eq!(
+            action,
+            app(AppAction::Workspace(WorkspaceAction::OpenBranchComparePicker))
+        );
+        assert_eq!(state, KeyState::Normal);
     }
 }

@@ -442,11 +442,9 @@ impl App {
             }
             AppAction::Workspace(WorkspaceAction::ToggleExplorer) => {
                 if self.compositor.has_explorer() {
-                    // Close explorer, save state
+                    // Close explorer, stash it so Ctrl+0 can restore focus.
                     if let Some(explorer) = self.compositor.close_explorer() {
-                        self.last_explorer_dir = Some(explorer.current_dir().to_path_buf());
-                        self.last_explorer_selected =
-                            explorer.selected_name().map(|s| s.to_string());
+                        self.stash_closed_explorer(explorer);
                     }
                 } else {
                     // Open explorer
@@ -467,10 +465,9 @@ impl App {
                 self.queue_git_status_refresh(true);
                 let initial_preview = self.active_buffer_is_blank();
                 if let Some(explorer) = self.compositor.close_explorer() {
-                    if !explorer.is_changed_only() {
-                        self.last_explorer_dir = Some(explorer.current_dir().to_path_buf());
-                        self.last_explorer_selected =
-                            explorer.selected_name().map(|s| s.to_string());
+                    let was_changed_only = explorer.is_changed_only();
+                    self.stash_closed_explorer(explorer);
+                    if !was_changed_only {
                         let mut explorer = Explorer::new_changed_only(
                             self.project_root.clone(),
                             &self.project_root,
@@ -529,6 +526,28 @@ impl App {
                     let variant = self
                         .last_used_sidebar
                         .unwrap_or(LastUsedSidebar::ExplorerRegular);
+
+                    // Restore the stashed Explorer whole when it matches —
+                    // this keeps the previous selection and scroll position.
+                    if let Some(explorer) = self.take_stashed_explorer_matching(variant) {
+                        let branch_refresh = explorer.is_branch_compare().then(|| {
+                            (
+                                explorer.current_dir().to_path_buf(),
+                                explorer.branch_compare_base().map(|s| s.to_string()),
+                            )
+                        });
+                        self.compositor.open_explorer(explorer);
+                        self.last_used_sidebar = Some(variant);
+                        // Refresh contents in the background; the restored
+                        // view shows cached data until the refresh lands.
+                        self.queue_git_status_refresh(true);
+                        if let Some((repo_root, Some(base))) = branch_refresh {
+                            self.queue_branch_diff_refresh(repo_root, base);
+                        }
+                        return false;
+                    }
+
+                    // No matching stash: build the sidebar fresh.
                     let target = match variant {
                         LastUsedSidebar::ExplorerRegular => WorkspaceAction::ToggleExplorer,
                         LastUsedSidebar::ExplorerChangedFiles => {
@@ -536,6 +555,9 @@ impl App {
                         }
                         LastUsedSidebar::GitView => WorkspaceAction::OpenGitView,
                         LastUsedSidebar::CommitLog => WorkspaceAction::OpenCommitLog,
+                        LastUsedSidebar::BranchCompare => {
+                            WorkspaceAction::OpenBranchCompareSidebarPicker
+                        }
                     };
                     return self.dispatch(Action::App(AppAction::Workspace(target)));
                 }
@@ -651,6 +673,45 @@ impl App {
                             Some(format!("Failed to open branch compare picker: {}", err));
                     }
                 }
+            }
+            AppAction::Workspace(WorkspaceAction::OpenBranchCompareSidebarPicker) => {
+                // SPC d always shows the branch picker. Cache restore is
+                // reserved for Ctrl+0 (see ShowLastUsedSidebar).
+                self.queue_git_status_refresh(true);
+                match self.open_git_branch_compare_sidebar_picker() {
+                    Ok(()) => {}
+                    Err(err) => {
+                        self.editor.message = Some(format!(
+                            "Failed to open branch compare sidebar picker: {}",
+                            err
+                        ));
+                    }
+                }
+            }
+            AppAction::Workspace(WorkspaceAction::OpenBranchCompareSidebar(base_branch)) => {
+                self.compositor.apply(UiAction::ClosePalette);
+                let repo_root = self.active_buffer_repo_root();
+
+                let files = match crate::command::git::git_branch_diff_files_in(
+                    &repo_root,
+                    &base_branch,
+                ) {
+                    Ok(files) => files,
+                    Err(err) => {
+                        self.editor.message =
+                            Some(format!("Branch compare failed: {}", err));
+                        return false;
+                    }
+                };
+
+                // Close any open Explorer first, stashing it.
+                if let Some(explorer) = self.compositor.close_explorer() {
+                    self.stash_closed_explorer(explorer);
+                }
+
+                let explorer = Explorer::new_branch_compare(repo_root, base_branch, files);
+                self.compositor.open_explorer(explorer);
+                self.last_used_sidebar = Some(LastUsedSidebar::BranchCompare);
             }
             AppAction::Workspace(WorkspaceAction::OpenBranchCompareView(branch)) => {
                 self.compositor.apply(UiAction::ClosePalette);
@@ -966,10 +1027,9 @@ impl App {
             }
             AppAction::Buffer(BufferAction::OpenFileFromExplorer(path)) => {
                 self.flush_insert_transaction_if_active();
-                // Save explorer state before closing
+                // Stash the explorer before closing so Ctrl+0 can restore it.
                 if let Some(explorer) = self.compositor.close_explorer() {
-                    self.last_explorer_dir = Some(explorer.current_dir().to_path_buf());
-                    self.last_explorer_selected = explorer.selected_name().map(|s| s.to_string());
+                    self.stash_closed_explorer(explorer);
                 }
                 self.editor.open_file(&path);
                 debug_log!(&self.config, "explorer: opened file {}", path);

@@ -29,7 +29,10 @@ impl Palette {
             self.update_reference_preview();
             return;
         }
-        if self.mode == PaletteMode::GitBranchPicker {
+        if self.mode == PaletteMode::GitBranchPicker
+            || self.mode == PaletteMode::GitBranchComparePicker
+            || self.mode == PaletteMode::GitBranchCompareSidebarPicker
+        {
             self.update_git_branch_preview();
             return;
         }

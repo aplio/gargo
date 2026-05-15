@@ -9,6 +9,9 @@ pub enum PaletteMode {
     ReferencePicker,
     GitBranchPicker,
     GitBranchComparePicker,
+    /// Like `GitBranchComparePicker` but the chosen branch opens the
+    /// branch-compare *sidebar* instead of a buffer view.
+    GitBranchCompareSidebarPicker,
     SymbolPicker,
     GlobalSearch,
     GotoLine,

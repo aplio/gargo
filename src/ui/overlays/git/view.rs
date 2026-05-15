@@ -1259,6 +1259,13 @@ impl GitView {
             return EventResult::Action(Action::Ui(UiAction::CloseGitView));
         }
 
+        // Always let the global Ctrl+0..9 chords punch through.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('0'..='9'))
+        {
+            return EventResult::Ignored;
+        }
+
         if self.find_active {
             return self.handle_find_key(key);
         }

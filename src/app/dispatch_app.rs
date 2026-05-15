@@ -523,10 +523,9 @@ impl App {
                 self.last_used_sidebar = Some(LastUsedSidebar::CommitLog);
             }
             AppAction::Workspace(WorkspaceAction::ShowLastUsedSidebar) => {
-                if !(self.compositor.has_explorer()
-                    || self.compositor.has_git_view()
-                    || self.compositor.has_commit_log())
-                {
+                if self.close_active_sidebar() {
+                    // Sidebar was open; closing returns focus to the editor.
+                } else {
                     let variant = self
                         .last_used_sidebar
                         .unwrap_or(LastUsedSidebar::ExplorerRegular);
@@ -900,6 +899,9 @@ impl App {
             }
             AppAction::Window(WindowAction::WindowFocusByCreationIndex(idx)) => {
                 self.flush_insert_transaction_if_active();
+                // Hand focus to the editor pane: close any open sidebar first
+                // so the focused window actually receives subsequent input.
+                self.close_active_sidebar();
                 let (cols, rows) = self.layout_dims();
                 match self.compositor.focus_window_by_creation_index(idx) {
                     Ok(buffer_id) => {

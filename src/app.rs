@@ -1047,6 +1047,26 @@ impl App {
         }
     }
 
+    /// Close whichever sidebar (Explorer, Git view, or Commit log) is open.
+    /// Preserves Explorer's directory and selection so the next open lands
+    /// in the same spot. Returns true when something was actually closed.
+    fn close_active_sidebar(&mut self) -> bool {
+        if let Some(explorer) = self.compositor.close_explorer() {
+            self.last_explorer_dir = Some(explorer.current_dir().to_path_buf());
+            self.last_explorer_selected = explorer.selected_name().map(|s| s.to_string());
+            return true;
+        }
+        if self.compositor.has_git_view() {
+            self.compositor.close_git_view();
+            return true;
+        }
+        if self.compositor.has_commit_log() {
+            self.compositor.close_commit_log();
+            return true;
+        }
+        false
+    }
+
     fn close_active_buffer_with_reconciliation(
         &mut self,
         force: bool,

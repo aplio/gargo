@@ -285,6 +285,10 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         .file-status { display: inline-block; width: 1.2em; text-align: center; font-weight: 700; flex: 0 0 1.2em; }
         .file-status.staged    { color: #2da44e; }
         .file-status.changed   { color: #d29922; }
+        .file-status.modified  { color: #d29922; }
+        .file-status.added     { color: #2da44e; }
+        .file-status.deleted   { color: #cf222e; }
+        .file-status.renamed   { color: #0969da; }
         .file-status.untracked { color: #8b949e; }
         .file-tree { list-style: none; margin: 0; padding: 0; }
         .file-tree li { margin: 0; }
@@ -534,6 +538,9 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         };
         const SECTION_LIST_CSS = { staged: "staged", unstaged: "changed", untracked: "untracked" };
         const SECTION_LIST_BADGE = { staged: "S", unstaged: "M", untracked: "?" };
+        const STATUS_LIST_BADGE = {
+            modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "?",
+        };
 
         function loadIdSet(storage, key) {
             try {
@@ -895,8 +902,10 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 const a = document.createElement("a");
                 a.href = `#${fileAnchorOf(section, meta.path)}`;
                 const badge = document.createElement("span");
-                badge.className = `file-status ${SECTION_LIST_CSS[section] || "changed"}`;
-                badge.textContent = SECTION_LIST_BADGE[section] || "M";
+                const fileStatus = meta.status;
+                badge.className = `file-status ${fileStatus || SECTION_LIST_CSS[section] || "changed"}`;
+                badge.textContent = STATUS_LIST_BADGE[fileStatus] || SECTION_LIST_BADGE[section] || "M";
+                badge.title = STATUS_LABELS[fileStatus] || "";
                 const text = document.createElement("span");
                 text.className = "file-path-text";
                 text.textContent = fileNode.name;
@@ -1197,6 +1206,12 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         }
         .file-tree { list-style: none; margin: 0; padding: 0; }
         .file-tree li { margin: 0; }
+        .file-status { display: inline-block; width: 1.2em; text-align: center; font-weight: 700; flex: 0 0 1.2em; }
+        .file-status.modified  { color: #d29922; }
+        .file-status.added     { color: #2da44e; }
+        .file-status.deleted   { color: #cf222e; }
+        .file-status.renamed   { color: #0969da; }
+        .file-status.untracked { color: #8b949e; }
         .tree-dir { margin: 0; }
         .tree-dir-children {
             list-style: none;
@@ -1444,6 +1459,9 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         const STATUS_CSS = {
             modified: "gr-status-modified", added: "gr-status-added", deleted: "gr-status-deleted",
             renamed: "gr-status-renamed", untracked: "gr-status-untracked",
+        };
+        const STATUS_LIST_BADGE = {
+            modified: "M", added: "A", deleted: "D", renamed: "R", untracked: "?",
         };
 
         function loadIdSet(storage, key) {
@@ -1780,10 +1798,16 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 li.className = "tree-file";
                 const a = document.createElement("a");
                 a.href = `#${fileAnchorOf(meta.path)}`;
+                const fileStatus = meta.status || "modified";
+                const badge = document.createElement("span");
+                badge.className = `file-status ${fileStatus}`;
+                badge.textContent = STATUS_LIST_BADGE[fileStatus] || "M";
+                badge.title = STATUS_LABELS[fileStatus] || "";
                 const text = document.createElement("span");
                 text.className = "file-path-text";
                 text.textContent = fileNode.name;
                 text.title = meta.path;
+                a.appendChild(badge);
                 a.appendChild(text);
                 li.appendChild(a);
                 parentUl.appendChild(li);

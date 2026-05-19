@@ -1,6 +1,7 @@
 # Gargo
 
 Gargo is a terminal text editor written in Rust.
+test
 
 ## Requirements
 

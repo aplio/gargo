@@ -359,6 +359,12 @@ fn test_diff_server_start_stop_and_status_api_results() {
         html.contains("collapseSingleChainDirs") && html.contains("displayName"),
         "expected sidebar tree to collapse single-child directory chains"
     );
+    assert!(
+        html.contains("STATUS_LIST_BADGE")
+            && html.contains("STATUS_LIST_BADGE[fileStatus]")
+            && html.contains("file-status ${fileStatus"),
+        "expected sidebar file tree to render a per-file git status badge"
+    );
 
     handle
         .command_tx
@@ -931,6 +937,12 @@ fn test_diff_server_compare_html_page() {
             && html.contains("\"tree-file\"")
             && html.contains("tree-dir-toggle"),
         "expected /compare HTML sidebar to render a tree view"
+    );
+    assert!(
+        html.contains("STATUS_LIST_BADGE")
+            && html.contains("STATUS_LIST_BADGE[fileStatus]")
+            && html.contains("file-status ${fileStatus}"),
+        "expected /compare HTML sidebar file tree to render a per-file git status badge"
     );
 
     stop_diff_server(&handle);

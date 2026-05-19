@@ -1390,6 +1390,9 @@ fn tree_entry_display(entry: &TreeEntry, inner_w: usize) -> String {
     if entry.is_dir {
         label.push('/');
     }
+    if let Some(status) = entry.git_status {
+        label.push_str(&format!(" [{}]", status.indicator()));
+    }
 
     let label_w = display_width(&label);
     let reserved_label_w = label_w.min(TREE_MIN_LABEL_COLUMNS).min(inner_w);

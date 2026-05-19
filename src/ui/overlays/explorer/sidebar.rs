@@ -1326,7 +1326,16 @@ impl Explorer {
                         format!("{}[{}] {}", prefix, status, entry.name)
                     } else {
                         let suffix = if entry.is_dir { "/" } else { "" };
-                        format!("{}{}{}", prefix, entry.name, suffix)
+                        match entry.git_status {
+                            Some(status) => format!(
+                                "{}{}{} [{}]",
+                                prefix,
+                                entry.name,
+                                suffix,
+                                status.indicator()
+                            ),
+                            None => format!("{}{}{}", prefix, entry.name, suffix),
+                        }
                     };
 
                     let style = if entry.is_repo_header {
@@ -1780,6 +1789,42 @@ mod tests {
             row.contains("[M] bbb.txt"),
             "row did not contain status badge: {}",
             row
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn all_files_mode_renders_status_badge() {
+        let dir = setup("all_files_badge");
+        let mut git_status_map = HashMap::new();
+        git_status_map.insert("bbb.txt".to_string(), GitFileStatus::Modified);
+        let mut explorer = Explorer::new(dir.clone(), &dir, &git_status_map);
+        let mut surface = Surface::new(40, 8);
+
+        explorer.render(&mut surface, 0, 40, 8);
+
+        let screen: Vec<String> = (0..8)
+            .map(|y| {
+                (0..40)
+                    .map(|x| {
+                        let symbol = &surface.get(x, y).symbol;
+                        symbol.chars().next().unwrap_or(' ')
+                    })
+                    .collect()
+            })
+            .collect();
+        let modified_row = screen.iter().find(|row| row.contains("bbb.txt"));
+        assert!(
+            modified_row.is_some_and(|row| row.contains("bbb.txt [M]")),
+            "modified file did not show status badge: {:?}",
+            screen
+        );
+        let unchanged_row = screen.iter().find(|row| row.contains("ccc.rs"));
+        assert!(
+            unchanged_row.is_some_and(|row| !row.contains("[")),
+            "unchanged file should not show a status badge: {:?}",
+            screen
         );
 
         cleanup(&dir);

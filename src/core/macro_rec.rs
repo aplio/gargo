@@ -6,6 +6,8 @@ const MAX_PLAYBACK_DEPTH: usize = 1000;
 
 pub struct MacroRecorder {
     registers: HashMap<char, Vec<CoreAction>>,
+    /// Registers in the order they were first recorded into.
+    order: Vec<char>,
     recording: Option<(char, Vec<CoreAction>)>,
     last_played: Option<char>,
     playback_depth: usize,
@@ -21,6 +23,7 @@ impl MacroRecorder {
     pub fn new() -> Self {
         Self {
             registers: HashMap::new(),
+            order: Vec::new(),
             recording: None,
             last_played: None,
             playback_depth: 0,
@@ -33,8 +36,17 @@ impl MacroRecorder {
 
     pub fn stop_recording(&mut self) {
         if let Some((reg, actions)) = self.recording.take() {
+            if !self.registers.contains_key(&reg) {
+                self.order.push(reg);
+            }
             self.registers.insert(reg, actions);
         }
+    }
+
+    /// Registers that have a recorded macro, in the order they were first
+    /// recorded into.
+    pub fn registered(&self) -> &[char] {
+        &self.order
     }
 
     pub fn record(&mut self, action: &CoreAction) {
@@ -141,6 +153,25 @@ mod tests {
 
         rec.exit_playback();
         assert!(rec.enter_playback());
+    }
+
+    #[test]
+    fn registered_tracks_insertion_order() {
+        let mut rec = MacroRecorder::new();
+        assert!(rec.registered().is_empty());
+
+        for reg in ['c', 'a', 'b'] {
+            rec.start_recording(reg);
+            rec.record(&CoreAction::MoveRight);
+            rec.stop_recording();
+        }
+        assert_eq!(rec.registered(), &['c', 'a', 'b']);
+
+        // Overwriting an existing register keeps its original position.
+        rec.start_recording('a');
+        rec.record(&CoreAction::MoveLeft);
+        rec.stop_recording();
+        assert_eq!(rec.registered(), &['c', 'a', 'b']);
     }
 
     #[test]

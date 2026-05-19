@@ -14,7 +14,7 @@ struct KeyBinding {
 }
 
 impl CommandHelper {
-    pub fn new(key_state: &KeyState) -> Self {
+    pub fn new(key_state: &KeyState, macro_registers: &[char]) -> Self {
         let (title, bindings) = match key_state {
             KeyState::Space => (
                 "SPC Commands".to_string(),
@@ -161,10 +161,20 @@ impl CommandHelper {
             ),
             KeyState::MacroPlay => (
                 "Play Macro".to_string(),
-                vec![KeyBinding {
-                    key: "a-z".to_string(),
-                    description: "Select register".to_string(),
-                }],
+                if macro_registers.is_empty() {
+                    vec![KeyBinding {
+                        key: "—".to_string(),
+                        description: "No macros recorded".to_string(),
+                    }]
+                } else {
+                    macro_registers
+                        .iter()
+                        .map(|reg| KeyBinding {
+                            key: reg.to_string(),
+                            description: "Replay register".to_string(),
+                        })
+                        .collect()
+                },
             ),
             KeyState::Normal => {
                 // Should not happen

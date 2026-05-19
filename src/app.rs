@@ -1876,7 +1876,10 @@ impl App {
                                 );
                                 debug_log!(&self.config, "action: {:?}", action);
                                 // Update command helper based on current key_state
-                                self.compositor.update_command_helper(&self.key_state);
+                                self.compositor.update_command_helper(
+                                    &self.key_state,
+                                    self.editor.macro_recorder.registered(),
+                                );
                                 if self.dispatch_resolved_key_action(action) {
                                     return Ok(());
                                 }

@@ -163,10 +163,10 @@ impl Compositor {
         self.find_replace_popup.as_mut()
     }
 
-    pub fn update_command_helper(&mut self, key_state: &KeyState) {
+    pub fn update_command_helper(&mut self, key_state: &KeyState, macro_registers: &[char]) {
         match key_state {
             KeyState::Normal => self.command_helper = None,
-            _ => self.command_helper = Some(CommandHelper::new(key_state)),
+            _ => self.command_helper = Some(CommandHelper::new(key_state, macro_registers)),
         }
     }
 

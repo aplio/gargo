@@ -95,7 +95,7 @@ fn window_swap_direction_key(code: KeyCode, shift: bool) -> Option<WindowDirecti
 }
 
 pub fn resolve(key: KeyEvent, state: &mut KeyState, mode: &Mode, is_recording: bool) -> Action {
-    // MacroRecord chord: q was pressed, now waiting for register a-z
+    // MacroRecord chord: Q was pressed, now waiting for register a-z
     if *state == KeyState::MacroRecord {
         *state = KeyState::Normal;
         return match key.code {
@@ -104,7 +104,7 @@ pub fn resolve(key: KeyEvent, state: &mut KeyState, mode: &Mode, is_recording: b
         };
     }
 
-    // MacroPlay chord: @ was pressed, now waiting for register a-z or @
+    // MacroPlay chord: q was pressed, now waiting for register a-z or q
     if *state == KeyState::MacroPlay {
         *state = KeyState::Normal;
         return match key.code {
@@ -331,7 +331,7 @@ fn resolve_normal(key: KeyEvent, state: &mut KeyState, is_recording: bool) -> Ac
         return core(action);
     }
     match key.code {
-        KeyCode::Char('q') => {
+        KeyCode::Char('Q') => {
             if is_recording {
                 core(CoreAction::MacroStop)
             } else {
@@ -339,7 +339,7 @@ fn resolve_normal(key: KeyEvent, state: &mut KeyState, is_recording: bool) -> Ac
                 core(CoreAction::Noop)
             }
         }
-        KeyCode::Char('@') => {
+        KeyCode::Char('q') => {
             *state = KeyState::MacroPlay;
             core(CoreAction::Noop)
         }
@@ -418,7 +418,7 @@ fn resolve_visual(key: KeyEvent, state: &mut KeyState, is_recording: bool) -> Ac
         return core(action);
     }
     match key.code {
-        KeyCode::Char('q') => {
+        KeyCode::Char('Q') => {
             if is_recording {
                 core(CoreAction::MacroStop)
             } else {
@@ -426,7 +426,7 @@ fn resolve_visual(key: KeyEvent, state: &mut KeyState, is_recording: bool) -> Ac
                 core(CoreAction::Noop)
             }
         }
-        KeyCode::Char('@') => {
+        KeyCode::Char('q') => {
             *state = KeyState::MacroPlay;
             core(CoreAction::Noop)
         }
@@ -1171,17 +1171,17 @@ mod tests {
     // -------------------------------------------------------
 
     #[test]
-    fn normal_q_not_recording_enters_macro_record_state() {
+    fn normal_shift_q_not_recording_enters_macro_record_state() {
         let mut state = KeyState::Normal;
-        let action = resolve(key('q'), &mut state, &Mode::Normal, false);
+        let action = resolve(key('Q'), &mut state, &Mode::Normal, false);
         assert_eq!(action, core(CoreAction::Noop));
         assert_eq!(state, KeyState::MacroRecord);
     }
 
     #[test]
-    fn normal_q_while_recording_stops_macro() {
+    fn normal_shift_q_while_recording_stops_macro() {
         let mut state = KeyState::Normal;
-        let action = resolve(key('q'), &mut state, &Mode::Normal, true);
+        let action = resolve(key('Q'), &mut state, &Mode::Normal, true);
         assert_eq!(action, core(CoreAction::MacroStop));
         assert_eq!(state, KeyState::Normal);
     }
@@ -1203,9 +1203,9 @@ mod tests {
     }
 
     #[test]
-    fn normal_at_enters_macro_play_state() {
+    fn normal_q_enters_macro_play_state() {
         let mut state = KeyState::Normal;
-        let action = resolve(key('@'), &mut state, &Mode::Normal, false);
+        let action = resolve(key('q'), &mut state, &Mode::Normal, false);
         assert_eq!(action, core(CoreAction::Noop));
         assert_eq!(state, KeyState::MacroPlay);
     }
@@ -1227,17 +1227,17 @@ mod tests {
     }
 
     #[test]
-    fn visual_q_not_recording_enters_macro_record_state() {
+    fn visual_shift_q_not_recording_enters_macro_record_state() {
         let mut state = KeyState::Normal;
-        let action = resolve(key('q'), &mut state, &Mode::Visual, false);
+        let action = resolve(key('Q'), &mut state, &Mode::Visual, false);
         assert_eq!(action, core(CoreAction::Noop));
         assert_eq!(state, KeyState::MacroRecord);
     }
 
     #[test]
-    fn visual_at_enters_macro_play_state() {
+    fn visual_q_enters_macro_play_state() {
         let mut state = KeyState::Normal;
-        let action = resolve(key('@'), &mut state, &Mode::Visual, false);
+        let action = resolve(key('q'), &mut state, &Mode::Visual, false);
         assert_eq!(action, core(CoreAction::Noop));
         assert_eq!(state, KeyState::MacroPlay);
     }

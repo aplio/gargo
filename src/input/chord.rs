@@ -16,8 +16,8 @@ impl KeyState {
             KeyState::Space => "SPC ",
             KeyState::SpaceWindow => "SPC w ",
             KeyState::Goto => "g ",
-            KeyState::MacroRecord => "q ",
-            KeyState::MacroPlay => "@ ",
+            KeyState::MacroRecord => "Q ",
+            KeyState::MacroPlay => "q ",
             KeyState::Normal => "",
         }
     }

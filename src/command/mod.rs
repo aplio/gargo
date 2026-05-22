@@ -1,6 +1,7 @@
 pub mod async_runtime;
 pub mod commit_log_runtime;
 pub mod diff_server;
+pub mod diff_viewed;
 pub mod file_index_runtime;
 pub mod git;
 pub mod git_backend;

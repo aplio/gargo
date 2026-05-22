@@ -10,11 +10,12 @@ use axum::{
     Router,
     extract::{Path as AxumPath, Query, State},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
 use tower_http::cors::CorsLayer;
 
 use crate::command::diff_server::{self, DiffServerState};
+use crate::command::diff_viewed::ViewedStore;
 use crate::command::github_preview_server::{
     self, GithubPreviewEvent, PreviewBrowserEvent, PreviewBrowserEventKind, PreviewServerState,
 };
@@ -187,6 +188,7 @@ impl GithubServerWorker {
         self.preview_state = Some(preview_state.clone());
         let diff_state = Arc::new(DiffServerState {
             project_root: repo_root.clone(),
+            viewed: ViewedStore::open(),
         });
         let github_state = Arc::new(GithubServerState { repo_root, url_ctx });
 
@@ -429,6 +431,10 @@ async fn run_server(
             get(diff_server::handle_api_status_file_request),
         )
         .route(
+            "/api/status/viewed",
+            post(diff_server::handle_api_status_viewed_request),
+        )
+        .route(
             "/api/branches",
             get(diff_server::handle_api_branches_request),
         )
@@ -436,6 +442,10 @@ async fn run_server(
         .route(
             "/api/compare/file",
             get(diff_server::handle_api_compare_file_request),
+        )
+        .route(
+            "/api/compare/viewed",
+            post(diff_server::handle_api_compare_viewed_request),
         )
         .with_state(diff_state);
 
@@ -829,7 +839,7 @@ async fn handle_api_commit(
     };
     let diff_files: Vec<_> = parse_unified_diff(&diff_raw)
         .iter()
-        .map(diff_server::file_metadata_json)
+        .map(|f| diff_server::file_metadata_json(f, false))
         .collect();
     diff_server::ok_json(serde_json::json!({
         "hash": hash,

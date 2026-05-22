@@ -149,10 +149,21 @@ fn cwd_test_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn start_diff_server(project_root: &Path, handle: &DiffServerHandle) -> Option<u16> {
+    start_diff_server_with_data_dir(project_root, None, handle)
+}
+
+/// Start the diff server, optionally pinning the viewed-state database to an
+/// explicit data dir so tests stay isolated from `~/.local/share/gargo`.
+fn start_diff_server_with_data_dir(
+    project_root: &Path,
+    data_dir: Option<&Path>,
+    handle: &DiffServerHandle,
+) -> Option<u16> {
     handle
         .command_tx
         .send(DiffServerCommand::Start {
             project_root: project_root.to_path_buf(),
+            data_dir: data_dir.map(Path::to_path_buf),
         })
         .expect("send start command");
 
@@ -284,10 +295,10 @@ fn test_diff_server_start_stop_and_status_api_results() {
         "expected diff UI to persist expanded file state in session storage"
     );
     assert!(
-        html.contains("VIEWED_FILES_STORAGE_KEY")
-            && html.contains("loadIdSet(localStorage, VIEWED_FILES_STORAGE_KEY)")
-            && html.contains("persistIdSet(localStorage, VIEWED_FILES_STORAGE_KEY"),
-        "expected diff UI to persist viewed file state in local storage"
+        html.contains("fetch(\"/api/status/viewed\"")
+            && html.contains("!!meta.viewed")
+            && !html.contains("VIEWED_FILES_STORAGE_KEY"),
+        "expected diff UI to persist viewed file state on the server, not local storage"
     );
     assert!(
         html.contains("className = \"diff-toggle-btn\"")
@@ -364,6 +375,7 @@ fn test_diff_server_start_stop_and_status_api_results() {
         .command_tx
         .send(DiffServerCommand::Start {
             project_root: repo.to_path_buf(),
+            data_dir: None,
         })
         .expect("send duplicate start");
 
@@ -889,9 +901,10 @@ fn test_diff_server_compare_html_page() {
     assert!(
         html.contains("className = \"diff-viewed-label\"")
             && html.contains("textContent = \"Viewed\"")
-            && html.contains("loadIdSet(localStorage, VIEWED_FILES_STORAGE_KEY)")
-            && html.contains("persistIdSet(localStorage, VIEWED_FILES_STORAGE_KEY"),
-        "expected /compare HTML to wire per-file Viewed checkbox backed by local storage"
+            && html.contains("fetch(\"/api/compare/viewed\"")
+            && html.contains("!!meta.viewed")
+            && !html.contains("VIEWED_FILES_STORAGE_KEY"),
+        "expected /compare HTML to wire per-file Viewed checkbox backed by the server"
     );
     assert!(html.contains("header.insertBefore(toggleButton, header.firstChild)"));
     assert!(
@@ -931,6 +944,254 @@ fn test_diff_server_compare_html_page() {
             && html.contains("\"tree-file\"")
             && html.contains("tree-dir-toggle"),
         "expected /compare HTML sidebar to render a tree view"
+    );
+
+    stop_diff_server(&handle);
+    match read_event(&handle.event_rx) {
+        DiffServerEvent::Stopped => {}
+        event => panic!("expected Stopped event, got: {:?}", event),
+    }
+}
+
+// --- Viewed-state persistence ------------------------------------------------
+
+fn post_json(url: &str, payload: serde_json::Value) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        match ureq::post(url).send_json(payload.clone()) {
+            Ok(resp) => {
+                assert_eq!(resp.status(), 200);
+                return resp.into_json().expect("valid json body");
+            }
+            Err(ureq::Error::Status(code, _)) => {
+                panic!("POST {} returned status {}", url, code);
+            }
+            Err(err) => {
+                if Instant::now() >= deadline {
+                    panic!("failed to POST {}: {}", url, err);
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// Find the `viewed` flag for `path` inside a status section or compare files
+/// array. Returns `None` when the file is not listed at all.
+fn viewed_flag(arr: &serde_json::Value, path: &str) -> Option<bool> {
+    arr.as_array()?
+        .iter()
+        .find(|v| v.get("path").and_then(|p| p.as_str()) == Some(path))
+        .and_then(|v| v.get("viewed").and_then(serde_json::Value::as_bool))
+}
+
+/// Init a repo with one committed file that then has an unstaged modification.
+fn make_status_repo(repo: &Path) {
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.name", "gargo-test"]);
+    run_git(repo, &["config", "user.email", "gargo-test@example.com"]);
+    fs::write(repo.join("sample.txt"), "line1\n").expect("write initial file");
+    run_git(repo, &["add", "sample.txt"]);
+    run_git(repo, &["commit", "-m", "init"]);
+    fs::write(repo.join("sample.txt"), "line1\nline2\n").expect("modify tracked file");
+}
+
+#[test]
+fn test_diff_server_status_viewed_persists_and_invalidates() {
+    let _cwd_lock = cwd_test_lock();
+    let repo_dir = tempdir().expect("create temp repo");
+    let repo = repo_dir.path();
+    make_status_repo(repo);
+    let data_dir = tempdir().expect("create temp data dir");
+
+    let _cwd_guard = WorkingDirGuard::set(repo);
+    let handle = DiffServerHandle::new().expect("create diff server handle");
+    let Some(port) = start_diff_server_with_data_dir(repo, Some(data_dir.path()), &handle) else {
+        return;
+    };
+
+    let status_url = format!("http://127.0.0.1:{}/api/status", port);
+    let viewed_url = format!("http://127.0.0.1:{}/api/status/viewed", port);
+
+    // Initially not viewed.
+    let body = get_json_with_retry(&status_url);
+    assert_eq!(viewed_flag(&body["unstaged"], "sample.txt"), Some(false));
+
+    // Marking it viewed is reflected in the status listing.
+    post_json(
+        &viewed_url,
+        serde_json::json!({ "section": "unstaged", "path": "sample.txt", "viewed": true }),
+    );
+    let body = get_json_with_retry(&status_url);
+    assert_eq!(viewed_flag(&body["unstaged"], "sample.txt"), Some(true));
+
+    // Changing the file content invalidates the viewed state.
+    fs::write(repo.join("sample.txt"), "line1\nline2\nline3\n").expect("change file");
+    let body = get_json_with_retry(&status_url);
+    assert_eq!(
+        viewed_flag(&body["unstaged"], "sample.txt"),
+        Some(false),
+        "viewed must reset once the diff content changes"
+    );
+
+    // Re-view against the new content, then explicitly un-view.
+    post_json(
+        &viewed_url,
+        serde_json::json!({ "section": "unstaged", "path": "sample.txt", "viewed": true }),
+    );
+    assert_eq!(
+        viewed_flag(&get_json_with_retry(&status_url)["unstaged"], "sample.txt"),
+        Some(true)
+    );
+    post_json(
+        &viewed_url,
+        serde_json::json!({ "section": "unstaged", "path": "sample.txt", "viewed": false }),
+    );
+    assert_eq!(
+        viewed_flag(&get_json_with_retry(&status_url)["unstaged"], "sample.txt"),
+        Some(false)
+    );
+
+    stop_diff_server(&handle);
+    match read_event(&handle.event_rx) {
+        DiffServerEvent::Stopped => {}
+        event => panic!("expected Stopped event, got: {:?}", event),
+    }
+}
+
+#[test]
+fn test_diff_server_untracked_viewed_invalidates_on_change() {
+    let _cwd_lock = cwd_test_lock();
+    let repo_dir = tempdir().expect("create temp repo");
+    let repo = repo_dir.path();
+    run_git(repo, &["init"]);
+    run_git(repo, &["config", "user.name", "gargo-test"]);
+    run_git(repo, &["config", "user.email", "gargo-test@example.com"]);
+    fs::write(repo.join("seed.txt"), "seed\n").expect("write seed file");
+    run_git(repo, &["add", "seed.txt"]);
+    run_git(repo, &["commit", "-m", "init"]);
+    fs::write(repo.join("new.txt"), "fresh\n").expect("write untracked file");
+    let data_dir = tempdir().expect("create temp data dir");
+
+    let _cwd_guard = WorkingDirGuard::set(repo);
+    let handle = DiffServerHandle::new().expect("create diff server handle");
+    let Some(port) = start_diff_server_with_data_dir(repo, Some(data_dir.path()), &handle) else {
+        return;
+    };
+    let status_url = format!("http://127.0.0.1:{}/api/status", port);
+
+    post_json(
+        &format!("http://127.0.0.1:{}/api/status/viewed", port),
+        serde_json::json!({ "section": "untracked", "path": "new.txt", "viewed": true }),
+    );
+    assert_eq!(
+        viewed_flag(&get_json_with_retry(&status_url)["untracked"], "new.txt"),
+        Some(true)
+    );
+
+    fs::write(repo.join("new.txt"), "fresh\nmore\n").expect("grow untracked file");
+    assert_eq!(
+        viewed_flag(&get_json_with_retry(&status_url)["untracked"], "new.txt"),
+        Some(false),
+        "an untracked file's viewed state must reset when its content changes"
+    );
+
+    stop_diff_server(&handle);
+    match read_event(&handle.event_rx) {
+        DiffServerEvent::Stopped => {}
+        event => panic!("expected Stopped event, got: {:?}", event),
+    }
+}
+
+#[test]
+fn test_diff_server_viewed_persists_across_restart() {
+    let _cwd_lock = cwd_test_lock();
+    let repo_dir = tempdir().expect("create temp repo");
+    let repo = repo_dir.path();
+    make_status_repo(repo);
+    let data_dir = tempdir().expect("create temp data dir");
+    let _cwd_guard = WorkingDirGuard::set(repo);
+
+    // First session: mark the file viewed, then shut the server down.
+    {
+        let handle = DiffServerHandle::new().expect("create diff server handle");
+        let Some(port) = start_diff_server_with_data_dir(repo, Some(data_dir.path()), &handle)
+        else {
+            return;
+        };
+        post_json(
+            &format!("http://127.0.0.1:{}/api/status/viewed", port),
+            serde_json::json!({ "section": "unstaged", "path": "sample.txt", "viewed": true }),
+        );
+        stop_diff_server(&handle);
+        match read_event(&handle.event_rx) {
+            DiffServerEvent::Stopped => {}
+            event => panic!("expected Stopped event, got: {:?}", event),
+        }
+    }
+
+    // Second session on the same data dir: the viewed state is still on disk.
+    let handle = DiffServerHandle::new().expect("create diff server handle");
+    let Some(port) = start_diff_server_with_data_dir(repo, Some(data_dir.path()), &handle) else {
+        return;
+    };
+    let body = get_json_with_retry(&format!("http://127.0.0.1:{}/api/status", port));
+    assert_eq!(
+        viewed_flag(&body["unstaged"], "sample.txt"),
+        Some(true),
+        "viewed state must survive a server restart"
+    );
+
+    stop_diff_server(&handle);
+    match read_event(&handle.event_rx) {
+        DiffServerEvent::Stopped => {}
+        event => panic!("expected Stopped event, got: {:?}", event),
+    }
+}
+
+#[test]
+fn test_diff_server_compare_viewed_scoped_to_branch_pair() {
+    let _cwd_lock = cwd_test_lock();
+    let repo_dir = tempdir().expect("create temp repo");
+    let repo = repo_dir.path();
+    make_compare_repo(repo);
+    // A second feature branch so `base.txt` is listed under a different pair.
+    run_git(repo, &["checkout", "-b", "feature2"]);
+    fs::write(repo.join("base.txt"), "line1\nfeature2-line\n").expect("write feature2 change");
+    run_git(repo, &["add", "."]);
+    run_git(repo, &["commit", "-m", "feature2 work"]);
+    run_git(repo, &["checkout", "main"]);
+    let data_dir = tempdir().expect("create temp data dir");
+
+    let _cwd_guard = WorkingDirGuard::set(repo);
+    let handle = DiffServerHandle::new().expect("create diff server handle");
+    let Some(port) = start_diff_server_with_data_dir(repo, Some(data_dir.path()), &handle) else {
+        return;
+    };
+
+    post_json(
+        &format!("http://127.0.0.1:{}/api/compare/viewed", port),
+        serde_json::json!({
+            "base": "main", "compare": "feature", "path": "base.txt", "viewed": true,
+        }),
+    );
+
+    // Viewed for the exact base/compare pair the record was set on.
+    let body = get_json_with_retry(&format!(
+        "http://127.0.0.1:{}/api/compare?base=main&compare=feature",
+        port
+    ));
+    assert_eq!(viewed_flag(&body["files"], "base.txt"), Some(true));
+
+    // A different compare branch does not inherit the viewed state.
+    let other = get_json_with_retry(&format!(
+        "http://127.0.0.1:{}/api/compare?base=main&compare=feature2",
+        port
+    ));
+    assert_eq!(
+        viewed_flag(&other["files"], "base.txt"),
+        Some(false),
+        "viewed state must be scoped to the base/compare branch pair"
     );
 
     stop_diff_server(&handle);

@@ -78,6 +78,7 @@ impl Plugin for DiffUiPlugin {
                     .command_tx
                     .send(DiffServerCommand::Start {
                         project_root: ctx.project_root().to_path_buf(),
+                        data_dir: None,
                     })
                     .is_err()
                 {
@@ -97,6 +98,7 @@ impl Plugin for DiffUiPlugin {
                     .command_tx
                     .send(DiffServerCommand::Start {
                         project_root: ctx.project_root().to_path_buf(),
+                        data_dir: None,
                     })
                     .is_err()
                 {

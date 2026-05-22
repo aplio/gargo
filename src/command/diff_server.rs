@@ -17,14 +17,16 @@ use axum::{
     extract::{Query, State},
     http::{HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Json, Response},
-    routing::get,
+    routing::{get, post},
 };
 use tower_http::cors::CorsLayer;
 
+use crate::command::diff_viewed::{PAGE_COMPARE, PAGE_STATUS, ViewedStore};
 use crate::command::registry::{CommandContext, CommandEffect, CommandEntry, CommandRegistry};
 use crate::diff_render::{
-    DiffFile, DiffHighlights, FileStatus, LineKind, parse_unified_diff, render_diff_styles,
-    render_file_body_html, render_file_body_html_with_highlights,
+    DiffFile, DiffHighlights, FileStatus, LineKind, content_hash_of, content_hash_of_bytes,
+    parse_unified_diff, render_diff_styles, render_file_body_html,
+    render_file_body_html_with_highlights,
 };
 use crate::input::action::{Action, AppAction, IntegrationAction};
 use crate::syntax::highlight::highlight_text;
@@ -33,7 +35,13 @@ use crate::syntax::language::{LanguageDef, LanguageRegistry};
 /// Commands that can be sent to the diff server
 #[derive(Debug, Clone)]
 pub enum DiffServerCommand {
-    Start { project_root: PathBuf },
+    Start {
+        project_root: PathBuf,
+        /// Optional override for gargo's data dir. Production callers pass
+        /// `None` (uses `~/.local/share/gargo`); tests pass a temp dir so the
+        /// viewed-state database stays isolated.
+        data_dir: Option<PathBuf>,
+    },
     Stop,
 }
 
@@ -92,8 +100,11 @@ impl DiffServerWorker {
     fn run(mut self) {
         loop {
             match self.command_rx.recv() {
-                Ok(DiffServerCommand::Start { project_root }) => {
-                    self.handle_start_server(project_root);
+                Ok(DiffServerCommand::Start {
+                    project_root,
+                    data_dir,
+                }) => {
+                    self.handle_start_server(project_root, data_dir);
                 }
                 Ok(DiffServerCommand::Stop) => self.handle_stop_server(),
                 Err(_) => break, // Main thread exited
@@ -101,7 +112,7 @@ impl DiffServerWorker {
         }
     }
 
-    fn handle_start_server(&mut self, project_root: PathBuf) {
+    fn handle_start_server(&mut self, project_root: PathBuf, data_dir: Option<PathBuf>) {
         if self.server_shutdown_tx.is_some() {
             let _ = self
                 .event_tx
@@ -136,8 +147,13 @@ impl DiffServerWorker {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         self.server_shutdown_tx = Some(shutdown_tx);
 
+        let viewed = match data_dir {
+            Some(dir) => ViewedStore::open_in_dir(&dir),
+            None => ViewedStore::open(),
+        };
         let server_state = Arc::new(DiffServerState {
             project_root: std::fs::canonicalize(&project_root).unwrap_or(project_root),
+            viewed,
         });
         let event_tx = self.event_tx.clone();
         self.tokio_runtime.spawn(async move {
@@ -159,9 +175,17 @@ impl DiffServerWorker {
     }
 }
 
-#[derive(Debug)]
 pub(crate) struct DiffServerState {
     pub(crate) project_root: PathBuf,
+    /// On-disk persistence for per-file "Viewed" checkboxes.
+    pub(crate) viewed: ViewedStore,
+}
+
+impl DiffServerState {
+    /// Stable key for this repo in the viewed-state database.
+    fn repo_key(&self) -> String {
+        self.project_root.to_string_lossy().to_string()
+    }
 }
 
 /// HTML template with diff2html integration
@@ -527,7 +551,6 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         const STORAGE_ROOT = rootPathCode ? rootPathCode.textContent : "unknown-root";
         const COLLAPSED_FILES_STORAGE_KEY = `gargo.diff.collapsed.v3:${STORAGE_ROOT}`;
         const EXPANDED_FILES_STORAGE_KEY = `gargo.diff.expanded.v1:${STORAGE_ROOT}`;
-        const VIEWED_FILES_STORAGE_KEY = `gargo.diff.viewed.v2:${STORAGE_ROOT}`;
         const SIDEBAR_COLLAPSED_KEY = `gargo.diff.sidebar.collapsed.v1:${STORAGE_ROOT}`;
         // Diffs with at least this many changed lines (additions + deletions)
         // are collapsed by default so the browser stays responsive. The user
@@ -538,9 +561,11 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 
         let collapsedFileIds = loadIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY);
         let expandedFileIds = loadIdSet(sessionStorage, EXPANDED_FILES_STORAGE_KEY);
-        let viewedFileIds = loadIdSet(localStorage, VIEWED_FILES_STORAGE_KEY);
         let sidebarCollapsedDirs = loadIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY);
         const bodyCache = new Map();
+        // fileId -> optimistic viewed state while its set-viewed POST is in
+        // flight; cleared once the server's reported state agrees.
+        const pendingViewed = new Map();
         let isLoading = false;
         let latestStatus = null;
 
@@ -569,7 +594,6 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         };
         const persistCollapsedFileIds = () => persistIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY, collapsedFileIds);
         const persistExpandedFileIds = () => persistIdSet(sessionStorage, EXPANDED_FILES_STORAGE_KEY, expandedFileIds);
-        const persistViewedFileIds = () => persistIdSet(localStorage, VIEWED_FILES_STORAGE_KEY, viewedFileIds);
         const persistSidebarCollapsedDirs = () => persistIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY, sidebarCollapsedDirs);
         // A diff is "huge" once its changed-line count crosses the threshold.
         const isHugeDiff = (meta) => !!meta
@@ -698,7 +722,7 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 
             const label = document.createElement("label");
             label.className = "diff-viewed-label";
-            label.title = "Mark this file as viewed (saved per browser)";
+            label.title = "Mark this file as viewed (saved on disk by gargo)";
             const checkbox = document.createElement("input");
             checkbox.type = "checkbox";
             checkbox.addEventListener("click", (e) => e.stopPropagation());
@@ -757,14 +781,15 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             persistExpandedFileIds();
         }
 
-        function setFileViewed(wrapper, isViewed) {
+        // Apply (or revert) a file row's viewed appearance: collapse it and
+        // drop the body when viewed, restore it otherwise. Pure DOM, no I/O.
+        function applyViewedState(wrapper, isViewed) {
             const fileId = wrapper.dataset.diffFileId;
             wrapper.classList.toggle("diff-file-viewed", isViewed);
             wrapper.classList.toggle("gr-file-viewed", isViewed);
             const checkbox = wrapper.querySelector(".diff-viewed-label input[type=checkbox]");
             if (checkbox && checkbox.checked !== isViewed) checkbox.checked = isViewed;
             if (isViewed) {
-                viewedFileIds.add(fileId);
                 wrapper.classList.add("diff-file-collapsed");
                 wrapper.classList.add("gr-file-collapsed");
                 const button = wrapper.querySelector(".diff-toggle-btn");
@@ -772,7 +797,6 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 const body = wrapper.querySelector(".gr-file-body");
                 if (body) { body.innerHTML = ""; delete body.dataset.loaded; }
             } else {
-                viewedFileIds.delete(fileId);
                 // Default-expand on un-viewed, unless explicitly collapsed or
                 // a huge diff the user has not chosen to expand.
                 const keepCollapsed = collapsedFileIds.has(fileId)
@@ -785,9 +809,31 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                     ensureBodyLoaded(wrapper).catch((e) => showError(e.message));
                 }
             }
-            persistViewedFileIds();
-            persistCollapsedFileIds();
             updateViewedCounter();
+        }
+
+        // Toggle a file's viewed state: update the UI right away, then persist
+        // it on the server, which records a content hash so the checkbox only
+        // survives while the diff is unchanged. Roll back if the request fails.
+        function setFileViewed(wrapper, isViewed) {
+            const fileId = wrapper.dataset.diffFileId;
+            applyViewedState(wrapper, isViewed);
+            pendingViewed.set(fileId, isViewed);
+            fetch("/api/status/viewed", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    section: wrapper.dataset.section,
+                    path: wrapper.dataset.path,
+                    viewed: isViewed,
+                }),
+            }).then((response) => {
+                if (!response.ok) throw new Error(`server returned ${response.status}`);
+            }).catch((e) => {
+                pendingViewed.delete(fileId);
+                applyViewedState(wrapper, !isViewed);
+                showError(`Failed to save viewed state: ${e.message}`);
+            });
         }
 
         async function ensureBodyLoaded(wrapper) {
@@ -1019,6 +1065,9 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             for (const id of Array.from(bodyCache.keys())) {
                 if (!presentIds.has(id)) bodyCache.delete(id);
             }
+            for (const id of Array.from(pendingViewed.keys())) {
+                if (!presentIds.has(id)) pendingViewed.delete(id);
+            }
             for (const id of Array.from(collapsedFileIds)) {
                 if (!presentIds.has(id)) collapsedFileIds.delete(id);
             }
@@ -1044,7 +1093,14 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                     filesMain.insertBefore(wrapper, filesMain.firstChild);
                 }
                 anchor = wrapper;
-                const isViewed = viewedFileIds.has(fileId);
+                // The server reports `viewed`; while a toggle's POST is still
+                // in flight the optimistic value wins until the server agrees.
+                let isViewed = !!meta.viewed;
+                if (pendingViewed.has(fileId)) {
+                    const want = pendingViewed.get(fileId);
+                    if (want === isViewed) pendingViewed.delete(fileId);
+                    else isViewed = want;
+                }
                 const isLarge = isHugeDiff(meta);
                 const isCollapsed = shouldCollapseByDefault(fileId, meta, isViewed);
                 wrapper.classList.toggle("gr-file-large", isLarge);
@@ -1481,7 +1537,6 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         const STORAGE_ROOT = rootPathCode ? rootPathCode.textContent : "unknown-root";
         const COLLAPSED_FILES_STORAGE_KEY = `gargo.compare.collapsed.v3:${STORAGE_ROOT}`;
         const EXPANDED_FILES_STORAGE_KEY = `gargo.compare.expanded.v1:${STORAGE_ROOT}`;
-        const VIEWED_FILES_STORAGE_KEY = `gargo.compare.viewed.v2:${STORAGE_ROOT}`;
         const SIDEBAR_COLLAPSED_KEY = `gargo.compare.sidebar.collapsed.v1:${STORAGE_ROOT}`;
         // Diffs with at least this many changed lines (additions + deletions)
         // are collapsed by default so the browser stays responsive. The user
@@ -1490,9 +1545,11 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 
         let collapsedFileIds = loadIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY);
         let expandedFileIds = loadIdSet(sessionStorage, EXPANDED_FILES_STORAGE_KEY);
-        let viewedFileIds = loadIdSet(localStorage, VIEWED_FILES_STORAGE_KEY);
         let sidebarCollapsedDirs = loadIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY);
         const bodyCache = new Map();
+        // fileId -> optimistic viewed state while its set-viewed POST is in
+        // flight; cleared once the server's reported state agrees.
+        const pendingViewed = new Map();
         let isLoadingCompare = false;
         let latestFiles = null;
 
@@ -1519,7 +1576,6 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         };
         const persistCollapsedFileIds = () => persistIdSet(sessionStorage, COLLAPSED_FILES_STORAGE_KEY, collapsedFileIds);
         const persistExpandedFileIds = () => persistIdSet(sessionStorage, EXPANDED_FILES_STORAGE_KEY, expandedFileIds);
-        const persistViewedFileIds = () => persistIdSet(localStorage, VIEWED_FILES_STORAGE_KEY, viewedFileIds);
         const persistSidebarCollapsedDirs = () => persistIdSet(sessionStorage, SIDEBAR_COLLAPSED_KEY, sidebarCollapsedDirs);
         // A diff is "huge" once its changed-line count crosses the threshold.
         const isHugeDiff = (meta) => !!meta
@@ -1637,7 +1693,7 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 
             const label = document.createElement("label");
             label.className = "diff-viewed-label";
-            label.title = "Mark this file as viewed (saved per browser)";
+            label.title = "Mark this file as viewed (saved on disk by gargo)";
             const checkbox = document.createElement("input");
             checkbox.type = "checkbox";
             checkbox.addEventListener("click", (e) => e.stopPropagation());
@@ -1691,14 +1747,15 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             persistExpandedFileIds();
         }
 
-        function setFileViewed(wrapper, isViewed) {
+        // Apply (or revert) a file row's viewed appearance: collapse it and
+        // drop the body when viewed, restore it otherwise. Pure DOM, no I/O.
+        function applyViewedState(wrapper, isViewed) {
             const fileId = wrapper.dataset.diffFileId;
             wrapper.classList.toggle("diff-file-viewed", isViewed);
             wrapper.classList.toggle("gr-file-viewed", isViewed);
             const checkbox = wrapper.querySelector(".diff-viewed-label input[type=checkbox]");
             if (checkbox && checkbox.checked !== isViewed) checkbox.checked = isViewed;
             if (isViewed) {
-                viewedFileIds.add(fileId);
                 wrapper.classList.add("diff-file-collapsed");
                 wrapper.classList.add("gr-file-collapsed");
                 const button = wrapper.querySelector(".diff-toggle-btn");
@@ -1706,7 +1763,6 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 const body = wrapper.querySelector(".gr-file-body");
                 if (body) { body.innerHTML = ""; delete body.dataset.loaded; }
             } else {
-                viewedFileIds.delete(fileId);
                 // Default-expand on un-viewed, unless explicitly collapsed or
                 // a huge diff the user has not chosen to expand.
                 const keepCollapsed = collapsedFileIds.has(fileId)
@@ -1719,9 +1775,32 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                     ensureBodyLoaded(wrapper).catch((e) => showError(e.message));
                 }
             }
-            persistViewedFileIds();
-            persistCollapsedFileIds();
             updateViewedCounter();
+        }
+
+        // Toggle a file's viewed state: update the UI right away, then persist
+        // it on the server for the current base/compare pair, which records a
+        // content hash. Roll back if the request fails.
+        function setFileViewed(wrapper, isViewed) {
+            const fileId = wrapper.dataset.diffFileId;
+            applyViewedState(wrapper, isViewed);
+            pendingViewed.set(fileId, isViewed);
+            fetch("/api/compare/viewed", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    base: baseSelect.value,
+                    compare: compareSelect.value,
+                    path: wrapper.dataset.path,
+                    viewed: isViewed,
+                }),
+            }).then((response) => {
+                if (!response.ok) throw new Error(`server returned ${response.status}`);
+            }).catch((e) => {
+                pendingViewed.delete(fileId);
+                applyViewedState(wrapper, !isViewed);
+                showError(`Failed to save viewed state: ${e.message}`);
+            });
         }
 
         async function ensureBodyLoaded(wrapper) {
@@ -1932,6 +2011,9 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             for (const id of Array.from(bodyCache.keys())) {
                 if (!presentIds.has(id)) bodyCache.delete(id);
             }
+            for (const id of Array.from(pendingViewed.keys())) {
+                if (!presentIds.has(id)) pendingViewed.delete(id);
+            }
             for (const id of Array.from(collapsedFileIds)) {
                 if (!presentIds.has(id)) collapsedFileIds.delete(id);
             }
@@ -1957,7 +2039,14 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                     filesMain.insertBefore(wrapper, filesMain.firstChild);
                 }
                 anchor = wrapper;
-                const isViewed = viewedFileIds.has(fileId);
+                // The server reports `viewed`; while a toggle's POST is still
+                // in flight the optimistic value wins until the server agrees.
+                let isViewed = !!meta.viewed;
+                if (pendingViewed.has(fileId)) {
+                    const want = pendingViewed.get(fileId);
+                    if (want === isViewed) pendingViewed.delete(fileId);
+                    else isViewed = want;
+                }
                 const isLarge = isHugeDiff(meta);
                 const isCollapsed = shouldCollapseByDefault(fileId, meta, isViewed);
                 wrapper.classList.toggle("gr-file-large", isLarge);
@@ -2108,9 +2197,14 @@ async fn run_server(
         .route("/compare", get(handle_compare_html_request))
         .route("/api/status", get(handle_api_status_request))
         .route("/api/status/file", get(handle_api_status_file_request))
+        .route("/api/status/viewed", post(handle_api_status_viewed_request))
         .route("/api/branches", get(handle_api_branches_request))
         .route("/api/compare", get(handle_api_compare_request))
         .route("/api/compare/file", get(handle_api_compare_file_request))
+        .route(
+            "/api/compare/viewed",
+            post(handle_api_compare_viewed_request),
+        )
         .with_state(state)
         .layer(CorsLayer::permissive());
 
@@ -2151,23 +2245,29 @@ fn html_escape(text: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// Count the lines in an untracked file so the status view can decide
-/// whether its (all-additions) diff is large enough to collapse by default.
+/// Scan an untracked file: count its lines, detect whether it is binary, and
+/// fingerprint its content for the "Viewed" checkbox.
 ///
-/// Returns `(line_count, is_binary)`. The scan is capped at `MAX_SCAN_BYTES`
-/// to bound memory: a file larger than the cap is certainly huge, and the
-/// newline count within the scanned prefix is already well past the
-/// collapse threshold for text. A file is treated as binary when it
-/// contains a NUL byte, in which case it reports a zero line count.
-async fn untracked_line_count(repo_root: &Path, rel_path: &str) -> (usize, bool) {
+/// Returns `(line_count, is_binary, content_hash)`. The read is capped at
+/// `MAX_SCAN_BYTES` to bound memory: a file larger than the cap is certainly
+/// huge, and the newline count within the scanned prefix is already well past
+/// the collapse threshold for text. A file is treated as binary when it
+/// contains a NUL byte, in which case it reports a zero line count. The hash
+/// folds in the file's full length so growth past the cap is still detected;
+/// it is empty only when the file cannot be read.
+async fn scan_untracked_file(repo_root: &Path, rel_path: &str) -> (usize, bool, String) {
     use tokio::io::AsyncReadExt;
 
     const MAX_SCAN_BYTES: u64 = 2 * 1024 * 1024;
 
     let full = repo_root.join(rel_path);
+    let total_len = tokio::fs::metadata(&full)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
     let file = match tokio::fs::File::open(&full).await {
         Ok(f) => f,
-        Err(_) => return (0, false),
+        Err(_) => return (0, false, String::new()),
     };
     let mut buf = Vec::new();
     if file
@@ -2176,20 +2276,21 @@ async fn untracked_line_count(repo_root: &Path, rel_path: &str) -> (usize, bool)
         .await
         .is_err()
     {
-        return (0, false);
+        return (0, false, String::new());
     }
+    let hash = content_hash_of_bytes(&buf, total_len);
     if buf.contains(&0) {
-        return (0, true);
+        return (0, true, hash);
     }
     if buf.is_empty() {
-        return (0, false);
+        return (0, false, hash);
     }
     let mut lines = buf.iter().filter(|&&b| b == b'\n').count();
     // A final line without a trailing newline still counts as a line.
     if buf.last() != Some(&b'\n') {
         lines += 1;
     }
-    (lines, false)
+    (lines, false, hash)
 }
 
 pub(crate) async fn git_output_in_repo(repo_root: &Path, args: &[&str]) -> Result<String, String> {
@@ -2244,13 +2345,17 @@ pub(crate) async fn handle_api_status_request(
         Err(error) => return bad_request(error),
     };
 
+    // One lookup of the persisted viewed state for the whole page; each file is
+    // reported viewed only while its current content hash still matches.
+    let viewed = load_viewed_map(&state, PAGE_STATUS, String::new(), String::new()).await;
+
     let unstaged_files: Vec<serde_json::Value> = parse_unified_diff(&unstaged_raw)
         .iter()
-        .map(file_metadata_json)
+        .map(|f| file_metadata_json(f, diff_file_is_viewed(&viewed, "unstaged", f)))
         .collect();
     let staged_files: Vec<serde_json::Value> = parse_unified_diff(&staged_raw)
         .iter()
-        .map(file_metadata_json)
+        .map(|f| file_metadata_json(f, diff_file_is_viewed(&viewed, "staged", f)))
         .collect();
 
     let untracked_files: Vec<serde_json::Value> = if show_untracked {
@@ -2265,7 +2370,10 @@ pub(crate) async fn handle_api_status_request(
         for path in raw.lines().map(str::trim).filter(|line| !line.is_empty()) {
             // A whole untracked file shows up as an all-additions diff, so its
             // line count drives the client's huge-diff collapse decision.
-            let (additions, binary) = untracked_line_count(repo_root, path).await;
+            let (additions, binary, hash) = scan_untracked_file(repo_root, path).await;
+            let is_viewed = viewed
+                .get(&("untracked".to_string(), path.to_string()))
+                .is_some_and(|stored| !hash.is_empty() && *stored == hash);
             entries.push(serde_json::json!({
                 "path": path,
                 "old_path": serde_json::Value::Null,
@@ -2273,6 +2381,7 @@ pub(crate) async fn handle_api_status_request(
                 "binary": binary,
                 "additions": additions,
                 "deletions": 0,
+                "viewed": is_viewed,
             }));
         }
         entries
@@ -2303,43 +2412,11 @@ pub(crate) async fn handle_api_status_file_request(
         Some(p) => p,
         None => return bad_request(format!("invalid path: {}", path_raw)),
     };
-    let repo_root = &state.project_root;
-
-    let diff_text = match section {
-        "staged" => match git_output_in_repo(repo_root, &["diff", "--cached", "--", &path]).await {
-            Ok(o) => o,
-            Err(e) => return bad_request(e),
-        },
-        "unstaged" => match git_output_in_repo(repo_root, &["diff", "--", &path]).await {
-            Ok(o) => o,
-            Err(e) => return bad_request(e),
-        },
-        "untracked" => {
-            let mut cmd = tokio::process::Command::new("git");
-            cmd.args(["-c", "core.quotepath=off"]);
-            cmd.args(["diff", "--no-index", "--", "/dev/null", &path]);
-            cmd.current_dir(repo_root);
-            match git_output_from_command(
-                cmd,
-                &[1],
-                &format!("git diff --no-index -- /dev/null {}", path),
-            )
-            .await
-            {
-                Ok(o) => o,
-                Err(e) => return bad_request(e),
-            }
-        }
-        _ => unreachable!(),
+    let file = match load_status_diff_file(&state.project_root, section, &path).await {
+        Ok(file) => file,
+        Err(e) => return bad_request(e),
     };
-
-    let mut files = parse_unified_diff(&diff_text);
-    if section == "untracked" {
-        for f in &mut files {
-            f.status = FileStatus::Untracked;
-        }
-    }
-    match files.into_iter().next() {
+    match file {
         Some(file) => {
             let html = render_highlighted(&file);
             ok_json(serde_json::json!({
@@ -2362,7 +2439,107 @@ pub(crate) async fn handle_api_status_file_request(
     }
 }
 
-pub(crate) fn file_metadata_json(file: &DiffFile) -> serde_json::Value {
+/// Run the per-file `git diff` for a status section and return the parsed
+/// [`DiffFile`], if any. Shared by the file-HTML and set-viewed endpoints so
+/// both hash and render over identical data.
+async fn load_status_diff_file(
+    repo_root: &Path,
+    section: &str,
+    path: &str,
+) -> Result<Option<DiffFile>, String> {
+    let diff_text = match section {
+        "staged" => git_output_in_repo(repo_root, &["diff", "--cached", "--", path]).await?,
+        "unstaged" => git_output_in_repo(repo_root, &["diff", "--", path]).await?,
+        "untracked" => {
+            let mut cmd = tokio::process::Command::new("git");
+            cmd.args(["-c", "core.quotepath=off"]);
+            cmd.args(["diff", "--no-index", "--", "/dev/null", path]);
+            cmd.current_dir(repo_root);
+            git_output_from_command(
+                cmd,
+                &[1],
+                &format!("git diff --no-index -- /dev/null {}", path),
+            )
+            .await?
+        }
+        _ => return Err(format!("invalid section: {section}")),
+    };
+    let mut files = parse_unified_diff(&diff_text);
+    if section == "untracked" {
+        for f in &mut files {
+            f.status = FileStatus::Untracked;
+        }
+    }
+    Ok(files.into_iter().next())
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct StatusViewedRequest {
+    section: String,
+    path: String,
+    viewed: bool,
+}
+
+/// POST endpoint: persist the "Viewed" checkbox for one status-page file.
+///
+/// When `viewed` is true the file's current content hash is computed and
+/// stored, so the checkbox is later honored only while the content matches.
+pub(crate) async fn handle_api_status_viewed_request(
+    State(state): State<Arc<DiffServerState>>,
+    Json(req): Json<StatusViewedRequest>,
+) -> Response {
+    let section = match req.section.as_str() {
+        s @ ("staged" | "unstaged" | "untracked") => s,
+        _ => return bad_request("missing or invalid `section`"),
+    };
+    let path = match parse_diff_path(&req.path) {
+        Some(p) => p,
+        None => return bad_request(format!("invalid path: {}", req.path)),
+    };
+
+    if !req.viewed {
+        store_viewed(
+            &state,
+            PAGE_STATUS,
+            String::new(),
+            String::new(),
+            section.to_string(),
+            path,
+            None,
+        )
+        .await;
+        return ok_json(serde_json::json!({ "viewed": false }));
+    }
+
+    // Pin the viewed record to the file's current content.
+    let hash = if section == "untracked" {
+        let (_, _, h) = scan_untracked_file(&state.project_root, &path).await;
+        h
+    } else {
+        match load_status_diff_file(&state.project_root, section, &path).await {
+            Ok(Some(file)) => content_hash_of(&file),
+            Ok(None) => String::new(),
+            Err(e) => return bad_request(e),
+        }
+    };
+    if hash.is_empty() {
+        // No content to anchor the record to (e.g. the file vanished).
+        return ok_json(serde_json::json!({ "viewed": false }));
+    }
+    store_viewed(
+        &state,
+        PAGE_STATUS,
+        String::new(),
+        String::new(),
+        section.to_string(),
+        path,
+        Some(hash),
+    )
+    .await;
+    ok_json(serde_json::json!({ "viewed": true }))
+}
+
+pub(crate) fn file_metadata_json(file: &DiffFile, viewed: bool) -> serde_json::Value {
     serde_json::json!({
         "path": file.path,
         "old_path": file.old_path,
@@ -2370,7 +2547,63 @@ pub(crate) fn file_metadata_json(file: &DiffFile) -> serde_json::Value {
         "binary": file.binary,
         "additions": file.additions,
         "deletions": file.deletions,
+        "viewed": viewed,
     })
+}
+
+/// `(section, path) -> stored content hash` for one page / branch context.
+type ViewedMap = HashMap<(String, String), String>;
+
+/// Load every viewed-file record for a page / branch context off the async
+/// runtime, since a contended SQLite read can block briefly on `busy_timeout`.
+async fn load_viewed_map(
+    state: &Arc<DiffServerState>,
+    page: &'static str,
+    base_ref: String,
+    compare_ref: String,
+) -> ViewedMap {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        state
+            .viewed
+            .viewed_map(&state.repo_key(), page, &base_ref, &compare_ref)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Persist (or, with `hash == None`, clear) a file's viewed record off the
+/// async runtime. Best-effort: failures leave the viewed state unpersisted.
+#[allow(clippy::too_many_arguments)]
+async fn store_viewed(
+    state: &Arc<DiffServerState>,
+    page: &'static str,
+    base_ref: String,
+    compare_ref: String,
+    section: String,
+    path: String,
+    hash: Option<String>,
+) {
+    let state = state.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let key = state.repo_key();
+        match hash {
+            Some(h) => state
+                .viewed
+                .set(&key, page, &base_ref, &compare_ref, &section, &path, &h),
+            None => state
+                .viewed
+                .unset(&key, page, &base_ref, &compare_ref, &section, &path),
+        }
+    })
+    .await;
+}
+
+/// Whether `file`'s current content matches its stored viewed record.
+fn diff_file_is_viewed(viewed: &ViewedMap, section: &str, file: &DiffFile) -> bool {
+    viewed
+        .get(&(section.to_string(), file.path.clone()))
+        .is_some_and(|stored| *stored == content_hash_of(file))
 }
 
 pub(crate) fn empty_diff_html() -> String {
@@ -2667,9 +2900,12 @@ pub(crate) async fn handle_api_compare_request(
         Err(error) => return bad_request(error),
     };
 
+    // Viewed records are scoped to this exact base/compare pair, so switching
+    // either branch naturally resets the checkboxes.
+    let viewed = load_viewed_map(&state, PAGE_COMPARE, base.clone(), compare.clone()).await;
     let files: Vec<serde_json::Value> = parse_unified_diff(&diff)
         .iter()
-        .map(file_metadata_json)
+        .map(|f| file_metadata_json(f, diff_file_is_viewed(&viewed, "", f)))
         .collect();
 
     ok_json(serde_json::json!({
@@ -2677,6 +2913,18 @@ pub(crate) async fn handle_api_compare_request(
         "compare": compare,
         "files": files,
     }))
+}
+
+/// Run `git diff base...compare -- <path>` and return the parsed [`DiffFile`].
+async fn load_compare_diff_file(
+    repo_root: &Path,
+    base: &str,
+    compare: &str,
+    path: &str,
+) -> Result<Option<DiffFile>, String> {
+    let range = format!("{}...{}", base, compare);
+    let diff = git_output_in_repo(repo_root, &["diff", &range, "--", path]).await?;
+    Ok(parse_unified_diff(&diff).into_iter().next())
 }
 
 pub(crate) async fn handle_api_compare_file_request(
@@ -2696,13 +2944,12 @@ pub(crate) async fn handle_api_compare_file_request(
         None => return bad_request(format!("invalid path: {}", path_raw)),
     };
 
-    let range = format!("{}...{}", base, compare);
-    let diff = match git_output_in_repo(&state.project_root, &["diff", &range, "--", &path]).await {
-        Ok(output) => output,
-        Err(error) => return bad_request(error),
+    let file = match load_compare_diff_file(&state.project_root, &base, &compare, &path).await {
+        Ok(file) => file,
+        Err(e) => return bad_request(e),
     };
 
-    match parse_unified_diff(&diff).into_iter().next() {
+    match file {
         Some(file) => {
             let html = render_highlighted(&file);
             ok_json(serde_json::json!({
@@ -2723,6 +2970,70 @@ pub(crate) async fn handle_api_compare_file_request(
             "html": empty_diff_html(),
         })),
     }
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct CompareViewedRequest {
+    base: String,
+    compare: String,
+    path: String,
+    viewed: bool,
+}
+
+/// POST endpoint: persist the "Viewed" checkbox for one compare-page file.
+///
+/// The record is scoped to the `base`/`compare` branch pair and pinned to the
+/// file's current content hash.
+pub(crate) async fn handle_api_compare_viewed_request(
+    State(state): State<Arc<DiffServerState>>,
+    Json(req): Json<CompareViewedRequest>,
+) -> Response {
+    let base = match parse_branch_name(&req.base) {
+        Some(b) => b,
+        None => return bad_request(format!("invalid branch name: {}", req.base)),
+    };
+    let compare = match parse_branch_name(&req.compare) {
+        Some(c) => c,
+        None => return bad_request(format!("invalid branch name: {}", req.compare)),
+    };
+    let path = match parse_diff_path(&req.path) {
+        Some(p) => p,
+        None => return bad_request(format!("invalid path: {}", req.path)),
+    };
+
+    if !req.viewed {
+        store_viewed(
+            &state,
+            PAGE_COMPARE,
+            base,
+            compare,
+            String::new(),
+            path,
+            None,
+        )
+        .await;
+        return ok_json(serde_json::json!({ "viewed": false }));
+    }
+
+    let hash = match load_compare_diff_file(&state.project_root, &base, &compare, &path).await {
+        Ok(Some(file)) => content_hash_of(&file),
+        Ok(None) => String::new(),
+        Err(e) => return bad_request(e),
+    };
+    if hash.is_empty() {
+        return ok_json(serde_json::json!({ "viewed": false }));
+    }
+    store_viewed(
+        &state,
+        PAGE_COMPARE,
+        base,
+        compare,
+        String::new(),
+        path,
+        Some(hash),
+    )
+    .await;
+    ok_json(serde_json::json!({ "viewed": true }))
 }
 
 #[allow(clippy::result_large_err)]

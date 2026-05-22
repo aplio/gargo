@@ -675,6 +675,70 @@ pub fn render_diff_styles() -> &'static str {
 "#
 }
 
+// --- Content hashing ---------------------------------------------------------
+//
+// A "viewed" file checkbox is only honored while the diff content is unchanged.
+// The hash below is a stable fingerprint of that content. FNV-1a is used (not
+// `std::hash::DefaultHasher`) because the hash is persisted to disk and must
+// stay identical across builds, platforms, and Rust versions.
+
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn fnv1a64(seed: u64, data: &[u8]) -> u64 {
+    let mut hash = seed;
+    for &byte in data {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+fn line_kind_tag(kind: LineKind) -> u8 {
+    match kind {
+        LineKind::Context => 0,
+        LineKind::Add => 1,
+        LineKind::Remove => 2,
+        LineKind::NoNewline => 3,
+    }
+}
+
+/// Stable content fingerprint of a parsed [`DiffFile`].
+///
+/// Folds the path, rename source, status, binary flag, and every hunk line's
+/// `(kind, content)` pair. Hunk headers and line numbers are deliberately
+/// excluded so the hash depends only on the actual changed content. The result
+/// is identical whether `file` came from a multi-file `git diff` or a
+/// single-file `git diff -- <path>`, because `parse_unified_diff` produces the
+/// same [`DiffFile`] either way.
+pub fn content_hash_of(file: &DiffFile) -> String {
+    let mut hash = FNV_OFFSET_BASIS;
+    hash = fnv1a64(hash, file.path.as_bytes());
+    hash = fnv1a64(hash, b"\0");
+    hash = fnv1a64(hash, file.old_path.as_deref().unwrap_or("").as_bytes());
+    hash = fnv1a64(hash, b"\0");
+    hash = fnv1a64(hash, file.status.as_str().as_bytes());
+    hash = fnv1a64(hash, &[file.binary as u8]);
+    for hunk in &file.hunks {
+        for line in &hunk.lines {
+            hash = fnv1a64(hash, &[line_kind_tag(line.kind)]);
+            hash = fnv1a64(hash, line.content.as_bytes());
+            hash = fnv1a64(hash, b"\n");
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// Stable content fingerprint of raw file bytes, used for untracked files
+/// whose "diff" is the whole file. `total_len` is folded in so growth past a
+/// truncated read of `prefix` is still detected.
+pub fn content_hash_of_bytes(prefix: &[u8], total_len: u64) -> String {
+    let mut hash = FNV_OFFSET_BASIS;
+    hash = fnv1a64(hash, &total_len.to_le_bytes());
+    hash = fnv1a64(hash, prefix);
+    format!("{hash:016x}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1106,5 +1170,71 @@ index 1..2 100644
         let legacy = render_file_body_html(&f);
         let with_empty = render_file_body_html_with_highlights(&f, &DiffHighlights::new());
         assert_eq!(legacy, with_empty);
+    }
+
+    const HASH_FILE_A: &str = "\
+diff --git a/foo.txt b/foo.txt
+index abc..def 100644
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,2 +1,2 @@
+-old
++new
+ keep
+";
+    const HASH_FILE_B: &str = "\
+diff --git a/bar.txt b/bar.txt
+index 111..222 100644
+--- a/bar.txt
++++ b/bar.txt
+@@ -1 +1 @@
+-x
++y
+";
+
+    #[test]
+    fn content_hash_is_independent_of_surrounding_files() {
+        // The same file parsed from a single-file diff and from a multi-file
+        // diff must hash identically — this is what keeps the list endpoint
+        // and the set-viewed endpoint consistent.
+        let solo = one_file(HASH_FILE_A);
+        let multi = parse_unified_diff(&format!("{HASH_FILE_A}{HASH_FILE_B}"));
+        assert_eq!(multi.len(), 2);
+        assert_eq!(content_hash_of(&solo), content_hash_of(&multi[0]));
+    }
+
+    #[test]
+    fn content_hash_changes_when_content_changes() {
+        let a = one_file(HASH_FILE_A);
+        let changed = one_file(
+            "\
+diff --git a/foo.txt b/foo.txt
+index abc..def 100644
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,2 +1,2 @@
+-old
++different
+ keep
+",
+        );
+        assert_ne!(content_hash_of(&a), content_hash_of(&changed));
+    }
+
+    #[test]
+    fn content_hash_of_bytes_detects_size_and_content() {
+        assert_eq!(
+            content_hash_of_bytes(b"hello", 5),
+            content_hash_of_bytes(b"hello", 5),
+        );
+        // Same prefix, different total length (truncated read of a grown file).
+        assert_ne!(
+            content_hash_of_bytes(b"hello", 5),
+            content_hash_of_bytes(b"hello", 6),
+        );
+        assert_ne!(
+            content_hash_of_bytes(b"hello", 5),
+            content_hash_of_bytes(b"world", 5),
+        );
     }
 }

@@ -1874,6 +1874,7 @@ pub(crate) fn remote_to_github_url(remote: &str) -> Option<String> {
 
 async fn git_output_in_repo(repo_root: &Path, args: &[&str]) -> Result<String, String> {
     let output = tokio::process::Command::new("git")
+        .args(["-c", "core.optionalLocks=false"])
         .args(args)
         .current_dir(repo_root)
         .output()

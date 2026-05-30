@@ -715,6 +715,9 @@ fn git_output_in(project_root: Option<&Path>, args: &[&str]) -> Result<String, S
     let mut cmd = ProcessCommand::new("git");
     // Disable C-style octal quoting of non-ASCII paths in git output.
     cmd.args(["-c", "core.quotepath=off"]);
+    // Avoid taking .git/index.lock for index refresh during status/diff so
+    // background reads don't race with a user-initiated `git commit`.
+    cmd.args(["-c", "core.optionalLocks=false"]);
     cmd.args(args);
     if let Some(root) = project_root {
         cmd.current_dir(root);
@@ -736,6 +739,7 @@ fn git_output_in_allow_codes(
 ) -> Result<String, String> {
     let mut cmd = ProcessCommand::new("git");
     cmd.args(["-c", "core.quotepath=off"]);
+    cmd.args(["-c", "core.optionalLocks=false"]);
     cmd.args(args);
     if let Some(root) = project_root {
         cmd.current_dir(root);

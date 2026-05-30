@@ -368,6 +368,7 @@ fn git_output_in_repo_allow_codes(
 ) -> Result<String, String> {
     let output = ProcessCommand::new("git")
         .args(["-c", "core.quotepath=off"])
+        .args(["-c", "core.optionalLocks=false"])
         .args(args)
         .current_dir(project_root)
         .output()

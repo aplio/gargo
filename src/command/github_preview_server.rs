@@ -748,6 +748,61 @@ pub(crate) fn commit_url(ctx: &RepoUrlContext, hash: &str) -> String {
     format!("/{}/{}/commit/{}", ctx.owner, ctx.repo, hash)
 }
 
+/// Render `repo / dir / subdir / file` with each prefix linked to its
+/// tree/blob page and the final segment styled as the current location.
+fn path_breadcrumb_html(ctx: &RepoUrlContext, rel_path: &str) -> String {
+    let mut out = String::from(r#"<div class="breadcrumb">"#);
+    let root_pill = format!(
+        r#"<a class="crumb-pill" href="{}">{}</a>"#,
+        repo_home_url(ctx),
+        html_escape(&ctx.repo),
+    );
+    let segments: Vec<&str> = if rel_path == "." || rel_path.is_empty() {
+        Vec::new()
+    } else {
+        rel_path
+            .trim_start_matches('/')
+            .trim_end_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    if segments.is_empty() {
+        // We're at the repo root: render the repo name as the current pill
+        // so it visually matches the other levels.
+        out.push_str(r#"<span class="crumb-pill crumb-pill-current">"#);
+        out.push_str(&html_escape(&ctx.repo));
+        out.push_str("</span></div>");
+        return out;
+    }
+    out.push_str(&root_pill);
+    let last = segments.len() - 1;
+    let mut acc = String::new();
+    for (i, seg) in segments.iter().enumerate() {
+        if !acc.is_empty() {
+            acc.push('/');
+        }
+        acc.push_str(seg);
+        out.push_str(r#"<span class="crumb-separator">/</span>"#);
+        if i == last {
+            out.push_str(r#"<span class="crumb-pill crumb-pill-current">"#);
+            out.push_str(&html_escape(seg));
+            out.push_str("</span>");
+        } else {
+            let _ = std::fmt::Write::write_fmt(
+                &mut out,
+                format_args!(
+                    r#"<a class="crumb-pill" href="{}">{}</a>"#,
+                    tree_url(ctx, &acc),
+                    html_escape(seg),
+                ),
+            );
+        }
+    }
+    out.push_str("</div>");
+    out
+}
+
 struct PathCommitInfo {
     short_hash: String,
     full_hash: String,
@@ -875,39 +930,6 @@ const DIRECTORY_TEMPLATE: &str = r#"<!DOCTYPE html>
             color: #24292f;
             word-break: break-all;
         }
-        .breadcrumb {
-            display: flex;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 6px;
-        }
-        .crumb-pill {
-            display: inline-flex;
-            align-items: center;
-            padding: 3px 10px;
-            border: 1px solid #d0d7de;
-            border-radius: 999px;
-            background: #ffffff;
-            color: #0969da;
-            text-decoration: none;
-            font-size: 13px;
-            line-height: 1.4;
-        }
-        a.crumb-pill:hover {
-            background: #f6f8fa;
-            text-decoration: none;
-        }
-        .crumb-pill-muted {
-            color: #57606a;
-        }
-        .crumb-pill-current {
-            color: #24292f;
-            background: #f6f8fa;
-        }
-        .crumb-separator {
-            color: #8c959f;
-            font-size: 13px;
-        }
         .file-list {
             background: #ffffff;
             border: 1px solid #d0d7de;
@@ -998,6 +1020,7 @@ const DIRECTORY_TEMPLATE: &str = r#"<!DOCTYPE html>
 <body>
     <div class="container">
         {{REPO_HEADER}}
+        {{BREADCRUMB}}
         {{COMMIT_INFO}}
         {{CONTENT}}
     </div>
@@ -1042,39 +1065,6 @@ const FILE_TEMPLATE: &str = r#"<!DOCTYPE html>
             padding: 2px 8px;
             color: #24292f;
             word-break: break-all;
-        }
-        .breadcrumb {
-            display: flex;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 6px;
-        }
-        .crumb-pill {
-            display: inline-flex;
-            align-items: center;
-            padding: 3px 10px;
-            border: 1px solid #d0d7de;
-            border-radius: 999px;
-            background: #ffffff;
-            color: #0969da;
-            text-decoration: none;
-            font-size: 13px;
-            line-height: 1.4;
-        }
-        a.crumb-pill:hover {
-            background: #f6f8fa;
-            text-decoration: none;
-        }
-        .crumb-pill-muted {
-            color: #57606a;
-        }
-        .crumb-pill-current {
-            color: #24292f;
-            background: #f6f8fa;
-        }
-        .crumb-separator {
-            color: #8c959f;
-            font-size: 13px;
         }
         .markdown-body {
             background: #ffffff;
@@ -1144,6 +1134,7 @@ const FILE_TEMPLATE: &str = r#"<!DOCTYPE html>
 <body>
     <div class="container">
         {{REPO_HEADER}}
+        {{BREADCRUMB}}
         {{COMMIT_INFO}}
         {{CONTENT}}
     </div>
@@ -1509,6 +1500,7 @@ pub(crate) async fn handle_directory_listing(
     let repo_url = github_repo_url(repo_root).await;
 
     let commit_info = path_commit_strip_html(repo_root, display_path, ctx).await;
+    let breadcrumb = path_breadcrumb_html(ctx, display_path);
     let html = DIRECTORY_TEMPLATE
         .replace("{{TITLE}}", &html_escape(&title))
         .replace("{{ROOT_PATH}}", &html_escape(&root_path))
@@ -1517,6 +1509,7 @@ pub(crate) async fn handle_directory_listing(
             "{{REPO_HEADER}}",
             &repository_header(&root_path, "code", repo_url.as_deref(), ctx),
         )
+        .replace("{{BREADCRUMB}}", &breadcrumb)
         .replace("{{COMMIT_INFO}}", &commit_info)
         .replace("{{CONTENT}}", &content)
         .replace("{{SHARED_CSS}}", crate::command::server_shared::SHARED_CSS)
@@ -1600,6 +1593,7 @@ pub(crate) async fn handle_file_display(
     };
 
     let commit_info = path_commit_strip_html(repo_root, display_path, ctx).await;
+    let breadcrumb = path_breadcrumb_html(ctx, display_path);
     let html = FILE_TEMPLATE
         .replace("{{TITLE}}", &html_escape(filename))
         .replace("{{ROOT_PATH}}", &html_escape(&root_path))
@@ -1608,6 +1602,7 @@ pub(crate) async fn handle_file_display(
             "{{REPO_HEADER}}",
             &repository_header(&root_path, "code", repo_url.as_deref(), ctx),
         )
+        .replace("{{BREADCRUMB}}", &breadcrumb)
         .replace("{{COMMIT_INFO}}", &commit_info)
         .replace("{{CONTENT}}", &rendered_content)
         .replace("{{SHARED_CSS}}", crate::command::server_shared::SHARED_CSS)

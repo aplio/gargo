@@ -148,6 +148,25 @@ body {
 }
 .file-toolbar .view-on-github-btn { margin-left: auto; }
 
+/* Path breadcrumb above the code/dir content; each segment links to its
+ * tree/blob view so reviewers can hop up the hierarchy with one click. */
+.breadcrumb {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 20px;
+    line-height: 1.4;
+    margin-bottom: 12px;
+}
+.crumb-pill {
+    color: #0969da;
+    text-decoration: none;
+}
+.crumb-pill:hover { text-decoration: underline; }
+.crumb-pill-current { color: #1f2328; font-weight: 600; }
+.crumb-separator { color: #8c959f; }
+
 /* Last-commit teaser shown above the code/dir content (GitHub-style) */
 .commit-info {
     display: flex;

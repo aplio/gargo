@@ -2061,7 +2061,11 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             }
         }
 
-        const populateSelect = (select, branches, preferred) => {
+        // Render the base/compare dropdowns. Local and remote branches are
+        // split into <optgroup>s so picking e.g. `origin/master` vs `master`
+        // is obvious — the names alone don't tell the user which side a ref
+        // belongs to.
+        const populateSelect = (select, branches, remoteSet, preferred) => {
             select.innerHTML = "";
             if (branches.length === 0) {
                 const opt = document.createElement("option");
@@ -2070,12 +2074,18 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 select.appendChild(opt);
                 return;
             }
+            const localGroup = document.createElement("optgroup");
+            localGroup.label = "Local";
+            const remoteGroup = document.createElement("optgroup");
+            remoteGroup.label = "Remote";
             for (const name of branches) {
                 const opt = document.createElement("option");
                 opt.value = name;
                 opt.textContent = name;
-                select.appendChild(opt);
+                (remoteSet.has(name) ? remoteGroup : localGroup).appendChild(opt);
             }
+            if (localGroup.childNodes.length > 0) select.appendChild(localGroup);
+            if (remoteGroup.childNodes.length > 0) select.appendChild(remoteGroup);
             if (preferred && branches.includes(preferred)) {
                 select.value = preferred;
             } else {
@@ -2089,6 +2099,7 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 const data = await response.json();
                 if (data.error) throw new Error(data.error);
                 const branches = Array.isArray(data.branches) ? data.branches : [];
+                const remoteSet = new Set(Array.isArray(data.remotes) ? data.remotes : []);
                 const current = typeof data.current === "string" ? data.current : null;
                 const defaultBranch = typeof data.default === "string" ? data.default : null;
 
@@ -2102,8 +2113,8 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                     || branches[0]
                     || "";
                 const compareFallback = current || branches[0] || "";
-                populateSelect(baseSelect, branches, baseParam || baseFallback);
-                populateSelect(compareSelect, branches, compareParam || compareFallback);
+                populateSelect(baseSelect, branches, remoteSet, baseParam || baseFallback);
+                populateSelect(compareSelect, branches, remoteSet, compareParam || compareFallback);
             } catch (e) {
                 showError(e.message);
                 baseSelect.innerHTML = '<option value="">(error)</option>';
@@ -2991,36 +3002,58 @@ pub(crate) async fn handle_compare_html_request(
     )
 }
 
-/// List the local branches in the repo and the current HEAD branch.
+/// List local and remote branches in the repo along with the current HEAD.
+///
+/// `for-each-ref` lets us tell which side a ref came from via its full
+/// `refname` (so callers can compare e.g. `origin/master` against a local
+/// branch without ambiguity), and lets us skip the `*/HEAD` symbolic refs
+/// that would otherwise duplicate a remote's default branch.
 pub(crate) async fn handle_api_branches_request(
     State(state): State<Arc<DiffServerState>>,
 ) -> Response {
     let repo_root = &state.project_root;
-    let raw = match git_output_in_repo(repo_root, &["branch", "--format=%(refname:short)|%(HEAD)"])
-        .await
+    let raw = match git_output_in_repo(
+        repo_root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)|%(refname:short)|%(HEAD)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    )
+    .await
     {
         Ok(output) => output,
         Err(error) => return bad_request(error),
     };
 
     let mut branches: Vec<String> = Vec::new();
+    let mut remotes: Vec<String> = Vec::new();
     let mut current: Option<String> = None;
     for line in raw.lines() {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
             continue;
         }
-        let (name, head) = match line.rsplit_once('|') {
-            Some((n, h)) => (n.trim(), h.trim()),
-            None => (line.trim(), ""),
-        };
-        if name.is_empty() {
+        let mut it = line.splitn(3, '|');
+        let full = it.next().unwrap_or("").trim();
+        let short = it.next().unwrap_or("").trim();
+        let head = it.next().unwrap_or("").trim();
+        if short.is_empty() {
+            continue;
+        }
+        // Skip `refs/remotes/origin/HEAD` and friends — they shadow a real
+        // remote branch and confuse the user when listed alongside it.
+        if short.ends_with("/HEAD") {
             continue;
         }
         if head == "*" {
-            current = Some(name.to_string());
+            current = Some(short.to_string());
         }
-        branches.push(name.to_string());
+        if full.starts_with("refs/remotes/") {
+            remotes.push(short.to_string());
+        }
+        branches.push(short.to_string());
     }
 
     let default = detect_default_branch(repo_root, &branches).await;
@@ -3029,6 +3062,7 @@ pub(crate) async fn handle_api_branches_request(
         "current": current,
         "default": default,
         "branches": branches,
+        "remotes": remotes,
     }))
 }
 

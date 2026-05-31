@@ -197,8 +197,7 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
     <title>Git Diff</title>
     <style>
 {{SHARED_CSS}}
-        .header { margin-bottom: 20px; }
-        .repo-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 12px 16px; border-top: 1px solid #d8dee4; background: #f6f8fa; }
+        .repo-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 14px; border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa; margin-bottom: 16px; }
         .context-row {
             display: flex;
             align-items: center;
@@ -463,16 +462,16 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 </head>
 <body>
 {{REPO_CTX_SCRIPT}}
-<div class="container">
-    <div class="header">
-        {{REPO_HEADER}}
-        <div class="repo-controls">
-            <label>
-                <input type="checkbox" id="show-untracked">
-                Show untracked files
-            </label>
-            <button id="refresh-btn" type="button">Refresh</button>
-        </div>
+<code id="root-path" hidden>{{ROOT_PATH}}</code>
+<div class="app-shell">
+    {{APP_RAIL}}
+    <main class="app-main">
+    <div class="repo-controls">
+        <label>
+            <input type="checkbox" id="show-untracked">
+            Show untracked files
+        </label>
+        <button id="refresh-btn" type="button">Refresh</button>
     </div>
 
     <div id="error-banner"></div>
@@ -1189,6 +1188,7 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
         updateGoTopButtonVisibility();
         loadStatus().catch((e) => showError(e.message));
     </script>
+    </main>
 </div>
 </body>
 </html>"#;
@@ -1202,8 +1202,7 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
     <title>Git Compare Branches</title>
     <style>
 {{SHARED_CSS}}
-        .header { margin-bottom: 20px; }
-        .repo-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 12px 16px; border-top: 1px solid #d8dee4; background: #f6f8fa; }
+        .repo-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 14px; border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa; margin-bottom: 16px; }
         .context-row {
             display: flex;
             align-items: center;
@@ -1465,22 +1464,22 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 </head>
 <body>
 {{REPO_CTX_SCRIPT}}
-<div class="container">
-    <div class="header">
-        {{REPO_HEADER}}
-        <div class="repo-controls">
-            <label>
-                Base
-                <select id="base-select"><option value="">(loading...)</option></select>
-            </label>
-            <span class="range-arrow">...</span>
-            <label>
-                Compare
-                <select id="compare-select"><option value="">(loading...)</option></select>
-            </label>
-            <button id="swap-btn" type="button" title="Swap base and compare">Swap</button>
-            <button id="refresh-btn" type="button">Refresh</button>
-        </div>
+<code id="root-path" hidden>{{ROOT_PATH}}</code>
+<div class="app-shell">
+    {{APP_RAIL}}
+    <main class="app-main">
+    <div class="repo-controls">
+        <label>
+            Base
+            <select id="base-select"><option value="">(loading...)</option></select>
+        </label>
+        <span class="range-arrow">...</span>
+        <label>
+            Compare
+            <select id="compare-select"><option value="">(loading...)</option></select>
+        </label>
+        <button id="swap-btn" type="button" title="Swap base and compare">Swap</button>
+        <button id="refresh-btn" type="button">Refresh</button>
     </div>
 
     <div id="error-banner"></div>
@@ -2239,6 +2238,7 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 
         updateGoTopButtonVisibility();
     </script>
+    </main>
 </div>
 </body>
 </html>"#;
@@ -2286,13 +2286,14 @@ pub(crate) async fn handle_html_request(
 ) -> impl IntoResponse {
     use crate::command::github_preview_server as gh;
     let root_path = state.project_root.display().to_string();
-    let repo_header = repo_header_html(&state.project_root, "status").await;
     let ctx = gh::resolve_repo_url_context(&state.project_root).await;
+    let repo_url = gh::github_repo_url(&state.project_root).await;
+    let rail = crate::command::app_shell::app_rail_html(&ctx, repo_url.as_deref(), "status");
     let ctx_script = repo_ctx_script(&ctx);
     Html(
         DIFF_HTML_TEMPLATE
             .replace("{{ROOT_PATH}}", &html_escape(&root_path))
-            .replace("{{REPO_HEADER}}", &repo_header)
+            .replace("{{APP_RAIL}}", &rail)
             .replace("{{REPO_CTX_SCRIPT}}", &ctx_script)
             .replace("{{SHARED_CSS}}", crate::command::server_shared::SHARED_CSS)
             .replace("{{DIFF_STYLES}}", render_diff_styles()),
@@ -2956,52 +2957,20 @@ fn repo_ctx_script(ctx: &crate::command::github_preview_server::RepoUrlContext) 
     )
 }
 
-async fn repo_header_html(repo_root: &Path, active_tab: &str) -> String {
-    use crate::command::github_preview_server as gh;
-    let root_path = repo_root.display().to_string();
-    let repo_url = gh::github_repo_url(repo_root).await;
-    let title = gh::repo_title_html(&root_path, repo_url.as_deref());
-    let ctx = gh::resolve_repo_url_context(repo_root).await;
-    let tab = |id: &str, label: &str, href: &str| {
-        let class_name = if id == active_tab {
-            "repo-tab repo-tab-active"
-        } else {
-            "repo-tab"
-        };
-        format!(
-            r#"<a class="{class_name}" href="{}">{}</a>"#,
-            html_escape(href),
-            html_escape(label)
-        )
-    };
-    format!(
-        r#"<div class="repo-header">
-            <div class="repo-title">{}</div>
-            <div class="repo-meta"><span class="context-key">Root</span><code id="root-path">{}</code></div>
-            <nav class="repo-tabs" aria-label="Repository views">{}{}{}{}</nav>
-        </div>"#,
-        title,
-        html_escape(&root_path),
-        tab("code", "Code", &gh::repo_home_url(&ctx)),
-        tab("status", "Status", "/status"),
-        tab("branches", "Branches", "/branches"),
-        tab("commits", "Commits", &gh::commits_url(&ctx)),
-    )
-}
-
 /// Serve the compare-branches HTML page.
 pub(crate) async fn handle_compare_html_request(
     State(state): State<Arc<DiffServerState>>,
 ) -> impl IntoResponse {
     use crate::command::github_preview_server as gh;
     let root_path = state.project_root.display().to_string();
-    let repo_header = repo_header_html(&state.project_root, "branches").await;
     let ctx = gh::resolve_repo_url_context(&state.project_root).await;
+    let repo_url = gh::github_repo_url(&state.project_root).await;
+    let rail = crate::command::app_shell::app_rail_html(&ctx, repo_url.as_deref(), "branches");
     let ctx_script = repo_ctx_script(&ctx);
     Html(
         COMPARE_HTML_TEMPLATE
             .replace("{{ROOT_PATH}}", &html_escape(&root_path))
-            .replace("{{REPO_HEADER}}", &repo_header)
+            .replace("{{APP_RAIL}}", &rail)
             .replace("{{REPO_CTX_SCRIPT}}", &ctx_script)
             .replace("{{SHARED_CSS}}", crate::command::server_shared::SHARED_CSS)
             .replace("{{DIFF_STYLES}}", render_diff_styles()),

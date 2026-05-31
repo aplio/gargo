@@ -594,39 +594,6 @@ pub(crate) async fn handle_mermaid_asset() -> impl IntoResponse {
     response
 }
 
-fn repository_header(
-    root_path: &str,
-    active_tab: &str,
-    repo_url: Option<&str>,
-    ctx: &RepoUrlContext,
-) -> String {
-    let tab = |id: &str, label: &str, href: &str| {
-        let class_name = if id == active_tab {
-            "repo-tab repo-tab-active"
-        } else {
-            "repo-tab"
-        };
-        format!(
-            r#"<a class="{class_name}" href="{}">{}</a>"#,
-            html_escape(href),
-            html_escape(label)
-        )
-    };
-    let title = repo_title_html(root_path, repo_url);
-    format!(
-        r#"<div class="repo-header">
-            <div class="repo-title">{}</div>
-            <div class="repo-meta"><span class="context-key">Root</span><code>{}</code></div>
-            <nav class="repo-tabs" aria-label="Repository views">{}{}{}{}</nav>
-        </div>"#,
-        title,
-        html_escape(root_path),
-        tab("code", "Code", &repo_home_url(ctx)),
-        tab("status", "Status", "/status"),
-        tab("branches", "Branches", "/branches"),
-        tab("commits", "Commits", &commits_url(ctx)),
-    )
-}
 
 pub(crate) fn repo_title_html(root_path: &str, repo_url: Option<&str>) -> String {
     let (owner, repo) = owner_repo_for_root(root_path, repo_url);
@@ -1018,11 +985,13 @@ const DIRECTORY_TEMPLATE: &str = r#"<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <div class="container">
-        {{REPO_HEADER}}
-        {{BREADCRUMB}}
-        {{COMMIT_INFO}}
-        {{CONTENT}}
+    <div class="app-shell">
+        {{APP_RAIL}}
+        <main class="app-main">
+            <div class="breadcrumb-row">{{BREADCRUMB}}{{TOOLBAR}}</div>
+            {{COMMIT_INFO}}
+            {{CONTENT}}
+        </main>
     </div>
     <script src="/assets/mermaid.min.js"></script>
     {{MERMAID_INIT_SCRIPT}}
@@ -1132,11 +1101,13 @@ const FILE_TEMPLATE: &str = r#"<!DOCTYPE html>
     </style>
 </head>
 <body>
-    <div class="container">
-        {{REPO_HEADER}}
-        {{BREADCRUMB}}
-        {{COMMIT_INFO}}
-        {{CONTENT}}
+    <div class="app-shell">
+        {{APP_RAIL}}
+        <main class="app-main">
+            <div class="breadcrumb-row">{{BREADCRUMB}}{{TOOLBAR}}</div>
+            {{COMMIT_INFO}}
+            {{CONTENT}}
+        </main>
     </div>
     <script src="/assets/mermaid.min.js"></script>
     {{MERMAID_INIT_SCRIPT}}
@@ -1501,14 +1472,13 @@ pub(crate) async fn handle_directory_listing(
 
     let commit_info = path_commit_strip_html(repo_root, display_path, ctx).await;
     let breadcrumb = path_breadcrumb_html(ctx, display_path);
+    let rail = crate::command::app_shell::app_rail_html(ctx, repo_url.as_deref(), "code");
     let html = DIRECTORY_TEMPLATE
         .replace("{{TITLE}}", &html_escape(&title))
         .replace("{{ROOT_PATH}}", &html_escape(&root_path))
         .replace("{{CURRENT_PATH}}", &html_escape(display_path))
-        .replace(
-            "{{REPO_HEADER}}",
-            &repository_header(&root_path, "code", repo_url.as_deref(), ctx),
-        )
+        .replace("{{APP_RAIL}}", &rail)
+        .replace("{{TOOLBAR}}", "")
         .replace("{{BREADCRUMB}}", &breadcrumb)
         .replace("{{COMMIT_INFO}}", &commit_info)
         .replace("{{CONTENT}}", &content)
@@ -1549,31 +1519,25 @@ pub(crate) async fn handle_file_display(
 
     let root_path = repo_root.display().to_string();
     let repo_url = github_repo_url(repo_root).await;
-    let github_btn = repo_url
-        .as_deref()
-        .map(|base| {
-            format!(
-                r#"<a class="view-on-github-btn" href="{}/blob/{}/{}" target="_blank" rel="noopener">View on GitHub</a>"#,
-                base,
-                html_escape(&ctx.branch),
-                html_escape(display_path),
-            )
-        })
-        .unwrap_or_default();
+
+    // Preview/Code toggle goes into the breadcrumb row. View on GitHub now
+    // lives in the rail, so the in-body toolbar only carries view-mode chips.
+    let toolbar = if is_markdown {
+        let blob = blob_url(ctx, display_path);
+        format!(
+            r#"<div class="file-toolbar"><div class="md-view-toggle"><a class="md-toggle-btn{preview}" href="{blob}">Preview</a><a class="md-toggle-btn{code}" href="{blob}?plain=1">Code</a></div></div>"#,
+            preview = if plain { "" } else { " active" },
+            code = if plain { " active" } else { "" },
+            blob = html_escape(&blob),
+        )
+    } else {
+        String::new()
+    };
 
     let rendered_content = match text {
-        None => format!(
-            r#"<div class="file-toolbar">{github_btn}</div><div class="error">Binary file - cannot display</div>"#,
-        ),
+        None => r#"<div class="error">Binary file - cannot display</div>"#.to_string(),
         Some(text) if is_markdown => {
-            let blob = blob_url(ctx, display_path);
-            let toggle = format!(
-                r#"<div class="md-view-toggle"><a class="md-toggle-btn{preview}" href="{blob}">Preview</a><a class="md-toggle-btn{code}" href="{blob}?plain=1">Code</a></div>"#,
-                preview = if plain { "" } else { " active" },
-                code = if plain { " active" } else { "" },
-                blob = html_escape(&blob),
-            );
-            let body = if plain {
+            if plain {
                 format!(
                     r#"<div class="file-content code-view">{}</div>"#,
                     render_code_with_line_ids_for_path(&text, filename)
@@ -1583,25 +1547,23 @@ pub(crate) async fn handle_file_display(
                     r#"<div class="markdown-body">{}</div>"#,
                     render_markdown_with_source_lines(&text)
                 )
-            };
-            format!(r#"<div class="file-toolbar">{toggle}{github_btn}</div>{body}"#)
+            }
         }
         Some(text) => format!(
-            r#"<div class="file-toolbar">{github_btn}</div><div class="file-content code-view">{}</div>"#,
+            r#"<div class="file-content code-view">{}</div>"#,
             render_code_with_line_ids_for_path(&text, filename)
         ),
     };
 
     let commit_info = path_commit_strip_html(repo_root, display_path, ctx).await;
     let breadcrumb = path_breadcrumb_html(ctx, display_path);
+    let rail = crate::command::app_shell::app_rail_html(ctx, repo_url.as_deref(), "code");
     let html = FILE_TEMPLATE
         .replace("{{TITLE}}", &html_escape(filename))
         .replace("{{ROOT_PATH}}", &html_escape(&root_path))
         .replace("{{CURRENT_PATH}}", &html_escape(display_path))
-        .replace(
-            "{{REPO_HEADER}}",
-            &repository_header(&root_path, "code", repo_url.as_deref(), ctx),
-        )
+        .replace("{{APP_RAIL}}", &rail)
+        .replace("{{TOOLBAR}}", &toolbar)
         .replace("{{BREADCRUMB}}", &breadcrumb)
         .replace("{{COMMIT_INFO}}", &commit_info)
         .replace("{{CONTENT}}", &rendered_content)

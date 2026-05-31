@@ -5,10 +5,6 @@
 //! Callers render it into a `{{APP_RAIL}}` template slot that sits inside
 //! `<div class="app-shell"> … <main class="app-main"> …`.
 
-// Wired into the templates in the next commit; allow until then so this can
-// land as its own reviewable change.
-#![allow(dead_code)]
-
 use crate::command::github_preview_server::{
     RepoUrlContext, commits_url, html_escape, repo_home_url,
 };

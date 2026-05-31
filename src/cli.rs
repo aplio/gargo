@@ -7,18 +7,23 @@ pub enum CliMode {
     RunEditor,
     CheckUpgrade,
     Update,
+    Server,
 }
 
 #[derive(Debug, Parser)]
 #[command(name = "gargo")]
 pub struct Cli {
     /// Check whether a newer version is available.
-    #[arg(long, conflicts_with = "update")]
+    #[arg(long, conflicts_with_all = ["update", "server"])]
     pub check: bool,
 
     /// Download and replace the current binary with the latest release.
-    #[arg(long, conflicts_with = "check")]
+    #[arg(long, conflicts_with_all = ["check", "server"])]
     pub update: bool,
+
+    /// Start the gargo HTTP server without launching the editor.
+    #[arg(long, conflicts_with_all = ["check", "update"])]
+    pub server: bool,
 
     /// Optional file or directory to open.
     #[arg(value_name = "PATH", conflicts_with_all = ["check", "update"])]
@@ -31,6 +36,8 @@ impl Cli {
             CliMode::CheckUpgrade
         } else if self.update {
             CliMode::Update
+        } else if self.server {
+            CliMode::Server
         } else {
             CliMode::RunEditor
         }
@@ -54,6 +61,13 @@ mod tests {
     fn parses_update_flag() {
         let cli = Cli::try_parse_from(["gargo", "--update"]).expect("parse --update");
         assert_eq!(cli.mode(), CliMode::Update);
+        assert!(cli.path.is_none());
+    }
+
+    #[test]
+    fn parses_server_flag() {
+        let cli = Cli::try_parse_from(["gargo", "--server"]).expect("parse --server");
+        assert_eq!(cli.mode(), CliMode::Server);
         assert!(cli.path.is_none());
     }
 

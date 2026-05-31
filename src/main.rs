@@ -1,4 +1,7 @@
+use std::path::PathBuf;
+
 use clap::Parser;
+use gargo::command::github_server::{GithubServerCommand, GithubServerEvent, GithubServerHandle};
 use gargo::config::Config;
 use gargo::core::editor::Editor;
 
@@ -29,6 +32,15 @@ fn main() {
                 }
             }
         }
+        gargo::cli::CliMode::Server => {
+            let start = cli.path.as_deref();
+            let repo_root = gargo::project::find_project_root(start);
+            if let Err(e) = run_server(repo_root) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         gargo::cli::CliMode::RunEditor => {}
     }
 
@@ -56,5 +68,27 @@ fn main() {
     if let Err(e) = result {
         eprintln!("Error: {}", e);
         std::process::exit(1);
+    }
+}
+
+fn run_server(repo_root: PathBuf) -> Result<(), String> {
+    let handle = GithubServerHandle::new()?;
+    handle
+        .command_tx
+        .send(GithubServerCommand::Start { repo_root })
+        .map_err(|e| format!("Failed to send start command: {e}"))?;
+
+    loop {
+        match handle.event_rx.recv() {
+            Ok(GithubServerEvent::Started { root_url, .. }) => {
+                println!("{root_url}");
+            }
+            Ok(GithubServerEvent::Error(msg)) => {
+                return Err(msg);
+            }
+            Ok(GithubServerEvent::Stopped) => return Ok(()),
+            Ok(_) => {}
+            Err(_) => return Ok(()),
+        }
     }
 }

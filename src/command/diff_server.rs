@@ -2521,13 +2521,10 @@ pub(crate) async fn handle_split_request(
 
     // Commit on the root: parent ref doesn't exist. Catch the read error and
     // fall back to right-only rather than 400ing the page.
-    let old_lines: Option<Vec<String>> = read_full_file_at_ref(
-        repo_root,
-        old_ref.as_deref(),
-        &old_read_path,
-    )
-    .await
-    .unwrap_or_default();
+    let old_lines: Option<Vec<String>> =
+        read_full_file_at_ref(repo_root, old_ref.as_deref(), &old_read_path)
+            .await
+            .unwrap_or_default();
     let new_lines = match read_full_file_at_ref(repo_root, new_ref.as_deref(), &path).await {
         Ok(v) => v,
         Err(e) => return bad_request(e),

@@ -1453,7 +1453,11 @@ pub(crate) async fn handle_directory_listing(
         && let Ok(text) = String::from_utf8(readme_content)
     {
         let html = render_markdown(&text);
-        let readme_dir = if display_path == "." { "" } else { display_path };
+        let readme_dir = if display_path == "." {
+            ""
+        } else {
+            display_path
+        };
         let html = rewrite_markdown_links(&html, ctx, readme_dir);
         content.push_str(r#"<div style="margin-top: 24px;"><div class="markdown-body">"#);
         content.push_str(&html);
@@ -1665,7 +1669,7 @@ fn resolve_markdown_link(ctx: &RepoUrlContext, current_dir: &str, value: &str) -
         return None;
     }
 
-    let (path_part, suffix) = match value.find(|c| c == '#' || c == '?') {
+    let (path_part, suffix) = match value.find(['#', '?']) {
         Some(idx) => (&value[..idx], &value[idx..]),
         None => (value, ""),
     };
@@ -1945,7 +1949,10 @@ mod link_rewriting_tests {
     fn rewrites_relative_link_without_leading_dot() {
         let html = r#"<a href="bar.md">bar</a>"#;
         let out = rewrite_markdown_links(html, &ctx(), "docs");
-        assert_eq!(out, r#"<a href="/alice/demo/blob/main/docs/bar.md">bar</a>"#);
+        assert_eq!(
+            out,
+            r#"<a href="/alice/demo/blob/main/docs/bar.md">bar</a>"#
+        );
     }
 
     #[test]

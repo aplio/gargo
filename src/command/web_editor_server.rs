@@ -160,7 +160,7 @@ pub(crate) async fn handle_api_highlight(Json(req): Json<HighlightRequest>) -> R
             .map(|s| HighlightSpanDto {
                 start: byte_to_expanded_col(text, s.start),
                 end: byte_to_expanded_col(text, s.end),
-                scope: s.capture_name.split('.').next().unwrap_or("").to_string(),
+                scope: capture_to_scope(&s.capture_name).to_string(),
             })
             .filter(|s| s.start < s.end)
             .collect();
@@ -170,6 +170,23 @@ pub(crate) async fn handle_api_highlight(Json(req): Json<HighlightRequest>) -> R
     }
 
     ok_json(&HighlightResponse { lines })
+}
+
+/// Map a tree-sitter capture name to the CSS `tok-*` scope the editor styles.
+///
+/// Most grammars use dotted names whose first segment is the scope we want
+/// (`keyword.control` → `keyword`). Markdown (tree-sitter-md) instead emits
+/// `text.*` names whose first segment (`text`) has no style, so headings, code
+/// and links rendered uncolored. Map those to the existing token classes.
+fn capture_to_scope(capture_name: &str) -> &str {
+    match capture_name {
+        "text.title" => "title",
+        "text.literal" => "string", // code spans / fenced & indented code blocks
+        "text.uri" | "text.reference" => "link",
+        "text.emphasis" => "emphasis",
+        "text.strong" => "strong",
+        _ => capture_name.split('.').next().unwrap_or(""),
+    }
 }
 
 /// Map a byte offset within `line` to a character offset in the tab-expanded

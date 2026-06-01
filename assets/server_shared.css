@@ -157,6 +157,12 @@ body {
     position: sticky;
     top: 0;
     z-index: 10;
+    /* Self-contained font so the shared header renders identically on every
+     * page — including the editor, whose <body> sets a monospace font that
+     * would otherwise be inherited here. */
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, sans-serif;
+    color: #1f2328;
 }
 .app-rail-repo {
     font-size: 14px;

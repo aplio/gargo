@@ -2804,7 +2804,7 @@ fn browser_open_command(url: &str) -> (&'static str, Vec<String>) {
     }
 }
 
-fn spawn_open_url(url: &str) -> std::io::Result<()> {
+pub fn spawn_open_url(url: &str) -> std::io::Result<()> {
     let (program, args) = browser_open_command(url);
     std::process::Command::new(program)
         .args(args)

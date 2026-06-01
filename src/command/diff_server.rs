@@ -199,6 +199,7 @@ const DIFF_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
     <style>
 {{SHARED_CSS}}
         .repo-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 14px; border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa; margin-bottom: 16px; }
+        .repo-controls input[list] { min-width: 220px; padding: 4px 8px; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; font: inherit; }
         .context-row {
             display: flex;
             align-items: center;
@@ -1205,6 +1206,7 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
     <style>
 {{SHARED_CSS}}
         .repo-controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 10px 14px; border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa; margin-bottom: 16px; }
+        .repo-controls input[list] { min-width: 220px; padding: 4px 8px; border: 1px solid #d0d7de; border-radius: 6px; background: #fff; font: inherit; }
         .context-row {
             display: flex;
             align-items: center;
@@ -1474,12 +1476,14 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
     <div class="repo-controls">
         <label>
             Base
-            <select id="base-select"><option value="">(loading...)</option></select>
+            <input id="base-select" list="base-list" autocomplete="off" placeholder="branch...">
+            <datalist id="base-list"></datalist>
         </label>
         <span class="range-arrow">...</span>
         <label>
             Compare
-            <select id="compare-select"><option value="">(loading...)</option></select>
+            <input id="compare-select" list="compare-list" autocomplete="off" placeholder="branch...">
+            <datalist id="compare-list"></datalist>
         </label>
         <button id="swap-btn" type="button" title="Swap base and compare">Swap</button>
         <button id="refresh-btn" type="button">Refresh</button>
@@ -1511,6 +1515,9 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
 
         const baseSelect = document.getElementById("base-select");
         const compareSelect = document.getElementById("compare-select");
+        const baseList = document.getElementById("base-list");
+        const compareList = document.getElementById("compare-list");
+        const knownBranches = new Set();
         const swapButton = document.getElementById("swap-btn");
         const refreshButton = document.getElementById("refresh-btn");
         const errorBanner = document.getElementById("error-banner");
@@ -2063,35 +2070,30 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             }
         }
 
-        // Render the base/compare dropdowns. Local and remote branches are
-        // split into <optgroup>s so picking e.g. `origin/master` vs `master`
-        // is obvious — the names alone don't tell the user which side a ref
-        // belongs to.
-        const populateSelect = (select, branches, remoteSet, preferred) => {
-            select.innerHTML = "";
+        // Populate a base/compare combobox. The control is an <input list>
+        // backed by a <datalist>, so the user can type to fuzzy-filter the
+        // branch list — much friendlier than a <select> when there are many
+        // refs. <datalist> has no <optgroup>, so the list is flat; remote refs
+        // already carry their `origin/...` prefix, which tells the user which
+        // side a ref belongs to.
+        const populateOptions = (input, datalist, branches, preferred) => {
+            datalist.innerHTML = "";
             if (branches.length === 0) {
-                const opt = document.createElement("option");
-                opt.value = "";
-                opt.textContent = "(no branches)";
-                select.appendChild(opt);
+                input.value = "";
+                input.placeholder = "(no branches)";
                 return;
             }
-            const localGroup = document.createElement("optgroup");
-            localGroup.label = "Local";
-            const remoteGroup = document.createElement("optgroup");
-            remoteGroup.label = "Remote";
+            const frag = document.createDocumentFragment();
             for (const name of branches) {
                 const opt = document.createElement("option");
                 opt.value = name;
-                opt.textContent = name;
-                (remoteSet.has(name) ? remoteGroup : localGroup).appendChild(opt);
+                frag.appendChild(opt);
             }
-            if (localGroup.childNodes.length > 0) select.appendChild(localGroup);
-            if (remoteGroup.childNodes.length > 0) select.appendChild(remoteGroup);
+            datalist.appendChild(frag);
             if (preferred && branches.includes(preferred)) {
-                select.value = preferred;
+                input.value = preferred;
             } else {
-                select.value = branches[0];
+                input.value = branches[0];
             }
         };
 
@@ -2101,7 +2103,8 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                 const data = await response.json();
                 if (data.error) throw new Error(data.error);
                 const branches = Array.isArray(data.branches) ? data.branches : [];
-                const remoteSet = new Set(Array.isArray(data.remotes) ? data.remotes : []);
+                knownBranches.clear();
+                for (const b of branches) knownBranches.add(b);
                 const current = typeof data.current === "string" ? data.current : null;
                 const defaultBranch = typeof data.default === "string" ? data.default : null;
 
@@ -2115,12 +2118,14 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
                     || branches[0]
                     || "";
                 const compareFallback = current || branches[0] || "";
-                populateSelect(baseSelect, branches, remoteSet, baseParam || baseFallback);
-                populateSelect(compareSelect, branches, remoteSet, compareParam || compareFallback);
+                populateOptions(baseSelect, baseList, branches, baseParam || baseFallback);
+                populateOptions(compareSelect, compareList, branches, compareParam || compareFallback);
             } catch (e) {
                 showError(e.message);
-                baseSelect.innerHTML = '<option value="">(error)</option>';
-                compareSelect.innerHTML = '<option value="">(error)</option>';
+                baseList.innerHTML = "";
+                compareList.innerHTML = "";
+                baseSelect.placeholder = "(error)";
+                compareSelect.placeholder = "(error)";
             }
         }
 
@@ -2130,6 +2135,14 @@ const COMPARE_HTML_TEMPLATE: &str = r#"<!DOCTYPE html>
             if (!base || !compare) {
                 setEmpty(filesListContainer, "Select a base and compare branch...");
                 setEmpty(filesMain, "Select a base and compare branch...");
+                return;
+            }
+            // The combobox is a free-text <input>, so guard against typos /
+            // partial input that don't name a real branch before fetching.
+            if (knownBranches.size > 0 && (!knownBranches.has(base) || !knownBranches.has(compare))) {
+                const bad = !knownBranches.has(base) ? base : compare;
+                setEmpty(filesListContainer, `Unknown branch: ${bad}`);
+                setEmpty(filesMain, `Unknown branch: ${bad}`);
                 return;
             }
             if (isLoadingCompare) return;

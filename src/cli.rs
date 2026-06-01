@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(long, conflicts_with_all = ["check", "update"])]
     pub server: bool,
 
+    /// Do not open the browser after starting the server (server mode only).
+    #[arg(long, requires = "server", conflicts_with_all = ["check", "update"])]
+    pub no_open: bool,
+
     /// Optional file or directory to open.
     #[arg(value_name = "PATH", conflicts_with_all = ["check", "update"])]
     pub path: Option<PathBuf>,
@@ -41,6 +45,12 @@ impl Cli {
         } else {
             CliMode::RunEditor
         }
+    }
+
+    /// Whether to open the browser after the server starts. Defaults to true;
+    /// suppressed by `--no-open`.
+    pub fn open_browser(&self) -> bool {
+        !self.no_open
     }
 }
 
@@ -69,6 +79,26 @@ mod tests {
         let cli = Cli::try_parse_from(["gargo", "--server"]).expect("parse --server");
         assert_eq!(cli.mode(), CliMode::Server);
         assert!(cli.path.is_none());
+        assert!(cli.open_browser(), "server defaults to opening the browser");
+    }
+
+    #[test]
+    fn parses_server_no_open_flag() {
+        let cli = Cli::try_parse_from(["gargo", "--server", "--no-open"])
+            .expect("parse --server --no-open");
+        assert_eq!(cli.mode(), CliMode::Server);
+        assert!(!cli.open_browser(), "--no-open suppresses the browser");
+    }
+
+    #[test]
+    fn rejects_no_open_without_server() {
+        let err =
+            Cli::try_parse_from(["gargo", "--no-open"]).expect_err("--no-open requires --server");
+        let message = err.to_string();
+        assert!(
+            message.contains("following required") || message.contains("cannot be used"),
+            "unexpected clap error: {message}"
+        );
     }
 
     #[test]

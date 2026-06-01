@@ -35,7 +35,7 @@ fn main() {
         gargo::cli::CliMode::Server => {
             let start = cli.path.as_deref();
             let repo_root = gargo::project::find_project_root(start);
-            if let Err(e) = run_server(repo_root) {
+            if let Err(e) = run_server(repo_root, cli.open_browser()) {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
@@ -71,7 +71,7 @@ fn main() {
     }
 }
 
-fn run_server(repo_root: PathBuf) -> Result<(), String> {
+fn run_server(repo_root: PathBuf, open_browser: bool) -> Result<(), String> {
     let handle = GithubServerHandle::new()?;
     handle
         .command_tx
@@ -82,6 +82,9 @@ fn run_server(repo_root: PathBuf) -> Result<(), String> {
         match handle.event_rx.recv() {
             Ok(GithubServerEvent::Started { root_url, .. }) => {
                 println!("{root_url}");
+                if open_browser && let Err(e) = gargo::app::spawn_open_url(&root_url) {
+                    eprintln!("Warning: failed to open browser: {e}");
+                }
             }
             Ok(GithubServerEvent::Error(msg)) => {
                 return Err(msg);

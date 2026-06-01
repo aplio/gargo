@@ -82,7 +82,9 @@ fn start_server(repo: &Path, handle: &GithubServerHandle) -> Option<u16> {
 fn setup_repo() -> tempfile::TempDir {
     let dir = tempdir().expect("temp repo");
     let repo = dir.path();
-    run_git(repo, &["init"]);
+    // Force the initial branch name so the later `checkout master` works
+    // regardless of the host's `init.defaultBranch` config (e.g. `main`).
+    run_git(repo, &["init", "-b", "master"]);
     run_git(repo, &["config", "user.name", "gargo-test"]);
     run_git(repo, &["config", "user.email", "gargo-test@example.com"]);
     run_git(

@@ -67,10 +67,10 @@
         height: var(--line-height);
         background: var(--caret);
         left: var(--gutter-w, 50px);
+        /* Steady (non-blinking) caret, drawn above text + selection. */
+        z-index: 3;
       }
       .caret.block { width: var(--char-w, 8px); opacity: 0.5; }
-      .caret.blink { animation: blink 1s step-end infinite; }
-      @keyframes blink { 50% { opacity: 0; } }
 
       .sel {
         position: absolute;

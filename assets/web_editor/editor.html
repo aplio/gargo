@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>gargo · editor</title>
+    <!-- Shared server chrome CSS (.app-rail etc.), injected by the server. -->
+    {{APP_CSS}}
+    <style>
+      :root {
+        --bg: #1e1e1e;
+        --fg: #d4d4d4;
+        --gutter: #858585;
+        --caret: #d4d4d4;
+        --sel: #264f78;
+        --status-bg: #6a2c91; /* distinct from modal editor's blue */
+        --line-height: 20px;
+        --font: 14px Menlo, Monaco, "DejaVu Sans Mono", Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); }
+      body { display: flex; flex-direction: column; font: var(--font); }
+
+      #status {
+        height: 22px;
+        line-height: 22px;
+        padding: 0 10px;
+        background: var(--status-bg);
+        color: #fff;
+        font-size: 12px;
+        display: flex;
+        gap: 16px;
+        flex: 0 0 auto;
+      }
+      #status .mode { text-transform: uppercase; font-weight: bold; }
+      #status .spacer { flex: 1; }
+
+      #scroller {
+        flex: 1 1 auto;
+        overflow: auto;
+        position: relative;
+      }
+      /* Sized to total content so the native scrollbar reflects the document. */
+      /* user-select:none: dragging drives our own selection overlay, not the
+         browser's native text selection. */
+      #sizer { position: relative; user-select: none; }
+
+      .gutter, .row {
+        position: absolute;
+        height: var(--line-height);
+        line-height: var(--line-height);
+        white-space: pre;
+      }
+      .gutter {
+        left: 0;
+        width: var(--gutter-w, 50px);
+        color: var(--gutter);
+        text-align: right;
+        padding-right: 8px;
+        user-select: none;
+      }
+      .row { left: var(--gutter-w, 50px); }
+
+      .caret {
+        position: absolute;
+        width: 2px;
+        height: var(--line-height);
+        background: var(--caret);
+        left: var(--gutter-w, 50px);
+      }
+      .caret.block { width: var(--char-w, 8px); opacity: 0.5; }
+      .caret.blink { animation: blink 1s step-end infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+
+      .sel {
+        position: absolute;
+        height: var(--line-height);
+        background: var(--sel);
+        left: var(--gutter-w, 50px);
+      }
+
+      /* Hidden textarea: captures keys + IME, positioned at the caret so the
+         OS candidate window appears in the right place. */
+      #ime {
+        position: absolute;
+        width: 1px;
+        height: var(--line-height);
+        padding: 0;
+        margin: 0;
+        border: 0;
+        outline: none;
+        resize: none;
+        overflow: hidden;
+        background: transparent;
+        color: transparent;
+        caret-color: transparent;
+        font: var(--font);
+        z-index: 5;
+      }
+      /* Pre-edit (composing) text shown inline under the IME. */
+      #preedit {
+        position: absolute;
+        height: var(--line-height);
+        line-height: var(--line-height);
+        white-space: pre;
+        text-decoration: underline;
+        color: var(--fg);
+        z-index: 4;
+      }
+      #error {
+        position: fixed;
+        bottom: 12px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: #5a1d1d;
+        color: #fff;
+        padding: 8px 14px;
+        border-radius: 4px;
+        font-size: 13px;
+        display: none;
+        z-index: 10;
+      }
+
+      /* Cmd+P file picker overlay. */
+      #picker {
+        position: fixed;
+        top: 60px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: min(640px, 90vw);
+        max-height: 60vh;
+        background: #252526;
+        border: 1px solid #454545;
+        border-radius: 6px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        z-index: 100;
+      }
+      #picker[hidden] { display: none; }
+      #picker-input {
+        border: 0;
+        outline: none;
+        background: #3c3c3c;
+        color: var(--fg);
+        font: var(--font);
+        padding: 8px 10px;
+        margin: 6px;
+        border-radius: 4px;
+      }
+      #picker-list {
+        list-style: none;
+        margin: 0;
+        padding: 0 6px 6px;
+        overflow-y: auto;
+      }
+      #picker-list li {
+        padding: 4px 8px;
+        border-radius: 4px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        cursor: pointer;
+      }
+      #picker-list li.sel { background: var(--sel); }
+      #picker-list li b { color: #4daafc; font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <!-- Shared server top nav, injected by the server. -->
+    {{APP_RAIL}}
+    <div id="status">
+      <span class="mode" id="mode">insert</span>
+      <span class="path" id="path"></span>
+      <span class="spacer"></span>
+      <span class="dirty" id="dirty"></span>
+      <span class="hint">Cmd+P でファイル · Ctrl+f/b/n/p/a/e で移動 · Ctrl/Cmd+S で保存</span>
+    </div>
+    <div id="scroller">
+      <div id="sizer">
+        <textarea id="ime" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+        <div id="preedit"></div>
+      </div>
+    </div>
+    <div id="error"></div>
+
+    <!-- Cmd+P fuzzy file picker (mirrors the terminal file picker). -->
+    <div id="picker" hidden>
+      <input id="picker-input" type="text" placeholder="Go to file…"
+        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+      <ul id="picker-list"></ul>
+    </div>
+
+    <script type="module">
+      // emacs/VSCode 風ブラウザエディタ PoC。
+      //
+      // 現行モーダルエディタ(editor.js)と同じ WASM コア・疎通(/api/file,
+      // /api/save)を横引きしつつ、「常に Insert mode」「Ctrl+f/b/n/p/a/e と矢印で
+      // 移動」「カーソル追従スクロール(縦+横)」だけを差し替えた単一ページ実装。
+      import init, { WebEditor } from "/assets/gargo_wasm.js";
+
+      const LINE_HEIGHT = 20;
+      const OVERSCAN = 4;
+
+      const els = {
+        scroller: document.getElementById("scroller"),
+        sizer: document.getElementById("sizer"),
+        ime: document.getElementById("ime"),
+        preedit: document.getElementById("preedit"),
+        mode: document.getElementById("mode"),
+        path: document.getElementById("path"),
+        dirty: document.getElementById("dirty"),
+        error: document.getElementById("error"),
+        picker: document.getElementById("picker"),
+        pickerInput: document.getElementById("picker-input"),
+        pickerList: document.getElementById("picker-list"),
+      };
+
+      let editor = null;
+      let filePath = "";
+      let baseHash = ""; // hash of the content we loaded (for conflict detection)
+      let charWidth = 8;
+      let gutterWidth = 50;
+      let lastVersion = -1;
+      let composing = false;
+      let maxCols = 0; // widest row seen so far, for horizontal scroll sizing
+
+      function showError(msg) {
+        els.error.textContent = msg;
+        els.error.style.display = "block";
+        setTimeout(() => (els.error.style.display = "none"), 6000);
+      }
+
+      function measureCharWidth() {
+        const probe = document.createElement("span");
+        probe.style.cssText =
+          "position:absolute;visibility:hidden;white-space:pre;font:var(--font)";
+        probe.textContent = "M".repeat(100);
+        els.sizer.appendChild(probe);
+        charWidth = probe.getBoundingClientRect().width / 100 || 8;
+        probe.remove();
+        document.documentElement.style.setProperty("--char-w", charWidth + "px");
+      }
+
+      function setGutterWidth(totalLines) {
+        const digits = Math.max(2, String(totalLines).length);
+        gutterWidth = digits * charWidth + 16;
+        document.documentElement.style.setProperty("--gutter-w", gutterWidth + "px");
+      }
+
+      function colToPx(col) {
+        return gutterWidth + col * charWidth;
+      }
+
+      // ---- rendering -------------------------------------------------------
+
+      // Rows currently mounted in the DOM, keyed by line index.
+      const mountedRows = new Map(); // line -> {gutter, row}
+      const caretPool = [];
+      const selPool = [];
+
+      function render() {
+        if (!editor) return;
+        const version = editor.version();
+        const total = editor.line_count();
+        const scrollTop = els.scroller.scrollTop;
+        const clientH = els.scroller.clientHeight;
+        const top = Math.max(0, Math.floor(scrollTop / LINE_HEIGHT) - OVERSCAN);
+        const visible = Math.ceil(clientH / LINE_HEIGHT) + OVERSCAN * 2;
+
+        // Keep the sizer tall enough for the whole document.
+        els.sizer.style.height = total * LINE_HEIGHT + "px";
+        setGutterWidth(total);
+
+        const model = editor.render(top, visible);
+        renderRows(model);
+        renderSelections(model);
+        renderCarets(model);
+        syncStatus(model);
+        positionIme(model);
+        // Widen the sizer so the native horizontal scrollbar can reach the end
+        // of the longest line we've laid out (plus the cursor column).
+        const cursorCol = model.cursors[0] ? model.cursors[0].col : 0;
+        maxCols = Math.max(maxCols, cursorCol);
+        els.sizer.style.width = colToPx(maxCols + 4) + "px";
+        lastVersion = version;
+      }
+
+      function renderRows(model) {
+        const wanted = new Set();
+        for (let i = 0; i < model.rows.length; i++) {
+          const line = model.top + i;
+          wanted.add(line);
+          let entry = mountedRows.get(line);
+          if (!entry) {
+            const gutter = document.createElement("div");
+            gutter.className = "gutter";
+            const row = document.createElement("div");
+            row.className = "row";
+            els.sizer.appendChild(gutter);
+            els.sizer.appendChild(row);
+            entry = { gutter, row };
+            mountedRows.set(line, entry);
+          }
+          const y = line * LINE_HEIGHT + "px";
+          entry.gutter.style.top = y;
+          entry.row.style.top = y;
+          entry.gutter.textContent = String(line + 1);
+          entry.row.textContent = model.rows[i];
+          if (model.rows[i].length > maxCols) maxCols = model.rows[i].length;
+        }
+        // Unmount rows that scrolled out of view.
+        for (const [line, entry] of mountedRows) {
+          if (!wanted.has(line)) {
+            entry.gutter.remove();
+            entry.row.remove();
+            mountedRows.delete(line);
+          }
+        }
+      }
+
+      function renderCarets(model) {
+        ensurePool(caretPool, model.cursors.length, "caret");
+        for (let i = 0; i < caretPool.length; i++) {
+          const el = caretPool[i];
+          if (i < model.cursors.length) {
+            const c = model.cursors[i];
+            el.style.display = "block";
+            el.style.left = colToPx(c.col) + "px";
+            el.style.top = c.row * LINE_HEIGHT + "px";
+            // Always-insert PoC: caret is the blinking line everywhere.
+            el.className = "caret blink" + (c.primary ? " primary" : "");
+          } else {
+            el.style.display = "none";
+          }
+        }
+      }
+
+      function renderSelections(model) {
+        // Expand each selection range into per-row rectangles.
+        const rects = [];
+        for (const s of model.selections) {
+          for (let row = s.start_row; row <= s.end_row; row++) {
+            const from = row === s.start_row ? s.start_col : 0;
+            let to;
+            if (row === s.end_row) {
+              to = s.end_col;
+            } else {
+              const entry = mountedRows.get(row);
+              to = entry ? entry.row.textContent.length + 1 : from + 1;
+            }
+            if (to <= from) to = from + 1;
+            rects.push({ row, from, to });
+          }
+        }
+        ensurePool(selPool, rects.length, "sel");
+        for (let i = 0; i < selPool.length; i++) {
+          const el = selPool[i];
+          if (i < rects.length) {
+            const r = rects[i];
+            el.style.display = "block";
+            el.style.left = colToPx(r.from) + "px";
+            el.style.top = r.row * LINE_HEIGHT + "px";
+            el.style.width = (r.to - r.from) * charWidth + "px";
+          } else {
+            el.style.display = "none";
+          }
+        }
+      }
+
+      function ensurePool(pool, n, cls) {
+        while (pool.length < n) {
+          const el = document.createElement("div");
+          el.className = cls;
+          els.sizer.appendChild(el);
+          pool.push(el);
+        }
+      }
+
+      function syncStatus(model) {
+        els.mode.textContent = model.mode;
+        els.dirty.textContent = editor.is_dirty() ? "● modified" : "";
+      }
+
+      function positionIme(model) {
+        const c = model.cursors[0] || { row: 0, col: 0 };
+        const x = colToPx(c.col);
+        const y = c.row * LINE_HEIGHT;
+        els.ime.style.left = x + "px";
+        els.ime.style.top = y + "px";
+        els.preedit.style.left = x + "px";
+        els.preedit.style.top = y + "px";
+      }
+
+      // ---- cursor-follow scrolling (vertical + horizontal) -----------------
+
+      function ensureCursorVisible() {
+        if (!editor) return;
+        const row = editor.cursor_row();
+        const col = editor.cursor_col();
+
+        // Vertical: keep a couple of context lines above/below the caret.
+        const m = LINE_HEIGHT * 2;
+        const top = els.scroller.scrollTop;
+        const h = els.scroller.clientHeight;
+        const cy = row * LINE_HEIGHT;
+        if (cy < top + m) {
+          els.scroller.scrollTop = Math.max(0, cy - m);
+        } else if (cy + LINE_HEIGHT > top + h - m) {
+          els.scroller.scrollTop = cy + LINE_HEIGHT - h + m;
+        }
+
+        // Horizontal: keep a few columns of context left/right of the caret.
+        const mx = charWidth * 4;
+        const left = els.scroller.scrollLeft;
+        const w = els.scroller.clientWidth;
+        const cx = colToPx(col);
+        if (cx < left + gutterWidth + mx) {
+          els.scroller.scrollLeft = Math.max(0, cx - gutterWidth - mx);
+        } else if (cx + charWidth > left + w - mx) {
+          els.scroller.scrollLeft = cx + charWidth - w + mx;
+        }
+      }
+
+      // Apply an edit/motion, then follow the caret and repaint.
+      function afterEdit() {
+        ensureCursorVisible();
+        render();
+      }
+
+      // ---- input -----------------------------------------------------------
+
+      // Browser KeyboardEvent.key → name understood by WebEditor.key().
+      function keyName(e) {
+        const k = e.key;
+        if (k.length === 1) return k; // single printable char (includes space)
+        const named = new Set([
+          "Enter", "Backspace", "Delete", "Tab",
+          "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown",
+          "Home", "End", "PageUp", "PageDown", "Insert",
+        ]);
+        if (named.has(k)) return k;
+        if (/^F([1-9]|1[0-2])$/.test(k)) return k;
+        return null; // Shift/Control/Alt/Meta/CapsLock/Escape/... — ignore
+      }
+
+      function onKeyDown(e) {
+        // While composing, let the IME consume everything.
+        if (composing || e.isComposing || e.keyCode === 229) return;
+        if (pickerOpen) return; // picker has its own input + handler
+
+        // Cmd+P: fuzzy file picker (VSCode-style). Ctrl+P stays emacs "move up".
+        if (e.metaKey && (e.key === "p" || e.key === "P")) {
+          e.preventDefault();
+          openPicker();
+          return;
+        }
+
+        // Save shortcut.
+        if ((e.ctrlKey || e.metaKey) && (e.key === "s" || e.key === "S")) {
+          e.preventDefault();
+          save();
+          return;
+        }
+
+        // Whole-line delete (VSCode-style), independent of selection.
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "k" || e.key === "K")) {
+          e.preventDefault();
+          editor.delete_line();
+          els.ime.value = "";
+          afterEdit();
+          return;
+        }
+
+        // Always-insert PoC: swallow Escape so we never leave Insert mode.
+        if (e.key === "Escape") {
+          e.preventDefault();
+          return;
+        }
+
+        const name = keyName(e);
+        if (name === null) return; // pure modifier press
+
+        e.preventDefault();
+
+        // Mac/VSCode-style modified deletes. These would otherwise reach the
+        // core keymap as Ctrl+Backspace/Delete (Cmd is sent as Ctrl) and resolve
+        // to Noop, so handle them here by extending a selection then deleting it:
+        //   Cmd+Backspace → to line start   Cmd+Delete → to line end
+        //   Alt+Backspace → previous word    Alt+Delete → next word
+        if ((e.metaKey || e.altKey) && (name === "Backspace" || name === "Delete")) {
+          const back = name === "Backspace";
+          let ext;
+          if (e.metaKey) ext = back ? ["a", true, true, false] : ["e", true, true, false];
+          else ext = back ? ["ArrowLeft", true, true, false] : ["ArrowRight", true, true, false];
+          if (!editor.has_selection()) editor.key(...ext); // extend; no-op replaces nothing
+          editor.delete_selection();
+          els.ime.value = "";
+          afterEdit();
+          return;
+        }
+
+        // VSCode-style selection editing: Backspace/Delete removes the
+        // selection; typing a printable char / Enter / Tab replaces it.
+        const noMod = !e.ctrlKey && !e.metaKey && !e.altKey;
+        const isDelete = name === "Backspace" || name === "Delete";
+        const isTextInput = noMod && (name.length === 1 || name === "Enter" || name === "Tab");
+        if ((isDelete || isTextInput) && editor.has_selection()) {
+          editor.delete_selection();
+          if (isDelete) {
+            els.ime.value = "";
+            afterEdit();
+            return; // selection consumed; don't also delete a stray char
+          }
+          // fall through: insert the typed key on top of the now-empty range
+        }
+
+        editor.key(name, e.ctrlKey || e.metaKey, e.shiftKey, e.altKey);
+        // Keep the IME textarea empty so command keystrokes never accumulate.
+        els.ime.value = "";
+        afterEdit();
+      }
+
+      function onCompositionStart() {
+        composing = true;
+        els.preedit.textContent = "";
+      }
+
+      function onCompositionUpdate(e) {
+        els.preedit.textContent = e.data || "";
+      }
+
+      // Insert text, first replacing the active selection if any (VSCode-style).
+      function insertReplacing(text) {
+        if (editor.has_selection()) editor.delete_selection();
+        editor.insert_text(text);
+        afterEdit();
+      }
+
+      function onCompositionEnd(e) {
+        composing = false;
+        els.preedit.textContent = "";
+        const text = e.data || "";
+        els.ime.value = "";
+        if (text) insertReplacing(text);
+      }
+
+      // Fallback for IMEs/dead-keys that commit via `input` without composition.
+      function onInput() {
+        if (composing) return;
+        const text = els.ime.value;
+        els.ime.value = "";
+        if (text) insertReplacing(text);
+      }
+
+      function onPaste(e) {
+        e.preventDefault();
+        const text = (e.clipboardData || window.clipboardData).getData("text");
+        if (text) insertReplacing(text);
+      }
+
+      // ---- mouse (click = move caret, drag = select) -----------------------
+
+      let dragging = false;
+      let dragAnchor = null; // { row, col } captured at mousedown
+
+      // Map a mouse event to a display (row, col). #sizer holds the absolutely
+      // positioned rows; its bounding rect already accounts for scroll, so
+      // clientX/Y minus the rect maps straight into document coordinates.
+      function eventToRowCol(e) {
+        const rect = els.sizer.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const row = Math.max(0, Math.floor(y / LINE_HEIGHT));
+        const col = Math.max(0, Math.round((x - gutterWidth) / charWidth));
+        return { row, col };
+      }
+
+      function onMouseDown(e) {
+        if (e.button !== 0) return; // left button only
+        const { row, col } = eventToRowCol(e);
+        dragging = true;
+        dragAnchor = { row, col };
+        editor.set_cursor(row, col);
+        e.preventDefault(); // suppress native text selection
+        els.ime.focus();
+        render();
+      }
+
+      function onMouseMove(e) {
+        if (!dragging) return;
+        const { row, col } = eventToRowCol(e);
+        editor.set_selection(dragAnchor.row, dragAnchor.col, row, col);
+        ensureCursorVisible(); // follow the drag head past the viewport edge
+        render();
+      }
+
+      function onMouseUp() {
+        dragging = false;
+      }
+
+      // ---- Cmd+P fuzzy file picker -----------------------------------------
+
+      let pickerOpen = false;
+      let allFiles = null; // cached list from /api/files
+      let pickerResults = [];
+      let pickerSel = 0;
+      const PICKER_LIMIT = 50;
+
+      async function openPicker() {
+        if (pickerOpen) return;
+        pickerOpen = true;
+        els.picker.hidden = false;
+        els.pickerInput.value = "";
+        if (allFiles === null) {
+          els.pickerList.innerHTML = "<li>Loading…</li>";
+          try {
+            const resp = await fetch("/api/files");
+            const data = await resp.json();
+            allFiles = data.files || [];
+          } catch (err) {
+            allFiles = [];
+            showError("File list failed: " + err);
+          }
+        }
+        updatePicker("");
+        els.pickerInput.focus();
+      }
+
+      function closePicker() {
+        if (!pickerOpen) return;
+        pickerOpen = false;
+        els.picker.hidden = true;
+        els.ime.focus();
+      }
+
+      function updatePicker(query) {
+        const q = query.trim();
+        let scored;
+        if (!q) {
+          scored = (allFiles || [])
+            .slice(0, PICKER_LIMIT)
+            .map((p) => ({ path: p, positions: [] }));
+        } else {
+          scored = [];
+          for (const p of allFiles || []) {
+            const m = fuzzyMatch(p, q);
+            if (m) scored.push({ path: p, score: m.score, positions: m.positions });
+          }
+          scored.sort((a, b) => b.score - a.score);
+          scored = scored.slice(0, PICKER_LIMIT);
+        }
+        pickerResults = scored;
+        pickerSel = 0;
+        renderPickerList();
+      }
+
+      function renderPickerList() {
+        els.pickerList.innerHTML = "";
+        pickerResults.forEach((r, i) => {
+          const li = document.createElement("li");
+          if (i === pickerSel) li.className = "sel";
+          li.innerHTML = highlightPath(r.path, r.positions);
+          li.addEventListener("mousedown", (e) => {
+            e.preventDefault();
+            openFile(r.path);
+          });
+          els.pickerList.appendChild(li);
+        });
+      }
+
+      function highlightPath(path, positions) {
+        if (!positions || !positions.length) return escapeHtml(path);
+        const set = new Set(positions);
+        let out = "";
+        const chars = Array.from(path);
+        for (let i = 0; i < chars.length; i++) {
+          const c = escapeHtml(chars[i]);
+          out += set.has(i) ? "<b>" + c + "</b>" : c;
+        }
+        return out;
+      }
+
+      function escapeHtml(s) {
+        return s.replace(/[&<>"']/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+        );
+      }
+
+      function openFile(path) {
+        // Full navigation; boot() loads the file. Preserve "/" path separators.
+        window.location.assign(
+          "/editor/" + path.split("/").map(encodeURIComponent).join("/")
+        );
+      }
+
+      function onPickerKeyDown(e) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closePicker();
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const r = pickerResults[pickerSel];
+          if (r) openFile(r.path);
+          return;
+        }
+        const down = e.key === "ArrowDown" || (e.ctrlKey && (e.key === "n" || e.key === "N"));
+        const up = e.key === "ArrowUp" || (e.ctrlKey && (e.key === "p" || e.key === "P"));
+        if (down) {
+          e.preventDefault();
+          movePicker(1);
+        } else if (up) {
+          e.preventDefault();
+          movePicker(-1);
+        }
+      }
+
+      function movePicker(delta) {
+        if (!pickerResults.length) return;
+        pickerSel = (pickerSel + delta + pickerResults.length) % pickerResults.length;
+        renderPickerList();
+        const sel = els.pickerList.children[pickerSel];
+        if (sel) sel.scrollIntoView({ block: "nearest" });
+      }
+
+      // Fuzzy match, ported from src/ui/shared/filtering.rs so the browser
+      // picker ranks files the same way the terminal file picker does.
+      function fuzzyMatch(haystack, needle) {
+        if (!needle) return { score: 0, positions: [] };
+        return fuzzyStrict(haystack, needle) || fuzzyTokens(haystack, needle);
+      }
+
+      function fuzzyStrict(haystack, needle) {
+        const hay = Array.from(haystack);
+        const ndl = Array.from(needle);
+        const positions = [];
+        let hi = 0;
+        for (const nch of ndl) {
+          const nl = nch.toLowerCase();
+          let found = false;
+          while (hi < hay.length) {
+            if (hay[hi].toLowerCase() === nl) {
+              positions.push(hi);
+              hi++;
+              found = true;
+              break;
+            }
+            hi++;
+          }
+          if (!found) return null;
+        }
+        return { score: fuzzyScore(hay, ndl, positions), positions };
+      }
+
+      const TOKEN_FALLBACK_PENALTY = 50;
+
+      function fuzzyTokens(haystack, needle) {
+        const tokens = needle.split(/\s+/).filter(Boolean);
+        if (tokens.length < 2) return null;
+        let total = 0;
+        let all = [];
+        for (const t of tokens) {
+          const m = fuzzyStrict(haystack, t);
+          if (!m) return null;
+          total += m.score;
+          all.push(...m.positions);
+        }
+        all = [...new Set(all)].sort((a, b) => a - b);
+        return { score: total - TOKEN_FALLBACK_PENALTY, positions: all };
+      }
+
+      function fuzzyScore(hay, ndl, positions) {
+        let score = 0;
+        for (let i = 0; i < positions.length; i++) {
+          const pos = positions[i];
+          if (pos === 0) score += 8;
+          if (pos > 0) {
+            const prev = hay[pos - 1];
+            if (prev === " " || prev === "_" || prev === "-" || prev === "." || prev === "/") {
+              score += 8;
+            }
+          }
+          if (i > 0 && pos === positions[i - 1] + 1) score += 12;
+          if (hay[pos] === ndl[i]) score += 4; // exact-case bonus
+          if (i > 0) score -= pos - positions[i - 1] - 1;
+        }
+        score -= Math.floor(hay.length / 4);
+        return score;
+      }
+
+      // ---- save ------------------------------------------------------------
+
+      async function save() {
+        const content = editor.content();
+        try {
+          const resp = await fetch("/api/save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: filePath, base_hash: baseHash, content }),
+          });
+          if (resp.status === 409) {
+            const data = await resp.json();
+            const overwrite = window.confirm(
+              "This file changed on disk since you opened it.\n\n" +
+                "OK = overwrite with your version\nCancel = keep editing (don't save)"
+            );
+            if (overwrite) {
+              baseHash = data.current_hash;
+              await save();
+            }
+            return;
+          }
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            showError("Save failed: " + (data.error || resp.status));
+            return;
+          }
+          const data = await resp.json();
+          baseHash = data.hash;
+          els.dirty.textContent = "✓ saved";
+          setTimeout(() => render(), 800);
+        } catch (err) {
+          showError("Save failed: " + err);
+        }
+      }
+
+      // ---- boot ------------------------------------------------------------
+
+      async function boot() {
+        await init();
+        measureCharWidth();
+
+        filePath = decodeURIComponent(
+          window.location.pathname.replace(/^\/editor\/?/, "")
+        );
+        els.path.textContent = filePath || "(no file — Cmd+P to open)";
+
+        let content = "";
+        if (filePath) {
+          try {
+            const resp = await fetch("/api/file?path=" + encodeURIComponent(filePath));
+            if (!resp.ok) {
+              const data = await resp.json().catch(() => ({}));
+              showError("Open failed: " + (data.error || resp.status));
+            } else {
+              const data = await resp.json();
+              content = data.content;
+              baseHash = data.hash;
+            }
+          } catch (err) {
+            showError("Open failed: " + err);
+          }
+        }
+
+        editor = new WebEditor(filePath, content);
+        // Always-insert: switch into Insert mode once at boot (Normal 'i' →
+        // ChangeMode(Insert); also begins the undo transaction). Escape is
+        // swallowed in onKeyDown so we stay here.
+        editor.key("i", false, false, false);
+
+        els.ime.addEventListener("keydown", onKeyDown);
+        els.ime.addEventListener("compositionstart", onCompositionStart);
+        els.ime.addEventListener("compositionupdate", onCompositionUpdate);
+        els.ime.addEventListener("compositionend", onCompositionEnd);
+        els.ime.addEventListener("input", onInput);
+        els.ime.addEventListener("paste", onPaste);
+        els.scroller.addEventListener("scroll", () => render());
+        els.scroller.addEventListener("mousedown", onMouseDown);
+        window.addEventListener("mousemove", onMouseMove);
+        window.addEventListener("mouseup", onMouseUp);
+        window.addEventListener("resize", () => render());
+        els.pickerInput.addEventListener("input", (e) => updatePicker(e.target.value));
+        els.pickerInput.addEventListener("keydown", onPickerKeyDown);
+
+        els.ime.focus();
+        render();
+
+        // Opened without a file (the rail's "Editor" link) → jump straight to
+        // the file picker.
+        if (!filePath) openPicker();
+      }
+
+      boot();
+    </script>
+  </body>
+</html>

@@ -382,7 +382,7 @@ fn bridge_preview_events(
 #[derive(Debug)]
 pub(crate) struct GithubServerState {
     pub(crate) repo_root: PathBuf,
-    url_ctx: github_preview_server::RepoUrlContext,
+    pub(crate) url_ctx: github_preview_server::RepoUrlContext,
 }
 
 async fn run_server(
@@ -474,15 +474,15 @@ async fn run_server(
 
     use crate::command::web_editor_server as editor;
     let editor_routes = Router::new()
-        .route("/edit", get(editor::handle_edit_page))
-        .route("/edit/{*path}", get(editor::handle_edit_page))
-        .route("/assets/editor.js", get(editor::handle_editor_js))
+        .route("/editor", get(editor::handle_editor_page))
+        .route("/editor/{*path}", get(editor::handle_editor_page))
         .route("/assets/gargo_wasm.js", get(editor::handle_wasm_js))
         .route(
             "/assets/gargo_wasm_bg.wasm",
             get(editor::handle_wasm_binary),
         )
         .route("/api/file", get(editor::handle_api_file))
+        .route("/api/files", get(editor::handle_api_files))
         .route("/api/save", post(editor::handle_api_save))
         .with_state(github_state);
 

@@ -65,6 +65,7 @@ pub(crate) fn app_rail_html(
         "h",
         active_tab,
     ));
+    out.push_str(&rail_link("editor", "Editor", "/editor", "e", active_tab));
     out.push_str("</nav>");
 
     out.push_str(r#"<div class="app-rail-spacer"></div>"#);

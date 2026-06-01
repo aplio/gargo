@@ -21,8 +21,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::command::github_server::GithubServerState;
 
-const EDITOR_HTML: &str = include_str!("../../assets/web_editor/index.html");
-const EDITOR_JS: &str = include_str!("../../assets/web_editor/editor.js");
+/// The browser editor: an emacs/VSCode-style always-insert editor whose modal
+/// core runs in-tab as wasm. The page template carries `{{APP_CSS}}` and
+/// `{{APP_RAIL}}` slots so it shows the same top nav as the rest of the server.
+const EDITOR_HTML: &str = include_str!("../../assets/web_editor/editor.html");
 
 /// Directory holding the wasm-bindgen output, relative to the crate root.
 /// Build it with:
@@ -33,12 +35,18 @@ fn pkg_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/web_editor/pkg")
 }
 
-pub(crate) async fn handle_edit_page() -> Html<&'static str> {
-    Html(EDITOR_HTML)
-}
-
-pub(crate) async fn handle_editor_js() -> Response {
-    js_response(EDITOR_JS.to_string())
+pub(crate) async fn handle_editor_page(
+    State(state): State<Arc<GithubServerState>>,
+) -> Html<String> {
+    let rail = crate::command::app_shell::app_rail_html(&state.url_ctx, None, "editor");
+    let css = format!(
+        "<style>\n{}</style>",
+        crate::command::server_shared::SHARED_CSS
+    );
+    let page = EDITOR_HTML
+        .replace("{{APP_CSS}}", &css)
+        .replace("{{APP_RAIL}}", &rail);
+    Html(page)
 }
 
 pub(crate) async fn handle_wasm_js() -> Response {
@@ -87,6 +95,19 @@ pub(crate) async fn handle_api_file(
         }
         Err(e) => bad_request(format!("cannot read file: {e}")),
     }
+}
+
+#[derive(Serialize)]
+struct FilesResponse {
+    files: Vec<String>,
+}
+
+/// List the repository's files for the editor's Cmd+P picker — the same set the
+/// terminal file picker uses (`git ls-files` when in a repo, else a filtered
+/// directory walk; see [`crate::project::collect_files`]).
+pub(crate) async fn handle_api_files(State(state): State<Arc<GithubServerState>>) -> Response {
+    let files = crate::project::collect_files(&state.repo_root);
+    ok_json(&FilesResponse { files })
 }
 
 #[derive(Deserialize)]

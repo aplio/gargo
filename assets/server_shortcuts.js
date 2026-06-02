@@ -26,7 +26,9 @@
     function railLinkFor(letter) {
         // Map letter → app-rail link. Reading the rail keeps URL conventions
         // server-side; this script never has to know that Status lives at /status.
-        const map = { c: "code", s: "status", b: "branches", h: "commits" };
+        // `g e` opens the editor; it's inherently scoped out of the editor page
+        // itself, which doesn't load this script.
+        const map = { c: "code", s: "status", b: "branches", h: "commits", e: "editor" };
         const id = map[letter];
         if (!id) return null;
         return document.querySelector(`.app-rail-link[data-shortcut="${letter}"]`)
@@ -205,6 +207,7 @@
             ["g s", "Go to Status"],
             ["g b", "Go to Branches"],
             ["g h", "Go to Commits"],
+            ["g e", "Go to Editor"],
         ]},
         { heading: "General", rows: [
             ["?", "Show this help"],

@@ -12,7 +12,7 @@ use crate::command::github_preview_server::{
 /// Render the sticky top navigation rail.
 ///
 /// `active_tab` highlights one of `"code"`, `"status"`, `"branches"`,
-/// `"commits"` (any other value leaves none highlighted). `github_href`
+/// `"commits"`, `"editor"` (any other value leaves none highlighted). `github_href`
 /// is the absolute URL the "View on GitHub" link should point to —
 /// callers pass the deep URL matching the current view (a blob, tree,
 /// commit, …) so the link drops the user where they actually are
@@ -127,6 +127,7 @@ mod tests {
         assert!(html.contains(r#"data-shortcut="s""#));
         assert!(html.contains(r#"data-shortcut="b""#));
         assert!(html.contains(r#"data-shortcut="h""#));
+        assert!(html.contains(r#"data-shortcut="e""#));
     }
 
     #[test]

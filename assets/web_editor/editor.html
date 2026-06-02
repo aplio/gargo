@@ -795,6 +795,10 @@
         if (composing || e.isComposing || e.keyCode === 229) return;
         if (pickerOpen) return; // picker has its own input + handler
 
+        // Cmd+L / Ctrl+L: leave untouched so the browser handles it (focus the
+        // address bar). Don't preventDefault and don't route it to the core.
+        if ((e.metaKey || e.ctrlKey) && (e.key === "l" || e.key === "L")) return;
+
         // Cmd+P: fuzzy file picker (VSCode-style). Ctrl+P stays emacs "move up".
         if (e.metaKey && (e.key === "p" || e.key === "P")) {
           e.preventDefault();

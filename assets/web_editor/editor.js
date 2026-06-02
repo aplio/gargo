@@ -326,35 +326,72 @@
         }
       }
 
-      // Paint one row, coloring it with syntax spans when available. `spans` are
-      // {start, end, scope} char ranges into `text` (the expanded line). Falls
-      // back to plain text (no highlight / no spans for this line).
+      // Find clickable links in a line: markdown `[label](target)` (any target,
+      // url or relative path) and bare http(s) URLs. Works in any file type.
+      // Indices are string offsets, which equal character offsets for non-astral
+      // text (matches how syntax spans are indexed). Returns [{start,end,href}].
+      function detectLinks(text) {
+        const ranges = [];
+        let m;
+        const md = /\[[^\]]*\]\(([^)\s]+)[^)]*\)/g;
+        while ((m = md.exec(text))) {
+          ranges.push({ start: m.index, end: m.index + m[0].length, href: m[1] });
+        }
+        const url = /(https?:\/\/[^\s)>\]"'`]+)/g;
+        while ((m = url.exec(text))) {
+          const s = m.index;
+          const e = s + m[1].length;
+          if (ranges.some((r) => s >= r.start && s < r.end)) continue; // inside a md link
+          ranges.push({ start: s, end: e, href: m[1] });
+        }
+        return ranges;
+      }
+
+      // The syntax scope covering segment [a,b), or "" — first span wins on
+      // overlap, matching the old clamp behaviour.
+      function scopeAt(spans, a, b) {
+        if (!spans) return "";
+        for (const s of spans) if (s.start <= a && s.end >= b) return s.scope;
+        return "";
+      }
+
+      // The link href covering segment [a,b), or null.
+      function hrefAt(links, a, b) {
+        for (const l of links) if (l.start <= a && l.end >= b) return l.href;
+        return null;
+      }
+
+      function escapeAttr(s) {
+        return s.replace(/"/g, "&quot;").replace(/&/g, "&amp;");
+      }
+
+      // Paint one row: syntax coloring (`spans`: {start,end,scope} char ranges)
+      // plus clickable link wrappers. Splits the line at every span/link boundary
+      // and wraps each segment in the matching `tok-*` span and/or `.elink` anchor.
       function paintRow(rowEl, text, spans) {
-        if (!spans || !spans.length) {
-          rowEl.textContent = text;
+        const links = detectLinks(text);
+        if ((!spans || !spans.length) && !links.length) {
+          rowEl.textContent = text; // fast path: nothing to wrap
           return;
         }
         const chars = Array.from(text);
-        const len = chars.length;
+        const n = chars.length;
+        const bset = new Set([0, n]);
+        if (spans) for (const s of spans) { bset.add(Math.min(s.start, n)); bset.add(Math.min(s.end, n)); }
+        for (const l of links) { bset.add(Math.min(l.start, n)); bset.add(Math.min(l.end, n)); }
+        const points = [...bset].filter((p) => p >= 0 && p <= n).sort((x, y) => x - y);
         let html = "";
-        let pos = 0;
-        for (const s of spans) {
-          // Clamp each span's start to `pos` so overlapping/nested captures
-          // (e.g. a token tagged both "type" and "constructor") never re-emit
-          // text already painted — that produced doubled words like "SomeSome".
-          let from = Math.max(pos, Math.min(s.start, len));
-          const to = Math.max(from, Math.min(s.end, len));
-          if (to <= from) continue; // fully covered by an earlier span
-          if (from > pos) html += escapeHtml(chars.slice(pos, from).join(""));
-          html +=
-            '<span class="tok-' +
-            s.scope +
-            '">' +
-            escapeHtml(chars.slice(from, to).join("")) +
-            "</span>";
-          pos = to;
+        for (let i = 0; i < points.length - 1; i++) {
+          const a = points[i];
+          const b = points[i + 1];
+          if (a >= b) continue;
+          let piece = escapeHtml(chars.slice(a, b).join(""));
+          const scope = scopeAt(spans, a, b);
+          if (scope) piece = '<span class="tok-' + scope + '">' + piece + "</span>";
+          const href = hrefAt(links, a, b);
+          if (href) piece = '<a class="elink" data-href="' + escapeAttr(href) + '">' + piece + "</a>";
+          html += piece;
         }
-        if (pos < len) html += escapeHtml(chars.slice(pos).join(""));
         rowEl.innerHTML = html;
       }
 
@@ -1013,15 +1050,14 @@
         if (e.button !== 0) return; // left button only
         const { row, col } = eventToRowCol(e);
 
-        // Cmd+click a link (markdown [text](target) or a bare URL) → open it in
-        // another tab: http(s) in a new browser tab, a repo/relative path in a
-        // new editor tab. Falls through to normal caret placement if no link.
-        if (e.metaKey) {
-          const entry = mountedRows.get(row);
-          const target = entry ? linkAt(entry.row.textContent, col) : null;
-          if (target) {
+        // Cmd/Ctrl+click a rendered link (.elink) → open it in another tab:
+        // http(s) in a new browser tab, a repo/relative path in a new editor tab.
+        // Falls through to normal caret placement when not on a link.
+        if (e.metaKey || e.ctrlKey) {
+          const a = e.target && e.target.closest ? e.target.closest(".elink") : null;
+          if (a) {
             e.preventDefault();
-            openLink(target);
+            openLink(a.dataset.href);
             return;
           }
         }
@@ -1363,22 +1399,6 @@
       // the file explorer), leaving the current editor untouched.
       function openFileInNewWindow(path) {
         window.open(editorUrl(path), "_blank");
-      }
-
-      // Find a link covering display column `col` in `text`: a markdown
-      // `[label](target)` (returns target) or a bare/autolinked http(s) URL.
-      // Returns the target string, or null when the click isn't on a link.
-      function linkAt(text, col) {
-        let m;
-        const md = /\[[^\]]*\]\(([^)\s]+)[^)]*\)/g;
-        while ((m = md.exec(text))) {
-          if (col >= m.index && col <= m.index + m[0].length) return m[1];
-        }
-        const url = /<?(https?:\/\/[^\s)>\]]+)>?/g;
-        while ((m = url.exec(text))) {
-          if (col >= m.index && col <= m.index + m[0].length) return m[1];
-        }
-        return null;
       }
 
       // Collapse "." / ".." segments in a repo-relative path.
@@ -2595,6 +2615,17 @@
         els.scroller.addEventListener("mousedown", onMouseDown);
         window.addEventListener("mousemove", onMouseMove);
         window.addEventListener("mouseup", onMouseUp);
+
+        // Underline + pointer on links while Cmd/Ctrl is held (Cmd/Ctrl+click
+        // opens them). Clearing on blur avoids a stuck "link mode" after Cmd+Tab.
+        const setLinkMod = (on) => els.scroller.classList.toggle("link-mod", on);
+        window.addEventListener("keydown", (e) => {
+          if (e.key === "Meta" || e.key === "Control") setLinkMod(true);
+        });
+        window.addEventListener("keyup", (e) => {
+          if (e.key === "Meta" || e.key === "Control") setLinkMod(false);
+        });
+        window.addEventListener("blur", () => setLinkMod(false));
         window.addEventListener("resize", () => render());
         els.pickerInput.addEventListener("input", (e) => updatePicker(e.target.value));
         els.pickerInput.addEventListener("keydown", onPickerKeyDown);

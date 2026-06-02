@@ -65,6 +65,16 @@
       }
       .row { left: var(--gutter-w, 50px); }
 
+      /* Clickable links (markdown [..](..) or bare URLs), detected per row. They
+         look like normal text until Cmd/Ctrl is held, then they underline and
+         show a pointer — Cmd/Ctrl+click opens them (see onMouseDown). */
+      .elink { cursor: inherit; }
+      #scroller.link-mod .elink {
+        cursor: pointer;
+        text-decoration: underline;
+        text-decoration-color: var(--accent, #4daafc);
+      }
+
       /* Soft-wrap mode: rows flow normally (no absolute positioning) and the
          browser wraps long lines; gutter and text sit in a flex row so the line
          number aligns to the first visual row. Caret/selection overlays are still

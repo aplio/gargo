@@ -279,54 +279,84 @@ impl WebEditor {
         };
     }
 
-    /// Find every (non-overlapping, left-to-right) literal occurrence of
-    /// `query`, case-insensitive unless `case_sensitive`. Returns each match as
-    /// char offsets plus the row and tab-expanded char columns the browser needs
-    /// to draw the highlight. A `query` containing a newline never matches — the
-    /// find box is single-line, like VSCode's default. Capped at 5000 matches.
-    pub fn find(&self, query: &str, case_sensitive: bool) -> Result<JsValue, JsValue> {
-        let buf = self.editor.active_buffer();
-        let rope = &buf.rope;
-        let mut out: Vec<FindMatch> = Vec::new();
-        let needle_src: Vec<char> = query.chars().collect();
-        if needle_src.is_empty() || needle_src.contains(&'\n') {
-            return serde_wasm_bindgen::to_value(&out)
-                .map_err(|e| JsValue::from_str(&e.to_string()));
-        }
-        // Fold to a single lowercase char per source char so char indices stay
-        // 1:1 with the document (full case folding can change length).
-        let fold = |c: char| {
-            if case_sensitive {
-                c
-            } else {
-                c.to_lowercase().next().unwrap_or(c)
-            }
-        };
-        let hay: Vec<char> = rope.chars().map(fold).collect();
-        let needle: Vec<char> = needle_src.iter().map(|&c| fold(c)).collect();
-        let nlen = needle.len();
-        const MAX_MATCHES: usize = 5000;
-        let mut i = 0usize;
-        while i + nlen <= hay.len() {
-            if hay[i..i + nlen] == needle[..] {
-                let start = i;
-                let end = i + nlen;
-                out.push(FindMatch {
+    /// Find every (non-overlapping, left-to-right) occurrence of `query`.
+    /// Options mirror VSCode's find box: `case_sensitive`, `whole_word`
+    /// (match must sit on word boundaries), and `use_regex` (interpret `query`
+    /// as a regular expression — an invalid pattern yields no matches). Returns
+    /// each match as char offsets plus the row and tab-expanded char columns the
+    /// browser needs to draw the highlight. Matches spanning a newline are
+    /// skipped (single-line, like VSCode's default). Capped at 5000 matches.
+    pub fn find(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+        use_regex: bool,
+    ) -> Result<JsValue, JsValue> {
+        let rope = &self.editor.active_buffer().rope;
+        let out: Vec<FindMatch> =
+            collect_matches(rope, query, case_sensitive, whole_word, use_regex)
+                .into_iter()
+                .map(|(start, end)| FindMatch {
                     start,
                     end,
                     row: rope.char_to_line(start),
                     start_char: offset_to_expanded_char_col(rope, start),
                     end_char: offset_to_expanded_char_col(rope, end),
-                });
-                if out.len() >= MAX_MATCHES {
-                    break;
-                }
-                i = end; // non-overlapping
-            } else {
-                i += 1;
+                })
+                .collect();
+        serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()))
+    }
+
+    /// Replace the char range `[start, end)` with `replacement` as one undoable
+    /// edit, leaving the caret after the inserted text. Used by the find box's
+    /// "replace one" button (the JS passes the current match's offsets).
+    pub fn replace_range(&mut self, start: usize, end: usize, replacement: &str) {
+        let buf = self.editor.active_buffer_mut();
+        let n = buf.rope.len_chars();
+        let s = start.min(n);
+        let e = end.min(n);
+        if s >= e {
+            return;
+        }
+        buf.begin_transaction();
+        buf.delete_range(s, e);
+        buf.insert_text_at(s, replacement);
+        buf.commit_transaction();
+        self.editor.mark_highlights_dirty();
+    }
+
+    /// Replace every match of `query` with `replacement` in a single undoable
+    /// edit, returning how many were replaced. Matching options are the same as
+    /// [`WebEditor::find`]. Edits are applied right-to-left so earlier offsets
+    /// stay valid even when the replacement length differs from the match.
+    /// `replacement` is inserted literally (no `$1` capture-group expansion).
+    pub fn replace_all(
+        &mut self,
+        query: &str,
+        replacement: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+        use_regex: bool,
+    ) -> usize {
+        let ranges = {
+            let rope = &self.editor.active_buffer().rope;
+            collect_matches(rope, query, case_sensitive, whole_word, use_regex)
+        };
+        if ranges.is_empty() {
+            return 0;
+        }
+        let buf = self.editor.active_buffer_mut();
+        buf.begin_transaction();
+        for &(s, e) in ranges.iter().rev() {
+            buf.delete_range(s, e);
+            if !replacement.is_empty() {
+                buf.insert_text_at(s, replacement);
             }
         }
-        serde_wasm_bindgen::to_value(&out).map_err(|e| JsValue::from_str(&e.to_string()))
+        buf.commit_transaction();
+        self.editor.mark_highlights_dirty();
+        ranges.len()
     }
 
     /// Monotonic version, bumped on every edit (for render invalidation).
@@ -426,6 +456,109 @@ impl WebEditor {
         };
         serde_wasm_bindgen::to_value(&model).map_err(|e| JsValue::from_str(&e.to_string()))
     }
+}
+
+/// Maximum number of find matches collected per query (perf guard).
+const MAX_MATCHES: usize = 5000;
+
+/// True if `c` is a word character (for whole-word boundary tests).
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Validate a candidate match `[start, end)`: non-empty, single-line, and — when
+/// `whole_word` — flanked by non-word chars (or the document edge).
+fn valid_match(rope: &Rope, whole_word: bool, start: usize, end: usize) -> bool {
+    if end <= start {
+        return false;
+    }
+    if rope.slice(start..end).chars().any(|c| c == '\n') {
+        return false; // single-line matches only
+    }
+    if whole_word {
+        let n = rope.len_chars();
+        if start > 0 && is_word_char(rope.char(start - 1)) {
+            return false;
+        }
+        if end < n && is_word_char(rope.char(end)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Collect the char ranges `[start, end)` of every match of `query` in `rope`,
+/// in ascending order. Shared by [`WebEditor::find`] (highlighting) and
+/// [`WebEditor::replace_all`] so both act on an identical match set. See
+/// [`WebEditor::find`] for the option semantics.
+fn collect_matches(
+    rope: &Rope,
+    query: &str,
+    case_sensitive: bool,
+    whole_word: bool,
+    use_regex: bool,
+) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    if query.is_empty() {
+        return out;
+    }
+
+    if use_regex {
+        let re = match regex::RegexBuilder::new(query)
+            .case_insensitive(!case_sensitive)
+            // `^`/`$` anchor to line boundaries, like VSCode's regex find.
+            .multi_line(true)
+            .build()
+        {
+            Ok(re) => re,
+            Err(_) => return out, // invalid pattern → no matches (box shows 0)
+        };
+        let text = rope.to_string();
+        for m in re.find_iter(&text) {
+            let start = rope.byte_to_char(m.start());
+            let end = rope.byte_to_char(m.end());
+            if valid_match(rope, whole_word, start, end) {
+                out.push((start, end));
+                if out.len() >= MAX_MATCHES {
+                    break;
+                }
+            }
+        }
+        return out;
+    }
+
+    // Literal search. Fold to a single lowercase char per source char so char
+    // indices stay 1:1 with the document (full case folding can change length).
+    let needle_src: Vec<char> = query.chars().collect();
+    if needle_src.contains(&'\n') {
+        return out;
+    }
+    let fold = |c: char| {
+        if case_sensitive {
+            c
+        } else {
+            c.to_lowercase().next().unwrap_or(c)
+        }
+    };
+    let hay: Vec<char> = rope.chars().map(fold).collect();
+    let needle: Vec<char> = needle_src.iter().map(|&c| fold(c)).collect();
+    let nlen = needle.len();
+    let mut i = 0usize;
+    while i + nlen <= hay.len() {
+        if hay[i..i + nlen] == needle[..] {
+            let (start, end) = (i, i + nlen);
+            if valid_match(rope, whole_word, start, end) {
+                out.push((start, end));
+                if out.len() >= MAX_MATCHES {
+                    break;
+                }
+            }
+            i = end; // non-overlapping
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 fn primary_cursor(buf: &crate::core::document::Document) -> usize {

@@ -137,23 +137,27 @@
         pointer-events: none;
       }
 
-      /* VSCode-style find widget, floating at the top-right of the editor. */
+      /* VSCode-style find/replace widget, floating at the top-right. */
       #find {
         position: absolute;
         top: 6px;
         right: 18px;
         display: flex;
-        align-items: center;
-        gap: 4px;
+        align-items: flex-start;
+        gap: 2px;
         background: #252526;
         border: 1px solid #454545;
         border-radius: 4px;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-        padding: 4px 6px;
+        padding: 4px 6px 4px 2px;
         z-index: 50;
       }
       #find[hidden] { display: none; }
-      #find-input {
+      .find-rows { display: flex; flex-direction: column; gap: 4px; }
+      .find-row { display: flex; align-items: center; gap: 4px; }
+      /* Replace row only shows once expanded (chevron / Cmd+Alt+F). */
+      #find:not(.with-replace) #replace-row { display: none; }
+      #find-input, #replace-input {
         border: 1px solid #3c3c3c;
         outline: none;
         background: #3c3c3c;
@@ -163,7 +167,7 @@
         border-radius: 3px;
         width: 200px;
       }
-      #find-input:focus { border-color: var(--sel); }
+      #find-input:focus, #replace-input:focus { border-color: var(--sel); }
       #find-count {
         color: #aaa;
         font-size: 12px;
@@ -183,6 +187,15 @@
       }
       #find button:hover { background: #3a3d41; }
       #find button.toggle.on { background: var(--sel); color: #fff; }
+      #find button u { text-decoration: underline; }
+      /* The expand chevron sits in its own left column, full widget height. */
+      #find-expand {
+        align-self: stretch;
+        display: flex;
+        align-items: center;
+        color: #aaa;
+      }
+      #find.with-replace #find-expand { transform: rotate(90deg); }
 
       /* Cmd+P file picker overlay. */
       #picker {
@@ -343,15 +356,28 @@
         </div>
       </div>
 
-      <!-- Cmd+F in-file search (VSCode-style), floats over the editor. -->
+      <!-- Cmd+F in-file search / replace (VSCode-style), floats over editor. -->
       <div id="find" hidden>
-        <input id="find-input" type="text" placeholder="Find"
-          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
-        <button id="find-case" class="toggle" title="Match Case">Aa</button>
-        <span id="find-count">No results</span>
-        <button id="find-prev" title="Previous match (Shift+Enter)">↑</button>
-        <button id="find-next" title="Next match (Enter)">↓</button>
-        <button id="find-close" title="Close (Esc)">✕</button>
+        <button id="find-expand" title="Toggle Replace">▸</button>
+        <div class="find-rows">
+          <div class="find-row">
+            <input id="find-input" type="text" placeholder="Find"
+              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+            <button id="find-case" class="toggle" title="Match Case">Aa</button>
+            <button id="find-word" class="toggle" title="Match Whole Word"><u>ab</u></button>
+            <button id="find-regex" class="toggle" title="Use Regular Expression">.*</button>
+            <span id="find-count">No results</span>
+            <button id="find-prev" title="Previous match (Shift+Enter)">↑</button>
+            <button id="find-next" title="Next match (Enter)">↓</button>
+            <button id="find-close" title="Close (Esc)">✕</button>
+          </div>
+          <div class="find-row" id="replace-row">
+            <input id="replace-input" type="text" placeholder="Replace"
+              autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+            <button id="replace-one" title="Replace (Enter)">↪</button>
+            <button id="replace-all" title="Replace All">⇉</button>
+          </div>
+        </div>
       </div>
     </div>
     <div id="error"></div>
@@ -391,12 +417,19 @@
         sidebarResizer: document.getElementById("sidebar-resizer"),
         tree: document.getElementById("tree"),
         find: document.getElementById("find"),
+        findExpand: document.getElementById("find-expand"),
         findInput: document.getElementById("find-input"),
         findCase: document.getElementById("find-case"),
+        findWord: document.getElementById("find-word"),
+        findRegex: document.getElementById("find-regex"),
         findCount: document.getElementById("find-count"),
         findPrev: document.getElementById("find-prev"),
         findNext: document.getElementById("find-next"),
         findClose: document.getElementById("find-close"),
+        replaceRow: document.getElementById("replace-row"),
+        replaceInput: document.getElementById("replace-input"),
+        replaceOne: document.getElementById("replace-one"),
+        replaceAll: document.getElementById("replace-all"),
       };
 
       let editor = null;
@@ -769,10 +802,10 @@
           return;
         }
 
-        // Cmd+F: in-file search (VSCode-style). Ctrl+F stays emacs "move right".
+        // Cmd+F: find; Cmd+Alt+F: find & replace. Ctrl+F stays emacs move-right.
         if (e.metaKey && (e.key === "f" || e.key === "F")) {
           e.preventDefault();
-          openFind();
+          openFind(e.altKey);
           return;
         }
 
@@ -1293,13 +1326,16 @@
       let searchIndex = -1; // index into searchMatches of the current match
       let findCurrentSelected = false; // is the current match the live selection?
       let caseSensitive = false;
+      let wholeWord = false;
+      let useRegex = false;
 
-      function openFind() {
+      function openFind(withReplace) {
         // VSCode prefills with the current selection (single-line only).
         const sel = editor.selection_text();
         if (sel && !sel.includes("\n")) els.findInput.value = sel;
         findOpen = true;
         els.find.hidden = false;
+        if (withReplace) els.find.classList.add("with-replace");
         runFind(true);
         els.findInput.focus();
         els.findInput.select();
@@ -1316,6 +1352,11 @@
         els.ime.focus();
       }
 
+      function toggleReplaceRow() {
+        els.find.classList.toggle("with-replace");
+        els.findInput.focus();
+      }
+
       // Recompute matches for the current query. When `jump`, also move to the
       // match at/after the caret; otherwise keep the current index (used after
       // edits that shift offsets around).
@@ -1330,7 +1371,7 @@
           return;
         }
         try {
-          searchMatches = editor.find(q, caseSensitive) || [];
+          searchMatches = editor.find(q, caseSensitive, wholeWord, useRegex) || [];
         } catch (_) {
           searchMatches = [];
         }
@@ -1387,6 +1428,63 @@
         els.findCase.classList.toggle("on", caseSensitive);
         runFind(true);
         els.findInput.focus();
+      }
+
+      function toggleWord() {
+        wholeWord = !wholeWord;
+        els.findWord.classList.toggle("on", wholeWord);
+        runFind(true);
+        els.findInput.focus();
+      }
+
+      function toggleRegex() {
+        useRegex = !useRegex;
+        els.findRegex.classList.toggle("on", useRegex);
+        runFind(true);
+        els.findInput.focus();
+      }
+
+      // Replace the current match, then advance to the next one (VSCode-style).
+      function replaceOne() {
+        if (searchIndex < 0 || searchIndex >= searchMatches.length) return;
+        const m = searchMatches[searchIndex];
+        editor.replace_range(m.start, m.end, els.replaceInput.value);
+        // The edit shifted offsets; recompute and jump to the next match at/
+        // after the caret (which now sits just past the replacement).
+        ensureCursorVisible();
+        render();
+        scheduleHighlight();
+        runFind(true);
+      }
+
+      function replaceAll() {
+        const q = els.findInput.value;
+        if (!q) return;
+        const n = editor.replace_all(
+          q,
+          els.replaceInput.value,
+          caseSensitive,
+          wholeWord,
+          useRegex
+        );
+        ensureCursorVisible();
+        render();
+        scheduleHighlight();
+        runFind(false);
+        if (n) els.findCount.textContent = "Replaced " + n;
+      }
+
+      function onReplaceKeyDown(e) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          closeFind();
+          return;
+        }
+        if (e.key === "Enter") {
+          e.preventDefault();
+          if (e.metaKey || e.altKey) replaceAll();
+          else replaceOne();
+        }
       }
 
       function onFindKeyDown(e) {
@@ -1493,13 +1591,19 @@
         els.pickerInput.addEventListener("keydown", onPickerKeyDown);
         els.findInput.addEventListener("input", () => runFind(true));
         els.findInput.addEventListener("keydown", onFindKeyDown);
-        // mousedown preventDefault keeps focus in the find input when clicking
-        // the widget's buttons (so the editor doesn't steal it).
+        els.replaceInput.addEventListener("keydown", onReplaceKeyDown);
+        // mousedown preventDefault keeps focus in the find/replace input when
+        // clicking the widget's buttons (so the editor doesn't steal it).
         for (const [el, fn] of [
+          [els.findExpand, toggleReplaceRow],
           [els.findCase, toggleCase],
+          [els.findWord, toggleWord],
+          [els.findRegex, toggleRegex],
           [els.findPrev, findPrev],
           [els.findNext, findNext],
           [els.findClose, closeFind],
+          [els.replaceOne, replaceOne],
+          [els.replaceAll, replaceAll],
         ]) {
           el.addEventListener("mousedown", (e) => e.preventDefault());
           el.addEventListener("click", fn);

@@ -261,12 +261,25 @@
         overflow-y: auto;
       }
       #picker-list li {
+        display: flex; /* command rows show a right-aligned keybinding hint */
+        align-items: baseline;
         padding: 4px 8px;
         border-radius: 4px;
         white-space: nowrap;
         overflow: hidden;
-        text-overflow: ellipsis;
         cursor: pointer;
+      }
+      /* The label text ellipsizes; the hint keeps its full width. */
+      #picker-list li .picker-label {
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      #picker-list li .picker-hint {
+        margin-left: auto;
+        padding-left: 12px;
+        color: var(--muted);
+        font-size: 0.85em;
+        flex: 0 0 auto;
       }
       /* Distinct class from the editor's .sel selection overlay (which is
          absolutely positioned) so the highlighted row stays in flow. */
@@ -987,6 +1000,14 @@
         // address bar). Don't preventDefault and don't route it to the core.
         if ((e.metaKey || e.ctrlKey) && (e.key === "l" || e.key === "L")) return;
 
+        // Cmd+Shift+P: command palette (opens the picker in "> " command mode).
+        // Checked before Cmd+P so the Shift variant doesn't fall through.
+        if (e.metaKey && e.shiftKey && (e.key === "p" || e.key === "P")) {
+          e.preventDefault();
+          openCommandPalette();
+          return;
+        }
+
         // Cmd+P: fuzzy file picker (VSCode-style). Ctrl+P stays emacs "move up".
         if (e.metaKey && (e.key === "p" || e.key === "P")) {
           e.preventDefault();
@@ -1195,13 +1216,39 @@
         dragging = false;
       }
 
-      // ---- Cmd+P fuzzy file picker -----------------------------------------
+      // ---- Cmd+P fuzzy picker (files + command palette) --------------------
+      //
+      // One widget, prefix-driven like the terminal palette: a bare query (or
+      // empty) searches files, "> " searches commands (Cmd+Shift+P), and ":<n>"
+      // jumps to a line. Each result is generic: { text, positions, hint?,
+      // onChoose(event) } so files and commands share rendering and navigation.
 
       let pickerOpen = false;
       let allFiles = null; // cached list from /api/files
       let pickerResults = [];
       let pickerSel = 0;
       const PICKER_LIMIT = 50;
+
+      // Command palette entries. `run` is the action; `hint` is the keybinding
+      // shown muted on the right. Commands that open another overlay close the
+      // picker first so the overlay can take focus; editing commands run and let
+      // afterEdit() re-render and refocus the editor.
+      const COMMANDS = [
+        { label: "Save File", hint: "⌘S", run: () => save() },
+        { label: "Search in Project", hint: "⇧⌘F", run: () => openGlobalSearch() },
+        { label: "Find", hint: "⌘F", run: () => openFind(false) },
+        { label: "Find and Replace", hint: "⌥⌘F", run: () => openFind(true) },
+        { label: "Go to File", hint: "⌘P", run: () => reopenPicker("") },
+        { label: "Go to Line…", hint: "", run: () => reopenPicker(":") },
+        { label: "Undo", hint: "⌘Z", run: () => { editor.undo(); afterEdit(); } },
+        { label: "Redo", hint: "⇧⌘Z", run: () => { editor.redo(); afterEdit(); } },
+        { label: "Delete Line", hint: "⇧⌘K", run: () => { editor.delete_line(); afterEdit(); } },
+        { label: "Add Cursor Above", hint: "", run: () => { editor.add_cursor_above(); afterEdit(); } },
+        { label: "Add Cursor Below", hint: "", run: () => { editor.add_cursor_below(); afterEdit(); } },
+        { label: "Add Cursors to Top", hint: "", run: () => { editor.add_cursors_to_top(); afterEdit(); } },
+        { label: "Add Cursors to Bottom", hint: "", run: () => { editor.add_cursors_to_bottom(); afterEdit(); } },
+        { label: "Remove Extra Cursors", hint: "", run: () => { editor.remove_secondary_cursors(); afterEdit(); } },
+      ];
 
       // Fetch the repository file list once; shared by the Cmd+P picker and the
       // sidebar file tree.
@@ -1218,17 +1265,34 @@
         return allFiles;
       }
 
-      async function openPicker() {
+      // Cmd+P: open in file mode. Cmd+Shift+P: open in command mode ("> ").
+      async function openPicker() { await showPicker(""); }
+      async function openCommandPalette() { await showPicker("> "); }
+
+      async function showPicker(initial) {
         if (pickerOpen) return;
         pickerOpen = true;
         els.picker.hidden = false;
-        els.pickerInput.value = "";
+        els.pickerInput.value = initial;
         if (allFiles === null) {
           els.pickerList.innerHTML = "<li>Loading…</li>";
           await loadFiles();
         }
-        updatePicker("");
+        updatePicker(initial);
         els.pickerInput.focus();
+        // Caret after the prefix so the user types straight into the query.
+        const n = els.pickerInput.value.length;
+        els.pickerInput.setSelectionRange(n, n);
+      }
+
+      // Switch the open picker to another mode (used by the "Go to File" /
+      // "Go to Line…" commands) without closing it.
+      function reopenPicker(prefix) {
+        els.pickerInput.value = prefix;
+        updatePicker(prefix);
+        els.pickerInput.focus();
+        const n = prefix.length;
+        els.pickerInput.setSelectionRange(n, n);
       }
 
       function closePicker() {
@@ -1239,24 +1303,65 @@
       }
 
       function updatePicker(query) {
-        const q = query.trim();
-        let scored;
-        if (!q) {
-          scored = (allFiles || [])
-            .slice(0, PICKER_LIMIT)
-            .map((p) => ({ path: p, positions: [] }));
-        } else {
-          scored = [];
-          for (const p of allFiles || []) {
-            const m = fuzzyMatch(p, q);
-            if (m) scored.push({ path: p, score: m.score, positions: m.positions });
-          }
-          scored.sort((a, b) => b.score - a.score);
-          scored = scored.slice(0, PICKER_LIMIT);
-        }
-        pickerResults = scored;
+        if (query.startsWith(">")) pickerResults = commandResults(query.slice(1).trim());
+        else if (query.startsWith(":")) pickerResults = gotoLineResults(query.slice(1).trim());
+        else pickerResults = fileResults(query.trim());
         pickerSel = 0;
         renderPickerList();
+      }
+
+      // File mode: fuzzy-match the repo file list; Enter/click opens (Cmd/Alt for
+      // a new window), mirroring the file explorer.
+      function fileResults(q) {
+        const toResult = (p, positions) => ({
+          text: p,
+          positions,
+          onChoose: (e) => (e && (e.metaKey || e.altKey) ? openFileInNewWindow(p) : openFile(p)),
+        });
+        if (!q) return (allFiles || []).slice(0, PICKER_LIMIT).map((p) => toResult(p, []));
+        const scored = [];
+        for (const p of allFiles || []) {
+          const m = fuzzyMatch(p, q);
+          if (m) scored.push({ p, score: m.score, positions: m.positions });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        return scored.slice(0, PICKER_LIMIT).map((s) => toResult(s.p, s.positions));
+      }
+
+      // Command mode ("> "): fuzzy-match command labels.
+      function commandResults(q) {
+        const toResult = (cmd, positions) => ({
+          text: cmd.label,
+          positions,
+          hint: cmd.hint,
+          onChoose: () => { closePicker(); cmd.run(); },
+        });
+        if (!q) return COMMANDS.map((c) => toResult(c, []));
+        const scored = [];
+        for (const c of COMMANDS) {
+          const m = fuzzyMatch(c.label, q);
+          if (m) scored.push({ c, score: m.score, positions: m.positions });
+        }
+        scored.sort((a, b) => b.score - a.score);
+        return scored.map((s) => toResult(s.c, s.positions));
+      }
+
+      // Goto-line mode (":<n>"): a single synthetic result that jumps the caret.
+      function gotoLineResults(q) {
+        const n = parseInt(q, 10);
+        if (!q || isNaN(n) || n < 1) {
+          return [{ text: "Go to line… (type a number)", positions: [] }];
+        }
+        return [{
+          text: "Go to line " + n,
+          positions: [],
+          onChoose: () => {
+            closePicker();
+            editor.set_cursor(n - 1, 0);
+            ensureCursorVisible();
+            render();
+          },
+        }];
       }
 
       function renderPickerList() {
@@ -1264,13 +1369,22 @@
         pickerResults.forEach((r, i) => {
           const li = document.createElement("li");
           if (i === pickerSel) li.className = "picked";
-          li.innerHTML = highlightPath(r.path, r.positions);
-          li.addEventListener("mousedown", (e) => {
-            e.preventDefault();
-            // Cmd/Alt+click: open in a separate window (like the file explorer).
-            if (e.metaKey || e.altKey) openFileInNewWindow(r.path);
-            else openFile(r.path);
-          });
+          const label = document.createElement("span");
+          label.className = "picker-label";
+          label.innerHTML = highlightPath(r.text, r.positions);
+          li.appendChild(label);
+          if (r.hint) {
+            const hint = document.createElement("span");
+            hint.className = "picker-hint";
+            hint.textContent = r.hint;
+            li.appendChild(hint);
+          }
+          if (r.onChoose) {
+            li.addEventListener("mousedown", (e) => {
+              e.preventDefault();
+              r.onChoose(e);
+            });
+          }
           els.pickerList.appendChild(li);
         });
       }
@@ -1347,8 +1461,9 @@
         if (e.key === "Enter") {
           e.preventDefault();
           const r = pickerResults[pickerSel];
-          // Alt+Enter: open in a separate window, leaving the current tab.
-          if (r) (e.altKey ? openFileInNewWindow : openFile)(r.path);
+          // onChoose handles the mode-specific action (open file / run command /
+          // jump to line); Alt+Enter is forwarded so files can open a new window.
+          if (r && r.onChoose) r.onChoose(e);
           return;
         }
         const down = e.key === "ArrowDown" || (e.ctrlKey && (e.key === "n" || e.key === "N"));

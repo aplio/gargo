@@ -212,6 +212,35 @@ impl WebEditor {
         self.editor.dispatch_core(CoreAction::Redo, TAB_WIDTH);
     }
 
+    /// Multicursor commands, exposed for the command palette (Cmd+Shift+P). The
+    /// shared core already implements these in `web_dispatch`; the match-driven
+    /// variants (next/all match) stay unsupported in the browser MVP, so they're
+    /// deliberately not surfaced here.
+    pub fn add_cursor_above(&mut self) {
+        self.editor
+            .dispatch_core(CoreAction::AddCursorAbove, TAB_WIDTH);
+    }
+
+    pub fn add_cursor_below(&mut self) {
+        self.editor
+            .dispatch_core(CoreAction::AddCursorBelow, TAB_WIDTH);
+    }
+
+    pub fn add_cursors_to_top(&mut self) {
+        self.editor
+            .dispatch_core(CoreAction::AddCursorsToTop, TAB_WIDTH);
+    }
+
+    pub fn add_cursors_to_bottom(&mut self) {
+        self.editor
+            .dispatch_core(CoreAction::AddCursorsToBottom, TAB_WIDTH);
+    }
+
+    pub fn remove_secondary_cursors(&mut self) {
+        self.editor
+            .dispatch_core(CoreAction::RemoveSecondaryCursors, TAB_WIDTH);
+    }
+
     /// Set a single selection from an anchor (row, col) to a head (row, col),
     /// placing the primary cursor at the head. Used for mouse-drag selection.
     /// An empty range (anchor == head) clears the selection.

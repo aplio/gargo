@@ -1067,7 +1067,12 @@ mod tests {
         for (ch, expected) in &cases {
             let mut state = KeyState::Normal;
             assert_eq!(
-                resolve(ctrl_key(KeyCode::Char(*ch)), &mut state, &Mode::Insert, false),
+                resolve(
+                    ctrl_key(KeyCode::Char(*ch)),
+                    &mut state,
+                    &Mode::Insert,
+                    false
+                ),
                 core(expected.clone()),
                 "ctrl+{ch} in insert"
             );

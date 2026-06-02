@@ -446,6 +446,71 @@
       .tnode.dir .tlabel { color: var(--fg); }
       .tnode.file .tlabel { color: var(--muted); }
 
+      /* Right-click context menu for the sidebar file tree. */
+      #ctxmenu {
+        position: fixed;
+        z-index: 200;
+        min-width: 210px;
+        background: var(--panel-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 6px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+        padding: 4px;
+        font-size: 13px;
+        user-select: none;
+      }
+      #ctxmenu[hidden] { display: none; }
+      .ctxitem {
+        display: flex;
+        align-items: center;
+        padding: 5px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        white-space: nowrap;
+        color: var(--fg);
+      }
+      .ctxitem:hover { background: var(--hover-bg); }
+      .ctxitem .ctxhint {
+        margin-left: auto;
+        padding-left: 24px;
+        color: var(--muted);
+        font-size: 0.85em;
+      }
+      .ctxsep { height: 1px; background: var(--panel-border); margin: 4px 0; }
+
+      /* Modal text prompt for New File / New Folder / Rename. */
+      #fsprompt {
+        position: fixed;
+        inset: 0;
+        z-index: 300;
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.2);
+      }
+      #fsprompt[hidden] { display: none; }
+      .fsprompt-box {
+        margin-top: 120px;
+        width: min(480px, 90vw);
+        background: var(--panel-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 6px;
+        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+        padding: 12px;
+      }
+      .fsprompt-title { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+      #fsprompt-input {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid var(--panel-border);
+        outline: none;
+        background: var(--input-bg);
+        color: var(--fg);
+        font: var(--font);
+        padding: 8px 10px;
+        border-radius: 4px;
+      }
+
       /* Syntax highlight token colors (VSCode Dark+ palette). */
       .tok-keyword { color: #569cd6; }
       .tok-string { color: #ce9178; }
@@ -479,6 +544,8 @@
     </style>
   </head>
   <body>
+    <!-- Absolute repo root, injected by the server (for "Copy Path"). -->
+    <script>window.__GARGO_REPO_ROOT__ = {{REPO_ROOT}};</script>
     <!-- Shared server top nav, injected by the server. -->
     {{APP_RAIL}}
     <div id="status">
@@ -546,6 +613,18 @@
       <ul id="picker-list"></ul>
     </div>
 
+    <!-- Right-click context menu for the sidebar; items built in JS. -->
+    <div id="ctxmenu" hidden></div>
+
+    <!-- Modal text prompt for New File / New Folder / Rename. -->
+    <div id="fsprompt" hidden>
+      <div class="fsprompt-box">
+        <div class="fsprompt-title" id="fsprompt-title"></div>
+        <input id="fsprompt-input" type="text"
+          autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" />
+      </div>
+    </div>
+
     <script type="module">
       // emacs/VSCode 風ブラウザエディタ PoC。
       //
@@ -578,6 +657,10 @@
         sidebar: document.getElementById("sidebar"),
         sidebarResizer: document.getElementById("sidebar-resizer"),
         tree: document.getElementById("tree"),
+        ctxmenu: document.getElementById("ctxmenu"),
+        fsprompt: document.getElementById("fsprompt"),
+        fspromptTitle: document.getElementById("fsprompt-title"),
+        fspromptInput: document.getElementById("fsprompt-input"),
         find: document.getElementById("find"),
         findExpand: document.getElementById("find-expand"),
         findInput: document.getElementById("find-input"),
@@ -1897,18 +1980,25 @@
 
       let treeRoot = null;
       const expandedDirs = new Set();
+      // Directories created this session. The file list (`/api/files`) is built
+      // from `git ls-files`, which never lists empty directories, so a freshly
+      // created folder would vanish on the next rebuild unless we track it here.
+      let extraDirs = new Set();
 
-      // Build a nested tree from the flat file list (same set as the picker).
+      // Build a nested tree from the flat file list (same set as the picker),
+      // plus any session-created empty directories.
       function buildTree(files) {
         const root = { name: "", path: "", isDir: true, children: new Map() };
-        for (const f of files) {
-          const parts = f.split("/");
+        // `leaf` is true for a file path (its last segment is a file), false
+        // for a directory path (every segment, including the last, is a dir).
+        const addPath = (p, leaf) => {
+          const parts = p.split("/");
           let node = root;
           let acc = "";
           for (let i = 0; i < parts.length; i++) {
             const part = parts[i];
             acc = acc ? acc + "/" + part : part;
-            const isDir = i < parts.length - 1;
+            const isDir = leaf ? i < parts.length - 1 : true;
             let child = node.children.get(part);
             if (!child) {
               child = { name: part, path: acc, isDir, children: new Map() };
@@ -1916,8 +2006,17 @@
             }
             node = child;
           }
-        }
+        };
+        for (const f of files) addPath(f, true);
+        for (const d of extraDirs) addPath(d, false);
         return root;
+      }
+
+      // Rebuild the tree from the current file list + extra dirs, keeping the
+      // expansion state, and re-render. Used after filesystem operations.
+      function rebuildTree() {
+        treeRoot = buildTree(allFiles || []);
+        renderTree();
       }
 
       // Directories first, then files, each alphabetically.
@@ -1964,6 +2063,7 @@
           row.appendChild(label);
 
           row.addEventListener("mousedown", (e) => {
+            if (e.button !== 0) return; // let right-click open the context menu
             e.preventDefault();
             if (child.isDir) {
               if (open) expandedDirs.delete(child.path);
@@ -1975,6 +2075,12 @@
             } else {
               openFile(child.path);
             }
+          });
+
+          row.addEventListener("contextmenu", (e) => {
+            e.preventDefault();
+            e.stopPropagation(); // empty-area handler shouldn't also fire
+            showContextMenu(e.clientX, e.clientY, child);
           });
 
           parent.appendChild(row);
@@ -2007,6 +2113,294 @@
           resizing = false;
           render();
         }
+      }
+
+      // ---- sidebar context menu + filesystem ops ---------------------------
+
+      // Absolute repo root injected by the server; "" if unknown (then absolute
+      // == relative). Used to build absolute paths for "Copy Path".
+      const repoRoot =
+        typeof window.__GARGO_REPO_ROOT__ === "string"
+          ? window.__GARGO_REPO_ROOT__
+          : "";
+
+      function parentDir(path) {
+        const i = path.lastIndexOf("/");
+        return i >= 0 ? path.slice(0, i) : "";
+      }
+
+      function absPath(rel) {
+        if (!rel) return repoRoot;
+        return repoRoot ? repoRoot.replace(/\/+$/, "") + "/" + rel : rel;
+      }
+
+      async function copyText(text) {
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch (err) {
+          showError("Copy failed: " + err);
+        }
+      }
+
+      // Items of the currently-open menu, for single-letter shortcut lookup.
+      let ctxItems = [];
+
+      // Build the menu rows for a right-clicked tree node (null = empty area /
+      // repo root). New entries land in the node's own dir (for a directory),
+      // its parent dir (for a file), or the root (empty area). Each item's
+      // `key` is the single-letter shortcut shown on the right and accepted
+      // while the menu is open.
+      function buildContextItems(node) {
+        const baseDir = !node ? "" : node.isDir ? node.path : parentDir(node.path);
+        const rel = node ? node.path : "";
+        const items = [
+          { key: "a", label: "New File", action: () => createEntry(baseDir) },
+          { sep: true },
+          { key: "f", label: "Reveal in Finder", action: () => revealInFinder(rel) },
+          { sep: true },
+          { key: "p", label: "Copy Path", action: () => copyText(absPath(rel)) },
+        ];
+        if (node) {
+          items.push({ key: "c", label: "Copy Relative Path", action: () => copyText(rel) });
+          items.push({ sep: true });
+          items.push({ key: "r", label: "Rename", action: () => renameEntry(node) });
+          items.push({ key: "d", label: "Delete", action: () => deleteEntry(node) });
+        }
+        return items;
+      }
+
+      function showContextMenu(x, y, node) {
+        closeContextMenu();
+        const menu = els.ctxmenu;
+        menu.innerHTML = "";
+        ctxItems = buildContextItems(node);
+        for (const item of ctxItems) {
+          if (item.sep) {
+            const sep = document.createElement("div");
+            sep.className = "ctxsep";
+            menu.appendChild(sep);
+            continue;
+          }
+          const el = document.createElement("div");
+          el.className = "ctxitem";
+          const label = document.createElement("span");
+          label.textContent = item.label;
+          el.appendChild(label);
+          const hintText = item.hint || (item.key ? item.key.toUpperCase() : "");
+          if (hintText) {
+            const hint = document.createElement("span");
+            hint.className = "ctxhint";
+            hint.textContent = hintText;
+            el.appendChild(hint);
+          }
+          // preventDefault on mousedown keeps the editor from stealing focus
+          // before the click fires.
+          el.addEventListener("mousedown", (ev) => ev.preventDefault());
+          el.addEventListener("click", () => {
+            closeContextMenu();
+            item.action();
+          });
+          menu.appendChild(el);
+        }
+        menu.hidden = false;
+        // Position, clamped so the menu stays inside the viewport.
+        const rect = menu.getBoundingClientRect();
+        const mx = Math.min(x, window.innerWidth - rect.width - 8);
+        const my = Math.min(y, window.innerHeight - rect.height - 8);
+        menu.style.left = Math.max(4, mx) + "px";
+        menu.style.top = Math.max(4, my) + "px";
+      }
+
+      function closeContextMenu() {
+        els.ctxmenu.hidden = true;
+      }
+
+      // A small modal text prompt; resolves to the entered string (trimmed) or
+      // null if cancelled. `selectBasename` pre-selects the name before its
+      // extension (for Rename).
+      let fspromptResolve = null;
+      function promptInput({ title, initial, selectBasename }) {
+        return new Promise((resolve) => {
+          fspromptResolve = resolve;
+          els.fspromptTitle.textContent = title || "";
+          els.fsprompt.hidden = false;
+          const input = els.fspromptInput;
+          input.value = initial || "";
+          input.focus();
+          if (selectBasename && initial) {
+            const dot = initial.lastIndexOf(".");
+            input.setSelectionRange(0, dot > 0 ? dot : initial.length);
+          } else {
+            const n = input.value.length;
+            input.setSelectionRange(n, n);
+          }
+        });
+      }
+
+      function closeFsPrompt(value) {
+        if (!fspromptResolve) return;
+        els.fsprompt.hidden = true;
+        const resolve = fspromptResolve;
+        fspromptResolve = null;
+        resolve(value);
+        els.ime.focus();
+      }
+
+      function onFsPromptKeyDown(e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          closeFsPrompt(els.fspromptInput.value.trim());
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          closeFsPrompt(null);
+        }
+        e.stopPropagation();
+      }
+
+      async function createEntry(baseDir) {
+        const where = baseDir ? baseDir + "/" : "project root";
+        const raw = await promptInput({
+          title: "New file in " + where + " — end the name with / to make a folder",
+          initial: "",
+        });
+        if (!raw) return;
+        // A trailing slash means "directory"; otherwise it's a file. Nested
+        // names (e.g. `a/b/c.rs`) create the intermediate dirs server-side.
+        const kind = raw.endsWith("/") ? "dir" : "file";
+        const name = raw.replace(/\/+$/, "");
+        if (!name) return;
+        const path = baseDir ? baseDir + "/" + name : name;
+        try {
+          const resp = await fetch("/api/fs/create", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path, kind }),
+          });
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            showError("Create failed: " + (data.error || resp.status));
+            return;
+          }
+        } catch (err) {
+          showError("Create failed: " + err);
+          return;
+        }
+        // Reflect the new entry locally: new files come back from /api/files on
+        // a reload, but empty dirs never do, so track them in extraDirs.
+        expandToFile(path); // expand ancestor dirs so the entry is visible
+        if (kind === "dir") {
+          extraDirs.add(path);
+          expandedDirs.add(path);
+          rebuildTree();
+        } else {
+          if (allFiles && !allFiles.includes(path)) allFiles.push(path);
+          // Opening the file is a full navigation; it'll rebuild on load.
+          openFile(path);
+        }
+      }
+
+      async function renameEntry(node) {
+        const newName = await promptInput({
+          title: "Rename " + node.path,
+          initial: node.name,
+          selectBasename: !node.isDir,
+        });
+        if (!newName || newName === node.name) return;
+        const base = parentDir(node.path);
+        const to = base ? base + "/" + newName : newName;
+        try {
+          const resp = await fetch("/api/fs/rename", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ from: node.path, to }),
+          });
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            showError("Rename failed: " + (data.error || resp.status));
+            return;
+          }
+        } catch (err) {
+          showError("Rename failed: " + err);
+          return;
+        }
+        // If the renamed entry contains the file currently open, follow it to
+        // its new path (a full navigation that reloads the tree).
+        if (filePath === node.path || filePath.startsWith(node.path + "/")) {
+          openFile(to + filePath.slice(node.path.length));
+          return;
+        }
+        applyRenameLocal(node.path, to, node.isDir);
+        rebuildTree();
+      }
+
+      // Rewrite the cached file list / extra dirs / expansion state to reflect a
+      // rename of `from` → `to` (a file, or a directory and everything under it).
+      function applyRenameLocal(from, to, isDir) {
+        const remap = (p) => {
+          if (p === from) return to;
+          if (isDir && p.startsWith(from + "/")) return to + p.slice(from.length);
+          return p;
+        };
+        if (allFiles) allFiles = allFiles.map(remap);
+        extraDirs = new Set([...extraDirs].map(remap));
+        if (expandedDirs.has(from)) {
+          expandedDirs.delete(from);
+          expandedDirs.add(to);
+        }
+      }
+
+      async function revealInFinder(path) {
+        try {
+          const resp = await fetch("/api/fs/reveal", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path }),
+          });
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            showError("Reveal failed: " + (data.error || resp.status));
+          }
+        } catch (err) {
+          showError("Reveal failed: " + err);
+        }
+      }
+
+      async function deleteEntry(node) {
+        const msg =
+          "Delete " + node.path + (node.isDir ? "/ and everything in it?" : "?");
+        if (!window.confirm(msg)) return;
+        try {
+          const resp = await fetch("/api/fs/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: node.path }),
+          });
+          if (!resp.ok) {
+            const data = await resp.json().catch(() => ({}));
+            showError("Delete failed: " + (data.error || resp.status));
+            return;
+          }
+        } catch (err) {
+          showError("Delete failed: " + err);
+          return;
+        }
+        // If the open file was deleted (or lived under a deleted dir), leave it
+        // by returning to the editor's no-file state (which opens the picker).
+        if (filePath === node.path || filePath.startsWith(node.path + "/")) {
+          window.location.assign("/editor");
+          return;
+        }
+        applyDeleteLocal(node.path, node.isDir);
+        rebuildTree();
+      }
+
+      // Drop a deleted file/dir (and anything under it) from the cached file
+      // list, extra dirs, and expansion state, then the caller rebuilds.
+      function applyDeleteLocal(path, isDir) {
+        const under = (p) => p === path || (isDir && p.startsWith(path + "/"));
+        if (allFiles) allFiles = allFiles.filter((f) => !under(f));
+        extraDirs = new Set([...extraDirs].filter((d) => !under(d)));
+        for (const d of [...expandedDirs]) if (under(d)) expandedDirs.delete(d);
       }
 
       // ---- Cmd+F in-file search --------------------------------------------
@@ -2307,6 +2701,49 @@
         els.sidebarResizer.addEventListener("mousedown", onResizerDown);
         window.addEventListener("mousemove", onResizerMove);
         window.addEventListener("mouseup", onResizerUp);
+
+        // Right-click on empty sidebar space → root-level context menu.
+        els.tree.addEventListener("contextmenu", (e) => {
+          if (e.target.closest(".tnode")) return; // row handler covers nodes
+          e.preventDefault();
+          showContextMenu(e.clientX, e.clientY, null);
+        });
+        // Dismiss the context menu on any outside click, scroll, or blur.
+        window.addEventListener("mousedown", (e) => {
+          if (!els.ctxmenu.hidden && !els.ctxmenu.contains(e.target)) {
+            closeContextMenu();
+          }
+        });
+        window.addEventListener("blur", closeContextMenu);
+        document.addEventListener("scroll", closeContextMenu, true);
+        // While the menu is open, Esc closes it and single letters fire the
+        // matching item (capture phase, so the editor never sees them).
+        document.addEventListener(
+          "keydown",
+          (e) => {
+            if (els.ctxmenu.hidden) return;
+            if (e.key === "Escape") {
+              e.preventDefault();
+              e.stopPropagation();
+              closeContextMenu();
+              return;
+            }
+            if (e.metaKey || e.ctrlKey || e.altKey) return; // leave combos alone
+            const item = ctxItems.find((it) => it.key === e.key.toLowerCase());
+            if (item) {
+              e.preventDefault();
+              e.stopPropagation();
+              closeContextMenu();
+              item.action();
+            }
+          },
+          true,
+        );
+        // Modal name prompt: keys, and click-on-backdrop to cancel.
+        els.fspromptInput.addEventListener("keydown", onFsPromptKeyDown);
+        els.fsprompt.addEventListener("mousedown", (e) => {
+          if (e.target === els.fsprompt) closeFsPrompt(null);
+        });
 
         els.ime.focus();
         render();

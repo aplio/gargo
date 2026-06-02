@@ -47,10 +47,16 @@ pub(crate) async fn handle_editor_page(
     // mirroring the terminal editor's `[theme]`. Defaults to a light palette.
     let theme_css =
         crate::command::web_editor_theme::editor_theme_css(&crate::config::Config::load().theme);
+    // The repo root, JSON-encoded, so the client can build absolute paths for
+    // "Copy Path" in the sidebar context menu. `to_string` yields a quoted,
+    // escaped JS string literal we drop straight into the inline script.
+    let repo_root = serde_json::to_string(&state.repo_root.to_string_lossy())
+        .unwrap_or_else(|_| "\"\"".to_string());
     let page = EDITOR_HTML
         .replace("{{APP_CSS}}", &css)
         .replace("{{APP_RAIL}}", &rail)
-        .replace("{{THEME_CSS}}", &theme_css);
+        .replace("{{THEME_CSS}}", &theme_css)
+        .replace("{{REPO_ROOT}}", &repo_root);
     Html(page)
 }
 
@@ -384,6 +390,158 @@ pub(crate) async fn handle_api_save(
         }),
         Err(e) => bad_request(format!("cannot write file: {e}")),
     }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CreateRequest {
+    path: String,
+    /// `"file"` or `"dir"`.
+    kind: String,
+}
+
+/// Create an empty file (with any missing parent dirs) or a directory at a
+/// repo-relative path, for the sidebar's "New File" / "New Folder" actions.
+/// Refuses to clobber an existing entry.
+pub(crate) async fn handle_api_fs_create(
+    State(state): State<Arc<GithubServerState>>,
+    Json(req): Json<CreateRequest>,
+) -> Response {
+    let Some(full) = resolve_in_repo(&state.repo_root, &req.path) else {
+        return bad_request("invalid path");
+    };
+    if full.exists() {
+        return bad_request("already exists");
+    }
+    let result = match req.kind.as_str() {
+        "dir" => std::fs::create_dir_all(&full),
+        "file" => {
+            if let Some(parent) = full.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                return bad_request(format!("cannot create parent dir: {e}"));
+            }
+            std::fs::write(&full, b"")
+        }
+        _ => return bad_request("invalid kind"),
+    };
+    match result {
+        Ok(_) => ok_json(&serde_json::json!({ "ok": true })),
+        Err(e) => bad_request(format!("cannot create: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RenameRequest {
+    from: String,
+    to: String,
+}
+
+/// Rename/move a file or directory within the repo (the sidebar's "Rename"
+/// action). Refuses if the source is missing or the destination exists.
+pub(crate) async fn handle_api_fs_rename(
+    State(state): State<Arc<GithubServerState>>,
+    Json(req): Json<RenameRequest>,
+) -> Response {
+    let (Some(from), Some(to)) = (
+        resolve_in_repo(&state.repo_root, &req.from),
+        resolve_in_repo(&state.repo_root, &req.to),
+    ) else {
+        return bad_request("invalid path");
+    };
+    if !from.exists() {
+        return bad_request("source does not exist");
+    }
+    if to.exists() {
+        return bad_request("target already exists");
+    }
+    if let Some(parent) = to.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        return bad_request(format!("cannot create parent dir: {e}"));
+    }
+    match std::fs::rename(&from, &to) {
+        Ok(_) => ok_json(&serde_json::json!({ "ok": true })),
+        Err(e) => bad_request(format!("cannot rename: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DeleteRequest {
+    path: String,
+}
+
+/// Delete a file or directory (recursively) within the repo, for the sidebar's
+/// "Delete" action. Refuses to delete the repo root itself.
+pub(crate) async fn handle_api_fs_delete(
+    State(state): State<Arc<GithubServerState>>,
+    Json(req): Json<DeleteRequest>,
+) -> Response {
+    let Some(full) = resolve_in_repo(&state.repo_root, &req.path) else {
+        return bad_request("invalid path");
+    };
+    if full == state.repo_root || req.path.trim_matches('/').is_empty() {
+        return bad_request("refusing to delete the repo root");
+    }
+    let result = if full.is_dir() {
+        std::fs::remove_dir_all(&full)
+    } else {
+        std::fs::remove_file(&full)
+    };
+    match result {
+        Ok(_) => ok_json(&serde_json::json!({ "ok": true })),
+        Err(e) => bad_request(format!("cannot delete: {e}")),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RevealRequest {
+    path: String,
+}
+
+/// Reveal a repo path in the host's file manager (macOS Finder, Windows
+/// Explorer, or the containing dir via `xdg-open` elsewhere). Runs on the
+/// machine hosting the server, which for the editor is the user's own box.
+pub(crate) async fn handle_api_fs_reveal(
+    State(state): State<Arc<GithubServerState>>,
+    Json(req): Json<RevealRequest>,
+) -> Response {
+    let Some(full) = resolve_in_repo(&state.repo_root, &req.path) else {
+        return bad_request("invalid path");
+    };
+    if !full.exists() {
+        return bad_request("path does not exist");
+    }
+    match reveal_in_file_manager(&full) {
+        Ok(_) => ok_json(&serde_json::json!({ "ok": true })),
+        Err(e) => bad_request(format!("cannot reveal: {e}")),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+fn reveal_in_file_manager(path: &Path) -> std::io::Result<()> {
+    // No portable "reveal" on Linux desktops; open the containing directory.
+    let target = path.parent().unwrap_or(path);
+    std::process::Command::new("xdg-open")
+        .arg(target)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Resolve a client-supplied relative path within `repo_root`, rejecting

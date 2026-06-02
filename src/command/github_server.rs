@@ -485,6 +485,10 @@ async fn run_server(
         .route("/api/files", get(editor::handle_api_files))
         .route("/api/search", get(editor::handle_api_search))
         .route("/api/save", post(editor::handle_api_save))
+        .route("/api/fs/create", post(editor::handle_api_fs_create))
+        .route("/api/fs/rename", post(editor::handle_api_fs_rename))
+        .route("/api/fs/delete", post(editor::handle_api_fs_delete))
+        .route("/api/fs/reveal", post(editor::handle_api_fs_reveal))
         .route("/api/highlight", post(editor::handle_api_highlight))
         .route("/api/git-gutter", post(editor::handle_api_git_gutter))
         .with_state(github_state);

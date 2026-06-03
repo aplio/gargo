@@ -397,7 +397,13 @@ const LIVE_SYNC_SCRIPT: &str = r#"<script>
     } catch (_) {}
   };
 
-  let lastSeenVersion = readStoredVersion();
+  // Seed from the event version that was current when this page was rendered
+  // (injected server-side). A freshly opened tab — e.g. via Cmd/Ctrl+click,
+  // which gets an empty sessionStorage — would otherwise start at 0 and have
+  // its very first poll replay the already-current navigate event, yanking it
+  // away from the URL it just loaded. Taking the max keeps same-tab navigation
+  // (which persists a higher version) working unchanged.
+  let lastSeenVersion = Math.max(readStoredVersion(), {{INITIAL_EVENT_VERSION}});
   let pollInFlight = false;
   let userScrolled = false;
   let userScrollTimer = null;
@@ -539,6 +545,13 @@ const LIVE_SYNC_SCRIPT: &str = r#"<script>
   pollEvents();
 })();
 </script>"#;
+
+/// Build the live-sync `<script>` for a page, seeding the client's initial
+/// `lastSeenVersion` with the event version current at render time so the page
+/// never replays an already-current navigate/refresh event onto itself.
+fn live_sync_script(current_version: u64) -> String {
+    LIVE_SYNC_SCRIPT.replace("{{INITIAL_EVENT_VERSION}}", &current_version.to_string())
+}
 
 const PREVIEW_RELOAD_SCRIPT: &str = r#"<script>
 (() => {
@@ -1229,13 +1242,13 @@ pub(crate) async fn handle_root(
 ) -> impl IntoResponse {
     maybe_emit_detached_event(&state, ".");
 
-    let (repo_root, url_ctx) = {
+    let (repo_root, url_ctx, version) = {
         let st = state.lock().unwrap();
-        (st.repo_root.clone(), st.url_ctx.clone())
+        (st.repo_root.clone(), st.url_ctx.clone(), st.version)
     };
 
     // Always show directory listing at root
-    handle_directory_listing(&repo_root, ".", &repo_root, &url_ctx).await
+    handle_directory_listing(&repo_root, ".", &repo_root, &url_ctx, version).await
 }
 
 /// Handle tree view (directory listing) `/{owner}/{repo}/tree/{branch}/{path}`
@@ -1243,9 +1256,9 @@ pub(crate) async fn handle_tree(
     State(state): State<Arc<Mutex<PreviewServerState>>>,
     AxumPath((_owner, _repo, rest)): AxumPath<(String, String, String)>,
 ) -> impl IntoResponse {
-    let (repo_root, url_ctx) = {
+    let (repo_root, url_ctx, version) = {
         let st = state.lock().unwrap();
-        (st.repo_root.clone(), st.url_ctx.clone())
+        (st.repo_root.clone(), st.url_ctx.clone(), st.version)
     };
     let path = split_branch_and_path(&rest, &url_ctx.branch);
 
@@ -1258,7 +1271,7 @@ pub(crate) async fn handle_tree(
 
     maybe_emit_detached_event(&state, &path);
 
-    handle_directory_listing(&full_path, &path, &repo_root, &url_ctx).await
+    handle_directory_listing(&full_path, &path, &repo_root, &url_ctx, version).await
 }
 
 /// Handle blob view (file content) `/{owner}/{repo}/blob/{branch}/{path}`
@@ -1267,7 +1280,7 @@ pub(crate) async fn handle_blob(
     AxumPath((_owner, _repo, rest)): AxumPath<(String, String, String)>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let (repo_root, url_ctx, path, buffer_content) = {
+    let (repo_root, url_ctx, path, buffer_content, version) = {
         let st = state.lock().unwrap();
         let path = split_branch_and_path(&rest, &st.url_ctx.branch);
         let bc = if st
@@ -1280,7 +1293,13 @@ pub(crate) async fn handle_blob(
         } else {
             None
         };
-        (st.repo_root.clone(), st.url_ctx.clone(), path, bc)
+        (
+            st.repo_root.clone(),
+            st.url_ctx.clone(),
+            path,
+            bc,
+            st.version,
+        )
     };
 
     let full_path = repo_root.join(&path);
@@ -1301,6 +1320,7 @@ pub(crate) async fn handle_blob(
         &url_ctx,
         buffer_content.as_deref(),
         plain,
+        version,
     )
     .await
 }
@@ -1413,6 +1433,7 @@ pub(crate) async fn handle_directory_listing(
     display_path: &str,
     repo_root: &Path,
     ctx: &RepoUrlContext,
+    current_version: u64,
 ) -> Html<String> {
     let mut entries = match tokio::fs::read_dir(path).await {
         Ok(entries) => entries,
@@ -1556,7 +1577,7 @@ pub(crate) async fn handle_directory_listing(
         )
         .replace("{{SYNTAX_STYLES}}", render_diff_styles())
         .replace("{{MERMAID_SCRIPT}}", &mermaid_script_block(&content))
-        .replace("{{LIVE_SYNC_SCRIPT}}", LIVE_SYNC_SCRIPT);
+        .replace("{{LIVE_SYNC_SCRIPT}}", &live_sync_script(current_version));
 
     Html(html)
 }
@@ -1570,6 +1591,7 @@ pub(crate) async fn handle_file_display(
     ctx: &RepoUrlContext,
     buffer_content: Option<&str>,
     plain: bool,
+    current_version: u64,
 ) -> Html<String> {
     let filename = path
         .file_name()
@@ -1665,7 +1687,7 @@ pub(crate) async fn handle_file_display(
             "{{MERMAID_SCRIPT}}",
             &mermaid_script_block(&rendered_content),
         )
-        .replace("{{LIVE_SYNC_SCRIPT}}", LIVE_SYNC_SCRIPT);
+        .replace("{{LIVE_SYNC_SCRIPT}}", &live_sync_script(current_version));
 
     Html(html)
 }

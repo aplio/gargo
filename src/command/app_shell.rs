@@ -82,11 +82,12 @@ pub(crate) fn app_rail_html(
 }
 
 /// The inline "open actions" pill cluster for a file row / toolbar: open the
-/// file in the current tab, a new tab, on GitHub (current branch), on GitHub at
-/// the default branch, and in the browser editor. Shared across every
-/// server-rendered file view (code explorer, blob, split). The JS-rendered diff
-/// rows (status / compare / commit) build the same markup via
-/// `window.gargoOpenActions` so classes, keybindings and CSS stay in one place.
+/// file in a new tab, on GitHub (current branch), on GitHub at the default
+/// branch, and in the browser editor. (Opening in the current tab stays on the
+/// row's own file link.) Shared across every server-rendered file view (code
+/// explorer, blob, split). The JS-rendered diff rows (status / compare / commit)
+/// build the same markup via `window.gargoOpenActions` so classes, keybindings
+/// and CSS stay in one place.
 ///
 /// `rel_path` is a repo-relative path; paths are HTML-escaped for attributes
 /// (matching the un-percent-encoded convention of `blob_url` / `tree_url`).
@@ -102,7 +103,6 @@ pub(crate) fn open_actions_html(
     let editor = format!("/editor/{}", html_escape(rel_path));
     let mut out = String::with_capacity(512);
     out.push_str(r#"<span class="open-actions">"#);
-    out.push_str(&pill("oa-tab", &blob, false, "Open in current tab", "Tab"));
     out.push_str(&pill("oa-new", &blob, true, "Open in new tab", "New"));
     if let Some(base) = github_base {
         let gh = format!(
@@ -212,9 +212,9 @@ mod tests {
             Some("https://github.com/aplio/gargo"),
             Some("main"),
         );
-        // Current / new tab both point at the gargo blob view.
-        assert!(html.contains(r#"class="oa oa-tab" href="/aplio/gargo/blob/master/src/main.rs""#));
+        // New tab points at the gargo blob view (current tab is the row's own link).
         assert!(html.contains(r#"class="oa oa-new" href="/aplio/gargo/blob/master/src/main.rs""#));
+        assert!(!html.contains("oa-tab"));
         // GitHub at current branch and at the default branch.
         assert!(html.contains(r#"href="https://github.com/aplio/gargo/blob/master/src/main.rs""#));
         assert!(html.contains(r#"href="https://github.com/aplio/gargo/blob/main/src/main.rs""#));
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn open_actions_hide_github_pills_without_remote() {
         let html = open_actions_html(&ctx(), "src/main.rs", None, None);
-        assert!(html.contains("oa-tab"));
+        assert!(html.contains("oa-new"));
         assert!(html.contains("oa-editor"));
         assert!(!html.contains("oa-gh"));
         assert!(!html.contains("Open on GitHub"));

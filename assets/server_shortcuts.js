@@ -32,10 +32,11 @@
             + ' title="' + escapeHtml(title) + '">' + escapeHtml(label) + "</a>";
     }
 
-    // Pills to open a file: current tab + new tab (gargo file view), GitHub at a
-    // ref (commit sha on the commit page, else the current branch), GitHub at the
-    // default branch, and the gargo editor. `opts.path` is repo-relative;
-    // `opts.ghRef` overrides the GitHub ref (the commit page passes its sha).
+    // Pills to open a file: new tab (gargo file view), GitHub at a ref (commit
+    // sha on the commit page, else the current branch), GitHub at the default
+    // branch, and the gargo editor. Current-tab open stays on the row's own file
+    // link. `opts.path` is repo-relative; `opts.ghRef` overrides the GitHub ref
+    // (the commit page passes its sha).
     window.gargoOpenActionsHtml = function (opts) {
         opts = opts || {};
         const ctx = window.__GARGO_REPO_CTX__ || {};
@@ -47,7 +48,6 @@
         const ghBase = ctx.githubBase;
         const ghRef = encodePath(opts.ghRef || ctx.branch || "");
         let out = '<span class="open-actions">';
-        out += pill("oa-tab", blob, false, "Open in current tab", "Tab");
         out += pill("oa-new", blob, true, "Open in new tab", "New");
         if (ghBase) {
             out += pill("oa-gh", ghBase + "/blob/" + ghRef + "/" + enc, true, "Open on GitHub", "GH");
@@ -71,7 +71,7 @@
         return el;
     };
 
-    // Pills to open a commit (not a file): current/new tab → commit detail page,
+    // Pills to open a commit (not a file): new tab → commit detail page,
     // GitHub → the commit on the remote. No editor / default-branch targets,
     // since a commit isn't a file. `.oa-*` classes match so j/k + t/r reuse them.
     window.gargoOpenCommitActionsHtml = function (opts) {
@@ -81,7 +81,6 @@
         const ghBase = ctx.githubBase;
         const full = opts.fullHash || "";
         let out = '<span class="open-actions">';
-        out += pill("oa-tab", detail, false, "Open commit", "Tab");
         out += pill("oa-new", detail, true, "Open commit in new tab", "New");
         if (ghBase && full) {
             out += pill("oa-gh", ghBase + "/commit/" + encodeURIComponent(full),
@@ -348,7 +347,6 @@
     // Shared "open the focused file" rows, appended to every file-diff page so
     // the pill keybindings are documented in one place.
     const OPEN_FILE_ROWS = [
-        ["Enter", "Open focused file in current tab"],
         ["t", "Open focused file in a new tab"],
         ["r", "Open focused file on GitHub"],
         ["Shift+R", "Open focused file on GitHub (default branch)"],
@@ -580,15 +578,22 @@
             }
         }
 
+        // Enter opens the focused entry in the current tab via its own row link
+        // (file name on the tree, commit subject on the list). The diff pages
+        // have no single "primary" link, so Enter is a no-op there.
+        if (PAGE === "code-tree" || PAGE === "commits") {
+            if (key === "Enter") {
+                if (!focusedItem()) return;
+                ev.preventDefault();
+                activateFocused();
+                return;
+            }
+        }
+
         // Open-target pills on the focused item. Works on every item-based page
         // (status / compare / commit / code tree / commits); each key clicks the
         // matching .oa-* pill, no-op when that pill isn't present.
         if (ITEM_SELECTORS[PAGE]) {
-            if (key === "Enter") {
-                ev.preventDefault();
-                if (!clickPill(".oa-tab")) activateFocused();
-                return;
-            }
             if (key === "t") {
                 ev.preventDefault();
                 clickPill(".oa-new");

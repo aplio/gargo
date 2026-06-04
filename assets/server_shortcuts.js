@@ -638,6 +638,17 @@
 
     window.addEventListener("keydown", onKey);
 
+    // The top-right "?" rail button opens the same overlay as the `?` key.
+    function wireHelpButton() {
+        const btn = document.querySelector(".app-rail-help");
+        if (btn) btn.addEventListener("click", openOverlay);
+    }
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", wireHelpButton);
+    } else {
+        wireHelpButton();
+    }
+
     // Publish the sticky header's height as a CSS variable so sticky sidebars
     // (status / compare) can offset themselves below it instead of being
     // hidden underneath. Re-measured on resize since the rail can wrap.

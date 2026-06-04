@@ -271,9 +271,11 @@ impl WebEditor {
         };
 
         let Some((start, primary_end)) = primary_range else {
-            // No selection yet → select the word under the primary caret.
+            // No selection yet → select the word under the primary caret. Uses the
+            // caret-aware variant so a caret just past a word (`word|`, `word| `,
+            // `word|\n`) still selects that word.
             let pos = primary_cursor(self.editor.active_buffer());
-            self.editor.active_buffer_mut().select_word_at(pos);
+            self.editor.active_buffer_mut().select_word_at_caret(pos);
             self.editor.mark_highlights_dirty();
             return;
         };

@@ -161,6 +161,17 @@ impl Document {
         }
     }
 
+    /// Select the word at a caret position (gap between chars). Unlike
+    /// [`Self::select_word_at`], a caret just past a word (`word|`, `word| `,
+    /// `word|\n`) still selects that word. Used by Cmd+D word selection.
+    /// Collapses to a single cursor.
+    pub fn select_word_at_caret(&mut self, pos: usize) {
+        if let Some((start, end)) = super::expand::word_range_at_caret(&self.rope, pos) {
+            self.cursors = vec![end];
+            self.selections = vec![Some(Selection::tail_on_forward(start, end))];
+        }
+    }
+
     /// Select the current line as a linewise span:
     /// includes trailing newline when present. Operates on every cursor.
     pub fn select_line(&mut self) {

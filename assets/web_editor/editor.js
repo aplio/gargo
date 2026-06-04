@@ -76,6 +76,9 @@
       let gutterWidth = 50;
       let lastVersion = -1;
       let composing = false;
+      // The most recent render model, kept so IME composition can splice the
+      // composing (pre-edit) text into the caret's row inline (see paintPreedit).
+      let lastModel = null;
       let maxCols = 0; // widest row seen so far, for horizontal scroll sizing
       // Syntax highlight: spans per line (char offsets into the expanded row
       // text), computed server-side (tree-sitter) and refreshed on a debounce.
@@ -204,6 +207,7 @@
         setGutterWidth(total);
 
         const model = editor.render(top, visible);
+        lastModel = model;
         renderRows(model);
         renderSelections(model);
         renderMatches(model);
@@ -620,6 +624,7 @@
         els.sizer.style.height = "";
         els.sizer.style.width = "";
         const model = editor.render(0, total);
+        lastModel = model;
         const v = editor.version();
         if (v !== wrapBuiltVersion || wrapRowsDirty) {
           buildWrapRows(model);
@@ -1097,8 +1102,14 @@
           let ext;
           if (e.metaKey) ext = back ? ["a", true, true, false] : ["e", true, true, false];
           else ext = back ? ["ArrowLeft", true, true, false] : ["ArrowRight", true, true, false];
-          if (!editor.has_selection()) editor.key(...ext); // extend; no-op replaces nothing
-          editor.delete_selection();
+          if (!editor.has_selection()) editor.key(...ext); // extend; no-op selects nothing
+          if (editor.has_selection()) {
+            editor.delete_selection();
+          } else {
+            // Empty line (caret already at line start): a plain delete removes
+            // the adjacent newline, joining with the previous/next line.
+            editor.key(name, false, false, false);
+          }
           els.ime.value = "";
           afterEdit();
           return;
@@ -1141,7 +1152,86 @@
       }
 
       function onCompositionUpdate(e) {
-        els.preedit.textContent = e.data || "";
+        paintPreedit(e.data || "");
+      }
+
+      // Inline IME pre-edit: splice the composing `text` into the caret's row at
+      // the caret column so the caret and the trailing text on that line follow
+      // the composition (instead of a static overlay that stays at the start
+      // position and overlaps the following text). The row's syntax highlight is
+      // dropped for the duration of the composition; the next full render (on
+      // commit/cancel) restores it. No `text` → restore the row to its committed
+      // state. Falls back to a full render when the caret row isn't mounted.
+      function paintPreedit(text) {
+        if (!editor || !lastModel) return;
+        if (!text) {
+          clearPreedit();
+          return;
+        }
+        const cursors = lastModel.cursors || [];
+        const c = cursors.find((x) => x.primary) || cursors[0];
+        if (!c) {
+          clearPreedit();
+          return;
+        }
+        const span = '<span class="preedit-inline">' + escapeHtml(text) + "</span>";
+        if (renderedWrap) {
+          const e = wrapLineEls.get(c.row);
+          if (!e) {
+            clearPreedit();
+            return;
+          }
+          const rowText = (lastModel.rows[c.row] || "");
+          const chars = Array.from(rowText);
+          const before = chars.slice(0, c.char_col).join("");
+          const after = chars.slice(c.char_col).join("");
+          e.wrow.innerHTML = escapeHtml(before) + span + escapeHtml(after);
+          const base = els.sizer.getBoundingClientRect();
+          const r = caretRectInRow(e.wrow, c.char_col + Array.from(text).length);
+          const x = r.left - base.left;
+          const y = r.top - base.top;
+          movePrimaryCaret(x, y);
+          els.ime.style.left = x + "px";
+          els.ime.style.top = y + "px";
+        } else {
+          const entry = mountedRows.get(c.row);
+          if (!entry) {
+            clearPreedit();
+            return;
+          }
+          const rowText = (lastModel.rows[c.row - lastModel.top] || "");
+          const chars = Array.from(rowText);
+          const before = chars.slice(0, c.char_col).join("");
+          const after = chars.slice(c.char_col).join("");
+          entry.row.innerHTML = escapeHtml(before) + span + escapeHtml(after);
+          const headChars = Array.from(before + text);
+          const x = gutterWidth + prefixPx(before + text, headChars.length);
+          const y = c.row * LINE_HEIGHT;
+          movePrimaryCaret(x, y);
+          els.ime.style.left = x + "px";
+          els.ime.style.top = y + "px";
+        }
+      }
+
+      // Move the primary caret element to a content-pixel position (used while an
+      // inline IME pre-edit is shown, since no full render runs during composition).
+      function movePrimaryCaret(x, y) {
+        const cursors = (lastModel && lastModel.cursors) || [];
+        let idx = cursors.findIndex((x2) => x2.primary);
+        if (idx < 0) idx = 0;
+        const el = caretPool[idx];
+        if (el) {
+          el.style.display = "block";
+          el.style.left = x + "px";
+          el.style.top = y + "px";
+        }
+      }
+
+      // Drop any inline pre-edit and restore the committed view. In wrap mode the
+      // row is only rebuilt when the version changes, so force a rebuild.
+      function clearPreedit() {
+        if (renderedWrap) wrapRowsDirty = true;
+        render();
       }
 
       // Insert text, first replacing the active selection if any (VSCode-style).
@@ -1156,7 +1246,8 @@
         els.preedit.textContent = "";
         const text = e.data || "";
         els.ime.value = "";
-        if (text) insertReplacing(text);
+        if (text) insertReplacing(text); // afterEdit() re-renders, clearing pre-edit
+        else clearPreedit(); // cancelled composition: restore the committed row
       }
 
       // Fallback for IMEs/dead-keys that commit via `input` without composition.
@@ -1307,6 +1398,72 @@
         { label: "Copy Relative Path", hint: "", run: () => copyText(filePath) },
         { label: "Reveal in Finder", hint: "", run: () => { if (filePath) revealInFinder(filePath); } },
       ];
+
+      // ---- keyboard-shortcuts help overlay ---------------------------------
+      //
+      // The editor page doesn't load server_shortcuts.js (which owns the `?`
+      // overlay on the other pages), so it builds its own overlay reusing the
+      // shared .gargo-help-* styles from server_shared.css. Opened by the
+      // top-right "?" rail button; closed by Esc, the × button, or a backdrop click.
+      const HELP_SECTIONS = [
+        { heading: "Files & Search", rows: [
+          ["⌘P", "Go to file"],
+          ["⌘F", "Find"],
+          ["⌥⌘F", "Find and replace"],
+          ["⇧⌘F", "Search in project"],
+          ["⇧⌘O", "Go to symbol in file"],
+          ["⇧⌘P", "Command palette"],
+        ]},
+        { heading: "Editing", rows: [
+          ["⌘S", "Save"],
+          ["⌘Z / ⇧⌘Z", "Undo / redo"],
+          ["⌘D", "Select next occurrence"],
+          ["⇧⌘L", "Select all occurrences"],
+          ["⇧⌘K", "Delete line"],
+          ["⌘⌫ / ⌥⌫", "Delete to line start / previous word"],
+          ["⌥Z", "Toggle word wrap"],
+        ]},
+        { heading: "Movement (emacs)", rows: [
+          ["Ctrl+f / Ctrl+b", "Forward / back one char"],
+          ["Ctrl+n / Ctrl+p", "Next / previous line"],
+          ["Ctrl+a / Ctrl+e", "Line start / end"],
+        ]},
+        { heading: "Links", rows: [
+          ["⌘/Ctrl + Click", "Open link under the cursor"],
+        ]},
+      ];
+
+      let helpOverlayEl = null;
+
+      function buildHelpOverlay() {
+        const wrap = document.createElement("div");
+        wrap.className = "gargo-help-overlay";
+        wrap.hidden = true;
+        const sections = HELP_SECTIONS.map((sec) => {
+          const rows = sec.rows.map(([keys, desc]) =>
+            `<tr><td class="gargo-help-keys"><kbd>${escapeHtml(keys)}</kbd></td><td>${escapeHtml(desc)}</td></tr>`
+          ).join("");
+          return `<section><h3>${escapeHtml(sec.heading)}</h3><table>${rows}</table></section>`;
+        }).join("");
+        wrap.innerHTML = '<div class="gargo-help-panel" role="dialog" aria-label="Keyboard shortcuts">'
+          + '<div class="gargo-help-header"><span>Keyboard shortcuts</span>'
+          + '<button type="button" class="gargo-help-close" aria-label="Close">×</button></div>'
+          + '<div class="gargo-help-body">' + sections + '</div></div>';
+        wrap.addEventListener("click", (ev) => { if (ev.target === wrap) closeHelp(); });
+        wrap.querySelector(".gargo-help-close").addEventListener("click", closeHelp);
+        document.body.appendChild(wrap);
+        return wrap;
+      }
+
+      function helpOpen() { return helpOverlayEl && !helpOverlayEl.hidden; }
+      function openHelp() {
+        if (!helpOverlayEl) helpOverlayEl = buildHelpOverlay();
+        helpOverlayEl.hidden = false;
+      }
+      function closeHelp() {
+        if (helpOverlayEl) helpOverlayEl.hidden = true;
+        els.ime.focus();
+      }
 
       // Fetch the repository file list once; shared by the Cmd+P picker and the
       // sidebar file tree.
@@ -2999,17 +3156,23 @@
         window.addEventListener("mousemove", onMouseMove);
         window.addEventListener("mouseup", onMouseUp);
 
-        // Underline + pointer on links while Cmd/Ctrl is held (Cmd/Ctrl+click
-        // opens them). Clearing on blur avoids a stuck "link mode" after Cmd+Tab.
-        const setLinkMod = (on) => els.scroller.classList.toggle("link-mod", on);
-        window.addEventListener("keydown", (e) => {
-          if (e.key === "Meta" || e.key === "Control") setLinkMod(true);
-        });
-        window.addEventListener("keyup", (e) => {
-          if (e.key === "Meta" || e.key === "Control") setLinkMod(false);
-        });
-        window.addEventListener("blur", () => setLinkMod(false));
+        // Links underline + show a pointer on hover only (see .elink:hover in
+        // editor.css); Cmd/Ctrl+click opens them (see onMouseDown). A previous
+        // Cmd/Ctrl-held toggle flickered while modifier keys were pressed.
         window.addEventListener("resize", () => render());
+
+        // Top-right "?" rail button opens the shortcuts overlay. Esc closes it
+        // (capture phase so it runs before the ime keydown handler, which
+        // otherwise swallows Escape to stay in insert mode).
+        const helpBtn = document.querySelector(".app-rail-help");
+        if (helpBtn) helpBtn.addEventListener("click", openHelp);
+        window.addEventListener("keydown", (e) => {
+          if (helpOpen() && e.key === "Escape") {
+            e.preventDefault();
+            e.stopPropagation();
+            closeHelp();
+          }
+        }, true);
         els.pickerInput.addEventListener("input", (e) => updatePicker(e.target.value));
         els.pickerInput.addEventListener("keydown", onPickerKeyDown);
         els.gsearchInput.addEventListener("input", (e) => runGlobalSearch(e.target.value));

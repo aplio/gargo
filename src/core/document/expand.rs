@@ -45,6 +45,22 @@ pub fn word_range_at(rope: &Rope, pos: usize) -> Option<(usize, usize)> {
     }
 }
 
+/// Like [`word_range_at`], but for a caret position (a gap between chars) rather
+/// than a char index. When the caret sits just past a word — the char under it is
+/// a boundary (whitespace/newline/EOF) and the char before it is not whitespace —
+/// it steps one char left so `word|`, `word| `, and `word|\n` all select `word`.
+/// Anywhere else it behaves exactly like [`word_range_at`].
+pub fn word_range_at_caret(rope: &Rope, pos: usize) -> Option<(usize, usize)> {
+    let len = rope.len_chars();
+    let at_boundary = pos >= len || rope.char(pos).is_whitespace();
+    let adj = if pos > 0 && at_boundary && !rope.char(pos - 1).is_whitespace() {
+        pos - 1
+    } else {
+        pos
+    };
+    word_range_at(rope, adj)
+}
+
 /// Range of the line containing `pos`, including the trailing newline if any.
 pub fn line_range_at(rope: &Rope, pos: usize) -> (usize, usize) {
     let total_lines = rope.len_lines();
@@ -122,6 +138,24 @@ mod tests {
     #[test]
     fn word_range_punctuation() {
         assert_eq!(word_range_at(&r("foo::bar"), 3), Some((3, 5)));
+    }
+
+    #[test]
+    fn word_range_at_caret_end_of_word() {
+        // Caret just past `word` (before a space) selects `word`.
+        assert_eq!(word_range_at_caret(&r("word hello"), 4), Some((0, 4)));
+        // Caret just past `word` (before a newline) selects `word`.
+        assert_eq!(word_range_at_caret(&r("word\nx"), 4), Some((0, 4)));
+        // Caret at the very end of the buffer selects the final word.
+        assert_eq!(word_range_at_caret(&r("word"), 4), Some((0, 4)));
+    }
+
+    #[test]
+    fn word_range_at_caret_inside_word_unchanged() {
+        // Caret inside a word still expands the whole word (no left step).
+        assert_eq!(word_range_at_caret(&r("hello world"), 2), Some((0, 5)));
+        // Caret at a word's start selects that word, not the preceding space.
+        assert_eq!(word_range_at_caret(&r("a bc"), 2), Some((2, 4)));
     }
 
     #[test]

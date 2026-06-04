@@ -77,6 +77,12 @@ pub(crate) fn app_rail_html(
         ));
     }
 
+    // Top-right help button: opens the keyboard-shortcuts overlay. Wired by
+    // server_shortcuts.js on standard pages and by editor.js on the editor page.
+    out.push_str(
+        r#"<button type="button" class="app-rail-help" title="Keyboard shortcuts" aria-label="Keyboard shortcuts">?</button>"#,
+    );
+
     out.push_str("</aside>");
     out
 }

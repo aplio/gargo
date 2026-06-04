@@ -66,10 +66,11 @@
       .row { left: var(--gutter-w, 50px); }
 
       /* Clickable links (markdown [..](..) or bare URLs), detected per row. They
-         look like normal text until Cmd/Ctrl is held, then they underline and
-         show a pointer — Cmd/Ctrl+click opens them (see onMouseDown). */
+         look like normal text until hovered, then they underline and show a
+         pointer — Cmd/Ctrl+click opens them (see onMouseDown). Hover (no modifier
+         toggle) avoids the flicker the old Cmd/Ctrl-held class caused. */
       .elink { cursor: inherit; }
-      #scroller.link-mod .elink {
+      .elink:hover {
         cursor: pointer;
         text-decoration: underline;
         text-decoration-color: var(--accent, #4daafc);
@@ -176,6 +177,12 @@
         text-decoration: underline;
         color: var(--fg);
         z-index: 4;
+      }
+      /* Inline IME pre-edit: spliced into the caret row during composition so the
+         caret + trailing text follow it (see paintPreedit in editor.js). */
+      .preedit-inline {
+        text-decoration: underline;
+        text-decoration-skip-ink: none;
       }
       #error {
         position: fixed;

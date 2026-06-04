@@ -55,8 +55,11 @@ body {
     background: #f6f8fa;
 }
 .md-toggle-btn {
-    padding: 4px 10px;
-    font-size: 12px;
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 10px;
+    font-size: 11px;
+    line-height: 18px;
     color: #24292f;
     text-decoration: none;
     background: transparent;

@@ -45,43 +45,52 @@ body {
     .sidebar { position: static; width: auto; max-height: none; }
 }
 
-/* Preview / Code toggle on the blob view. Rendered as two pills sized to match
-   the Copy / open-action buttons beside them; the active mode is a GitHub-style
-   white highlight with dark text. Scoped to `.file-panel` so these win (by
-   specificity) over the segmented `.md-toggle-btn` rules that render_diff_styles()
-   injects inline on the same page — including its `.md-view-toggle` bottom margin,
-   which otherwise pushes the toggle out of vertical alignment with the pills. */
+/* Preview / Code toggle on the blob view: a compact segmented control — a grey
+   track (matching the action-pill palette) holding two joined segments, the
+   active one lifted as a white thumb with dark text, GitHub-style. Same 22px
+   height as the Copy / open-action pills beside it. Scoped to `.file-panel` so
+   these win (by specificity) over the inline `.md-toggle-btn` rules that
+   render_diff_styles() injects on the same page — including its `.md-view-toggle`
+   bottom margin, which otherwise breaks vertical alignment with the pills. */
 .file-panel .md-view-toggle {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 0;
     margin: 0;
+    padding: 1px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #f6f8fa;
 }
 .file-panel .md-toggle-btn {
     display: inline-flex;
     align-items: center;
-    padding: 1px 8px;
+    padding: 0 8px;
     font-size: 11px;
     line-height: 18px;
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
-    background: #f6f8fa;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
     color: #24292f;
     font-weight: 400;
     text-decoration: none;
     white-space: nowrap;
     cursor: pointer;
 }
-/* Undo render_diff_styles()'s segmented-control corners: each pill is fully
-   rounded with its own left border (the inline `:first-child`/`:last-child`
-   rules tie on specificity, so these need the extra `.file-panel` class). */
+/* Override render_diff_styles()'s segmented end-caps so both segments share the
+   same inner radius and carry no per-segment border. */
 .file-panel .md-toggle-btn:first-child,
 .file-panel .md-toggle-btn:last-child {
-    border-radius: 6px;
-    border-left: 1px solid #d0d7de;
+    border-radius: 4px;
+    border-left: 0;
 }
-.file-panel .md-toggle-btn:hover { background: #eaeef2; color: #24292f; }
-.file-panel .md-toggle-btn.active { background: #ffffff; border-color: #d0d7de; color: #24292f; font-weight: 600; }
+.file-panel .md-toggle-btn:hover { background: rgba(31, 35, 40, 0.06); color: #24292f; }
+.file-panel .md-toggle-btn.active {
+    background: #ffffff;
+    color: #24292f;
+    font-weight: 600;
+    box-shadow: 0 1px 2px rgba(31, 35, 40, 0.12);
+}
 
 /* "View on GitHub" pill on the blob page */
 .view-on-github-btn {

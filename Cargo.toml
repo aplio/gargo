@@ -86,3 +86,8 @@ harness = false
 name = "bench-long-line"
 path = "benches/long_line.rs"
 harness = false
+
+[[bench]]
+name = "bench-server"
+path = "benches/server.rs"
+harness = false

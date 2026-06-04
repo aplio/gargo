@@ -360,6 +360,7 @@
             ["Shift+O", "Open focused file in split view (new tab)"],
             ["u", "Stage / unstage focused file"],
             ["v", "Toggle Viewed"],
+            ["Shift+C", "Go to the Commit page"],
             ["g g / G", "Jump to first / last file"],
         ].concat(OPEN_FILE_ROWS) }],
         "compare": [{ heading: "Diff (Compare)", rows: [
@@ -730,6 +731,18 @@
             ev.preventDefault();
             moveFocus(-1);
             return;
+        }
+
+        // `C` (Shift+C) jumps from the Status page to the Commit page. Clicks the
+        // existing "Commit…" link so the /commit URL stays server-side; harmless
+        // no-op on pages without that link.
+        if (key === "C" && PAGE === "status") {
+            const link = document.getElementById("commit-link");
+            if (link) {
+                ev.preventDefault();
+                link.click();
+                return;
+            }
         }
 
         if (PAGE === "status" || PAGE === "compare" || PAGE === "commit-detail") {

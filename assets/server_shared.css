@@ -45,30 +45,41 @@ body {
     .sidebar { position: static; width: auto; max-height: none; }
 }
 
-/* Preview / Code toggle on the blob page (and any future view-mode toggles) */
-.md-view-toggle {
-    display: inline-flex;
-    gap: 0;
-    border: 1px solid #d0d7de;
-    border-radius: 6px;
-    overflow: hidden;
-    background: #f6f8fa;
-}
-.md-toggle-btn {
+/* Preview / Code toggle on the blob view. Rendered as two pills sized and
+   styled to match the Copy / open-action buttons beside them, with the active
+   mode marked by the same blue accent the pills use on hover. Scoped to
+   `.file-panel` so these win (by specificity) over the segmented `.md-toggle-btn`
+   rules that render_diff_styles() injects inline on the same page. */
+.file-panel .md-view-toggle {
     display: inline-flex;
     align-items: center;
-    padding: 1px 10px;
+    gap: 4px;
+}
+.file-panel .md-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 8px;
     font-size: 11px;
     line-height: 18px;
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    background: #f6f8fa;
     color: #24292f;
+    font-weight: 400;
     text-decoration: none;
-    background: transparent;
-    border: 0;
+    white-space: nowrap;
     cursor: pointer;
 }
-.md-toggle-btn + .md-toggle-btn { border-left: 1px solid #d0d7de; }
-.md-toggle-btn:hover { background: #eaeef2; }
-.md-toggle-btn.active { background: #ffffff; font-weight: 600; }
+/* Undo render_diff_styles()'s segmented-control corners: each pill is fully
+   rounded with its own left border (the inline `:first-child`/`:last-child`
+   rules tie on specificity, so these need the extra `.file-panel` class). */
+.file-panel .md-toggle-btn:first-child,
+.file-panel .md-toggle-btn:last-child {
+    border-radius: 6px;
+    border-left: 1px solid #d0d7de;
+}
+.file-panel .md-toggle-btn:hover { background: #eaeef2; border-color: #0969da; color: #0969da; }
+.file-panel .md-toggle-btn.active { background: #ffffff; border-color: #0969da; color: #0969da; font-weight: 600; }
 
 /* "View on GitHub" pill on the blob page */
 .view-on-github-btn {
@@ -109,16 +120,37 @@ body {
     white-space: nowrap;
 }
 .open-actions .oa:hover { background: #eaeef2; border-color: #0969da; color: #0969da; }
-.file-toolbar .open-actions { margin-left: auto; }
 
-/* Toolbar row above a file's body, hosting toggles and external links */
-.file-toolbar {
+/* GitHub-style file panel on the blob view: a header bar (view-mode tabs +
+   action pills) fused onto the top of the file body. The panel owns the outer
+   border/radius; the body inside drops its own so the two read as one card.
+   Mirrors the `.gr-file-header` look used on the diff/status pages. */
+.file-panel {
+    border: 1px solid #d0d7de;
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 16px;
+}
+.file-header {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 8px;
+    padding: 8px 12px;
+    background: #f6f8fa;
+    border-bottom: 1px solid #d0d7de;
 }
-.file-toolbar .view-on-github-btn { margin-left: auto; }
+.file-header .file-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+.file-panel .markdown-body,
+.file-panel .file-content,
+.file-panel .error {
+    border: 0;
+    border-radius: 0;
+}
 
 /* "Copy file contents" button on the blob view (styled like the .oa pills). */
 .copy-file-btn {
@@ -437,8 +469,9 @@ body {
 .gargo-finder-list li.sel { background: #ddf4ff; }
 .gargo-finder-list li b { color: #0969da; font-weight: 600; }
 
-/* Row holding the breadcrumb on the left and the file-toolbar (Preview/Code)
- * on the right so they share a single vertical band above the file body. */
+/* Row holding the file/path breadcrumb above the file body. The view-mode
+ * toggle and action pills now live in the file panel's header, so this row
+ * carries just the breadcrumb. */
 .breadcrumb-row {
     display: flex;
     align-items: center;
@@ -449,10 +482,6 @@ body {
     margin-bottom: 0;
     flex: 1 1 auto;
     min-width: 0;
-}
-.breadcrumb-row .file-toolbar {
-    margin-bottom: 0;
-    flex-shrink: 0;
 }
 
 /* Branch label that sits at the start of the code-page breadcrumb row so

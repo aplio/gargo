@@ -1160,9 +1160,9 @@ const FILE_TEMPLATE: &str = r#"<!DOCTYPE html>
     <div class="app-shell">
         {{APP_RAIL}}
         <main class="app-main">
-            <div class="breadcrumb-row">{{BREADCRUMB}}{{TOOLBAR}}</div>
+            <div class="breadcrumb-row">{{BREADCRUMB}}</div>
             {{COMMIT_INFO}}
-            {{CONTENT}}
+            <div class="file-panel">{{TOOLBAR}}{{CONTENT}}</div>
         </main>
     </div>
     {{MERMAID_SCRIPT}}
@@ -1650,17 +1650,23 @@ pub(crate) async fn handle_file_display(
         r#"<button type="button" class="copy-file-btn" title="Copy file contents (y)" data-path="{path}">⧉ Copy</button>"#,
         path = html_escape(display_path),
     );
-    let toolbar = if is_markdown {
+    // GitHub-style file header: view-mode tabs (markdown only) on the left, the
+    // copy/open-actions pills pushed to the right. It fuses onto the top of the
+    // file body below via the `.file-panel` wrapper in the template.
+    let view_toggle = if is_markdown {
         let blob = blob_url(ctx, display_path);
         format!(
-            r#"<div class="file-toolbar"><div class="md-view-toggle"><a class="md-toggle-btn{preview}" href="{blob}">Preview</a><a class="md-toggle-btn{code}" href="{blob}?plain=1">Code</a></div>{copy_btn}{editor_btn}</div>"#,
+            r#"<div class="md-view-toggle"><a class="md-toggle-btn{preview}" href="{blob}">Preview</a><a class="md-toggle-btn{code}" href="{blob}?plain=1">Code</a></div>"#,
             preview = if plain { "" } else { " active" },
             code = if plain { " active" } else { "" },
             blob = html_escape(&blob),
         )
     } else {
-        format!(r#"<div class="file-toolbar">{copy_btn}{editor_btn}</div>"#)
+        String::new()
     };
+    let toolbar = format!(
+        r#"<div class="file-header">{view_toggle}<div class="file-actions">{copy_btn}{editor_btn}</div></div>"#,
+    );
 
     let rendered_content = match text {
         None => r#"<div class="error">Binary file - cannot display</div>"#.to_string(),

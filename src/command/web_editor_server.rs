@@ -534,6 +534,53 @@ pub(crate) async fn handle_api_save(
     }
 }
 
+#[derive(Serialize)]
+struct LastFileResponse {
+    /// Repo-relative path of the last file opened in this repo, or `null` when
+    /// nothing is recorded yet or the recorded file no longer exists.
+    path: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct LastFileRequest {
+    /// The file to remember, or `null` to forget the current record (used when
+    /// an auto-reopened file turns out to be gone).
+    path: Option<String>,
+}
+
+/// Return the last file opened in this repo, for a bare `/editor` to reopen.
+///
+/// The record is persisted server-side (keyed by repo root) rather than in the
+/// browser's `localStorage`, because the server binds a fresh random port on
+/// every start — and `localStorage` is per-origin, so a new port is a new
+/// origin that can't see the previous session's record. We validate the stored
+/// path still resolves inside the repo and exists before handing it back, so a
+/// deleted/renamed file degrades to "no record" instead of a broken redirect.
+pub(crate) async fn handle_api_last_file(State(state): State<Arc<GargoServerState>>) -> Response {
+    let path = read_last_file_record(&state.repo_root)
+        .filter(|rel| resolve_in_repo(&state.repo_root, rel).is_some_and(|full| full.is_file()));
+    ok_json(&LastFileResponse { path })
+}
+
+/// Record (or, with a `null` path, forget) the last file opened in this repo.
+pub(crate) async fn handle_api_last_file_set(
+    State(state): State<Arc<GargoServerState>>,
+    Json(req): Json<LastFileRequest>,
+) -> Response {
+    // Only persist a path we can resolve inside the repo; reject traversal.
+    let to_store = match req.path.as_deref() {
+        Some(rel) if !rel.is_empty() => {
+            if resolve_in_repo(&state.repo_root, rel).is_none() {
+                return bad_request("invalid path");
+            }
+            Some(rel.to_string())
+        }
+        _ => None,
+    };
+    write_last_file_record(&state.repo_root, to_store.as_deref());
+    ok_json(&LastFileResponse { path: to_store })
+}
+
 #[derive(Deserialize)]
 pub(crate) struct CreateRequest {
     path: String,
@@ -721,6 +768,48 @@ fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
+}
+
+/// Path of the shared JSON file mapping each repo root to its last-opened file.
+/// One file under the app data dir keeps the records out of the repos themselves
+/// and lets them survive server restarts (and the random port each start picks).
+fn last_files_store_path() -> PathBuf {
+    crate::config::app_data_dir().join("editor_last_files.json")
+}
+
+/// The map persisted in [`last_files_store_path`]: repo root (as a string) ->
+/// last repo-relative file path. A plain map read-modify-written in full; the
+/// editor is single-user so contention isn't a concern.
+fn load_last_files_map() -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(last_files_store_path())
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn read_last_file_record(repo_root: &Path) -> Option<String> {
+    let key = repo_root.to_string_lossy();
+    load_last_files_map().remove(key.as_ref())
+}
+
+fn write_last_file_record(repo_root: &Path, rel_path: Option<&str>) {
+    let key = repo_root.to_string_lossy().into_owned();
+    let mut map = load_last_files_map();
+    match rel_path {
+        Some(p) => {
+            map.insert(key, p.to_string());
+        }
+        None => {
+            map.remove(&key);
+        }
+    }
+    let path = last_files_store_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string(&map) {
+        let _ = std::fs::write(&path, json);
+    }
 }
 
 fn js_response(body: String) -> Response {

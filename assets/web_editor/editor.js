@@ -1678,19 +1678,40 @@
       }
 
       // Remember the last file opened in this repo so a bare /editor reopens it.
-      // Keyed by repo root because localStorage is per-origin and one host may
-      // serve several repos across sessions. Same try/catch shape as gargo_wrap.
-      function lastFileKey() {
-        return "gargo_last_file:" + (window.__GARGO_REPO_ROOT__ || "");
-      }
+      // Persisted server-side (keyed by repo root) rather than in localStorage:
+      // the server binds a fresh random port on every start, and localStorage is
+      // per-origin, so a new port would be a new origin that can't see the prior
+      // session's record. The server endpoint stores it under the data dir.
       function recordLastFile(path) {
-        try { localStorage.setItem(lastFileKey(), path); } catch (_) {}
+        try {
+          fetch("/api/last-file", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: path }),
+            keepalive: true,
+          }).catch(() => {});
+        } catch (_) {}
       }
-      function readLastFile() {
-        try { return localStorage.getItem(lastFileKey()); } catch (_) { return null; }
+      async function readLastFile() {
+        try {
+          const resp = await fetch("/api/last-file", { cache: "no-store" });
+          if (!resp.ok) return null;
+          const data = await resp.json();
+          return data && typeof data.path === "string" && data.path ? data.path : null;
+        } catch (_) {
+          return null;
+        }
       }
       function clearLastFile() {
-        try { localStorage.removeItem(lastFileKey()); } catch (_) {}
+        // Forget the record (null path) — e.g. an auto-reopened file is gone.
+        try {
+          fetch("/api/last-file", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: null }),
+            keepalive: true,
+          }).catch(() => {});
+        } catch (_) {}
       }
 
       function openFile(path) {
@@ -3307,7 +3328,7 @@
         // Opened without a file (the rail's "Editor" link): reopen the last file
         // for this repo if we have one, else jump straight to the file picker.
         if (!filePath) {
-          const last = readLastFile();
+          const last = await readLastFile();
           if (last) {
             try { sessionStorage.setItem("gargo_autoopen", "1"); } catch (_) {}
             // replace() so the bare /editor entry doesn't pollute history.

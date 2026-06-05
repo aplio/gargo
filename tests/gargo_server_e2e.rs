@@ -271,6 +271,11 @@ fn unified_gargo_server_serves_code_diffs_compare_commits_and_events() {
     );
     let commit_html = get_text_with_retry(&format!("{base_url}/aplio/gargo/commit/{first_hash}"));
     assert!(commit_html.contains("Commit"));
+    assert!(
+        commit_html.contains("position: sticky")
+            && commit_html.contains("top: var(--app-rail-height, 46px)"),
+        "expected commit file headers to stay sticky below the app rail"
+    );
     // Commit view collapses huge file diffs by default and defers fetching
     // their bodies so the browser stays light on big commits.
     assert!(

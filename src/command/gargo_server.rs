@@ -1060,8 +1060,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 .file-status.gr-status-untracked { color: #57606a; }
 
 /* Diff file cards (compatible with .gr-diff-body styles from render_diff_styles) */
-.gr-file { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; margin-bottom: 12px; overflow: hidden; scroll-margin-top: 16px; }
-.gr-file-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #f6f8fa; border-bottom: 1px solid #d0d7de; }
+.gr-file { background: #fff; border: 1px solid #d0d7de; border-radius: 6px; margin-bottom: 12px; scroll-margin-top: calc(var(--app-rail-height, 46px) + 12px); }
+.gr-file-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #f6f8fa; border-bottom: 1px solid #d0d7de; border-top-left-radius: 6px; border-top-right-radius: 6px; position: sticky; top: var(--app-rail-height, 46px); z-index: 5; }
 .gr-file-name-wrapper { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 8px; overflow: hidden; }
 .gr-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; }
 .gr-status-tag { flex-shrink: 0; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; text-transform: lowercase; }
@@ -1073,7 +1073,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 .gr-file-body { background: #fff; }
 .gr-file-body .loading, .gr-file-body .empty { padding: 12px; color: #57606a; font-size: 12px; }
 .gr-file-collapsed .gr-file-body { display: none; }
-.gr-file-collapsed .gr-file-header { border-bottom: none; }
+.gr-file-collapsed .gr-file-header { border-bottom: none; border-bottom-left-radius: 6px; border-bottom-right-radius: 6px; }
 .diff-toggle-btn { flex-shrink: 0; cursor: pointer; width: 22px; height: 22px; padding: 0; line-height: 1; border: 1px solid #d0d7de; border-radius: 4px; background: #fff; color: #57606a; font-size: 11px; }
 .diff-toggle-btn:hover { background: #eef2f7; }
 .gr-file-stats { flex-shrink: 0; display: inline-flex; gap: 8px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }

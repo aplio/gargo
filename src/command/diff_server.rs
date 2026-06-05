@@ -4155,17 +4155,24 @@ pub(crate) async fn handle_api_branches_request(
     State(state): State<Arc<DiffServerState>>,
 ) -> Response {
     let repo_root = &state.project_root;
-    let raw = match git_output_in_repo(
-        repo_root,
-        &[
-            "for-each-ref",
-            "--format=%(refname)|%(refname:short)|%(HEAD)",
-            "refs/heads/",
-            "refs/remotes/",
-        ],
-    )
-    .await
-    {
+    // The ref listing and the `origin/HEAD` probe are independent — the branch
+    // list is only consulted *after* the probe returns — so run them concurrently.
+    let (raw_res, origin_head_res) = tokio::join!(
+        git_output_in_repo(
+            repo_root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)|%(refname:short)|%(HEAD)",
+                "refs/heads/",
+                "refs/remotes/",
+            ],
+        ),
+        git_output_in_repo(
+            repo_root,
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        ),
+    );
+    let raw = match raw_res {
         Ok(output) => output,
         Err(error) => return bad_request(error),
     };
@@ -4199,7 +4206,7 @@ pub(crate) async fn handle_api_branches_request(
         branches.push(short.to_string());
     }
 
-    let default = detect_default_branch(repo_root, &branches).await;
+    let default = resolve_default_from(origin_head_res.ok(), &branches);
 
     ok_json(serde_json::json!({
         "current": current,
@@ -4209,19 +4216,16 @@ pub(crate) async fn handle_api_branches_request(
     }))
 }
 
-/// Best-effort detection of the repository's default branch.
+/// Best-effort detection of the repository's default branch from an already-fetched
+/// `origin/HEAD` symbolic-ref output (pass `None` when the probe failed).
 ///
 /// Tries `origin/HEAD` first (set by `git clone` or `git remote set-head`), then
 /// falls back to the well-known `main` / `master` names if either exists
 /// locally. Returns `None` only for repos without remote and without either
-/// conventional name.
-async fn detect_default_branch(repo_root: &Path, known: &[String]) -> Option<String> {
-    if let Ok(output) = git_output_in_repo(
-        repo_root,
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    )
-    .await
-    {
+/// conventional name. Kept as a pure function so the `symbolic-ref` spawn can run
+/// concurrently with `for-each-ref` in the caller.
+fn resolve_default_from(origin_head: Option<String>, known: &[String]) -> Option<String> {
+    if let Some(output) = origin_head {
         let trimmed = output.trim();
         if let Some(rest) = trimmed.strip_prefix("origin/")
             && !rest.is_empty()

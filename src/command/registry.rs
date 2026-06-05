@@ -251,26 +251,22 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
         label: "Copy Current Branch Name".into(),
         category: Some("Git".into()),
         action: Box::new(|ctx| {
-            let mut cmd = ProcessCommand::new("git");
-            cmd.args(["branch", "--show-current"]);
-            if let Some(path) = &ctx.editor().active_buffer().file_path {
-                let root = crate::project::find_project_root(Some(path));
-                cmd.current_dir(root);
-            }
-            let result = cmd.output();
-            match result {
-                Ok(output) => {
-                    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if branch.is_empty() {
-                        CommandEffect::Message("Not in a git repository".into())
-                    } else {
-                        match copy_to_clipboard(&branch) {
-                            Ok(()) => CommandEffect::Message(format!("Copied: {}", branch)),
-                            Err(e) => CommandEffect::Message(format!("Copy failed: {}", e)),
-                        }
-                    }
-                }
-                Err(e) => CommandEffect::Message(format!("git error: {}", e)),
+            let root = ctx
+                .editor()
+                .active_buffer()
+                .file_path
+                .as_ref()
+                .map(|path| crate::project::find_project_root(Some(path)))
+                .or_else(|| std::env::current_dir().ok());
+            let Some(root) = root else {
+                return CommandEffect::Message("Not in a git repository".into());
+            };
+            let Some(branch) = crate::command::git_backend::current_branch(&root) else {
+                return CommandEffect::Message("Not in a git repository".into());
+            };
+            match copy_to_clipboard(&branch) {
+                Ok(()) => CommandEffect::Message(format!("Copied: {}", branch)),
+                Err(e) => CommandEffect::Message(format!("Copy failed: {}", e)),
             }
         }),
     });

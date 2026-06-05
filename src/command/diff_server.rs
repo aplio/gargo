@@ -22,6 +22,7 @@ use axum::{
 use tower_http::cors::CorsLayer;
 
 use crate::command::diff_viewed::{PAGE_COMPARE, PAGE_STATUS, ViewedStore};
+use crate::command::git_backend;
 use crate::command::registry::{CommandContext, CommandEffect, CommandEntry, CommandRegistry};
 use crate::diff_render::{
     DiffFile, DiffHighlights, FileStatus, LineHighlights, LineKind, content_hash_of,
@@ -2845,15 +2846,7 @@ async fn read_full_file_at_ref(
 ) -> Result<Option<Vec<String>>, String> {
     let exists = match git_ref {
         Some(r) => {
-            let spec = format!("{}:{}", r, rel_path);
-            let mut cmd = tokio::process::Command::new("git");
-            cmd.args(["-c", "core.quotepath=off"]);
-            cmd.args(["-c", "core.optionalLocks=false"]);
-            cmd.args(["cat-file", "-e", &spec]);
-            cmd.current_dir(repo_root);
-            cmd.stdout(std::process::Stdio::null());
-            cmd.stderr(std::process::Stdio::null());
-            cmd.status().await.map(|s| s.success()).unwrap_or(false)
+            git_backend::blob_at_revspec(repo_root, &format!("{}:{}", r, rel_path)).is_some()
         }
         None => {
             let full = repo_root.join(rel_path);
@@ -2881,11 +2874,8 @@ async fn load_split_diff_file(
             load_compare_diff_file(repo_root, base, compare, path).await
         }
         SplitSource::Commit { hash } => {
-            let diff = git_output_in_repo(
-                repo_root,
-                &["show", "--format=", "--no-ext-diff", hash, "--", path],
-            )
-            .await?;
+            let diff = git_backend::commit_diff_text(repo_root, hash, Some(path))
+                .ok_or_else(|| format!("failed to load commit diff for {hash}"))?;
             Ok(parse_unified_diff(&diff).into_iter().next())
         }
     }
@@ -3331,15 +3321,11 @@ pub(crate) async fn handle_api_status_request(
     let show_untracked = parse_bool_param(params.get("show_untracked"), true);
     let repo_root = &state.project_root;
 
-    // The unstaged diff, staged diff, and viewed-state lookup are independent —
-    // run them concurrently instead of awaiting one git subprocess at a time.
-    let (unstaged_res, staged_res, viewed) = tokio::join!(
-        git_output_in_repo(repo_root, &["diff"]),
-        git_output_in_repo(repo_root, &["diff", "--cached"]),
-        // One lookup of the persisted viewed state for the whole page; each file
-        // is reported viewed only while its current content hash still matches.
-        load_viewed_map(&state, PAGE_STATUS, String::new(), String::new()),
+    let (unstaged_res, staged_res) = (
+        status_diff_text(repo_root, false),
+        status_diff_text(repo_root, true),
     );
+    let viewed = load_viewed_map(&state, PAGE_STATUS, String::new(), String::new()).await;
     let unstaged_raw = match unstaged_res {
         Ok(output) => output,
         Err(error) => return bad_request(error),
@@ -3359,19 +3345,14 @@ pub(crate) async fn handle_api_status_request(
         .collect();
 
     let untracked_files: Vec<serde_json::Value> = if show_untracked {
-        let raw =
-            match git_output_in_repo(repo_root, &["ls-files", "--others", "--exclude-standard"])
-                .await
-            {
-                Ok(output) => output,
-                Err(error) => return bad_request(error),
-            };
-        let paths: Vec<String> = raw
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect();
+        let paths: Vec<String> = match git_backend::status_files(repo_root) {
+            Some((changed, _)) => changed
+                .into_iter()
+                .filter(|entry| entry.status_char == '?')
+                .map(|entry| entry.path)
+                .collect(),
+            None => return bad_request("failed to read git status"),
+        };
 
         // Scan every untracked file concurrently — each scan is independent
         // file I/O, so a serial loop needlessly waited on one read at a time.
@@ -3580,21 +3561,10 @@ async fn load_status_diff_file(
     path: &str,
 ) -> Result<Option<DiffFile>, String> {
     let diff_text = match section {
-        "staged" => git_output_in_repo(repo_root, &["diff", "--cached", "--", path]).await?,
-        "unstaged" => git_output_in_repo(repo_root, &["diff", "--", path]).await?,
-        "untracked" => {
-            let mut cmd = tokio::process::Command::new("git");
-            cmd.args(["-c", "core.quotepath=off"]);
-            cmd.args(["-c", "core.optionalLocks=false"]);
-            cmd.args(["diff", "--no-index", "--", "/dev/null", path]);
-            cmd.current_dir(repo_root);
-            git_output_from_command(
-                cmd,
-                &[1],
-                &format!("git diff --no-index -- /dev/null {}", path),
-            )
-            .await?
-        }
+        "staged" => git_backend::file_diff_text(repo_root, path, true)
+            .ok_or_else(|| format!("failed to load staged diff for {path}"))?,
+        "unstaged" | "untracked" => git_backend::file_diff_text(repo_root, path, false)
+            .ok_or_else(|| format!("failed to load unstaged diff for {path}"))?,
         _ => return Err(format!("invalid section: {section}")),
     };
     let mut files = parse_unified_diff(&diff_text);
@@ -3604,6 +3574,26 @@ async fn load_status_diff_file(
         }
     }
     Ok(files.into_iter().next())
+}
+
+fn status_diff_text(repo_root: &Path, staged: bool) -> Result<String, String> {
+    let (changed_entries, staged_entries) = git_backend::status_files(repo_root)
+        .ok_or_else(|| "failed to read git status".to_string())?;
+    let entries = if staged {
+        staged_entries
+    } else {
+        changed_entries
+            .into_iter()
+            .filter(|entry| entry.status_char != '?')
+            .collect()
+    };
+    let mut out = String::new();
+    for entry in entries {
+        if let Some(diff) = git_backend::file_diff_text(repo_root, &entry.path, staged) {
+            out.push_str(&diff);
+        }
+    }
+    Ok(out)
 }
 
 #[derive(serde::Deserialize)]
@@ -3812,7 +3802,7 @@ pub(crate) async fn handle_api_commit_prepare_request(
     State(state): State<Arc<DiffServerState>>,
 ) -> Response {
     let repo_root = &state.project_root;
-    let staged_raw = match git_output_in_repo(repo_root, &["diff", "--cached"]).await {
+    let staged_raw = match status_diff_text(repo_root, true) {
         Ok(output) => output,
         Err(error) => return bad_request(error),
     };
@@ -3821,22 +3811,16 @@ pub(crate) async fn handle_api_commit_prepare_request(
         .map(|f| file_metadata_json(f, false))
         .collect();
 
-    // Current branch (empty on a detached HEAD or fresh repo).
-    let branch = git_output_in_repo(repo_root, &["symbolic-ref", "--short", "HEAD"])
-        .await
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+    let branch = git_backend::current_branch(repo_root).unwrap_or_default();
 
     // HEAD's full message for the amend toggle to prefill. Empty before the
     // first commit, in which case amend is not offered.
-    let last_message = git_output_in_repo(repo_root, &["log", "-1", "--pretty=%B"])
-        .await
-        .map(|s| s.trim_end().to_string())
+    let head_meta = git_backend::commit_meta(repo_root, "HEAD");
+    let last_message = head_meta
+        .as_ref()
+        .map(|m| m.message.trim_end().to_string())
         .unwrap_or_default();
-    let has_head = git_output_in_repo(repo_root, &["rev-parse", "--verify", "--quiet", "HEAD"])
-        .await
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
+    let has_head = head_meta.is_some();
 
     ok_json(serde_json::json!({
         "staged": staged,

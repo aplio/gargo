@@ -1,7 +1,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::UNIX_EPOCH;
 
 use regex::RegexBuilder;
@@ -325,28 +324,10 @@ fn insert_postings(conn: &Connection, file_id: i64, path: &Path) -> rusqlite::Re
 }
 
 fn collect_repo_files(root: &Path) -> Vec<String> {
-    let output = Command::new("git")
-        .args([
-            "-c",
-            "core.quotepath=off",
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-        ])
-        .current_dir(root)
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
+    let mut files = crate::project::collect_files(root);
+    for file in &mut files {
+        *file = file.replace('\\', "/");
     }
-    let mut files: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| line.replace('\\', "/"))
-        .collect();
     files.sort();
     files.dedup();
     files

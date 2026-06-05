@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
 
+use crate::command::git_backend;
 use crate::command::registry::{CommandContext, CommandEffect, CommandEntry, CommandRegistry};
 use crate::input::action::{Action, AppAction, WorkspaceAction};
 
@@ -120,30 +120,31 @@ pub fn register(registry: &mut CommandRegistry) {
 }
 
 pub fn build_in_editor_diff_view(project_root: &Path) -> Result<InEditorDiffView, String> {
-    let unstaged_diff = git_output_in_repo(project_root, &["diff"])?;
-    let staged_diff = git_output_in_repo(project_root, &["diff", "--cached"])?;
-    let untracked_files = git_output_in_repo(
+    let (changed, staged) = git_backend::status_files(project_root)
+        .ok_or_else(|| "failed to read git status".to_string())?;
+    let untracked_files = changed
+        .iter()
+        .filter(|entry| entry.status_char == '?')
+        .map(|entry| entry.path.clone())
+        .collect::<Vec<_>>();
+    let unstaged_diff = diff_text_for_entries(
         project_root,
-        &["ls-files", "--others", "--exclude-standard"],
-    )?
-    .lines()
-    .map(str::trim)
-    .filter(|line| !line.is_empty())
-    .map(str::to_string)
-    .collect::<Vec<_>>();
-
-    let mut untracked_patches = Vec::with_capacity(untracked_files.len());
-    for path in &untracked_files {
-        let patch = git_output_in_repo_allow_codes(
-            project_root,
-            &["diff", "--no-index", "--", "/dev/null", path],
-            &[0, 1],
-        )?;
-        if !patch.trim().is_empty() {
-            untracked_patches.push(patch);
-        }
-    }
-    let untracked_diff = untracked_patches.join("\n");
+        changed
+            .iter()
+            .filter(|entry| entry.status_char != '?')
+            .map(|entry| entry.path.as_str()),
+        false,
+    );
+    let staged_diff = diff_text_for_entries(
+        project_root,
+        staged.iter().map(|entry| entry.path.as_str()),
+        true,
+    );
+    let untracked_diff = diff_text_for_entries(
+        project_root,
+        untracked_files.iter().map(String::as_str),
+        false,
+    );
 
     let mut lines = Vec::new();
     let mut line_targets = HashMap::new();
@@ -194,14 +195,10 @@ pub fn build_branch_compare_diff_view(
     project_root: &Path,
     other_branch: &str,
 ) -> Result<InEditorDiffView, String> {
-    let current_branch = git_output_in_repo(project_root, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let current_branch = current_branch.trim();
-
-    let diff = git_output_in_repo_allow_codes(
-        project_root,
-        &["diff", &format!("{}...HEAD", other_branch)],
-        &[0, 1],
-    )?;
+    let current_branch =
+        git_backend::current_branch(project_root).unwrap_or_else(|| "HEAD".to_string());
+    let diff = git_backend::compare_diff_text(project_root, other_branch, "HEAD", None)
+        .ok_or_else(|| "failed to read branch diff".to_string())?;
 
     let file_count = count_diff_files(&diff);
 
@@ -357,37 +354,18 @@ fn parse_hunk_new_start(line: &str) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
-fn git_output_in_repo(project_root: &Path, args: &[&str]) -> Result<String, String> {
-    git_output_in_repo_allow_codes(project_root, args, &[0])
-}
-
-fn git_output_in_repo_allow_codes(
+fn diff_text_for_entries<'a>(
     project_root: &Path,
-    args: &[&str],
-    allowed_codes: &[i32],
-) -> Result<String, String> {
-    let output = ProcessCommand::new("git")
-        .args(["-c", "core.quotepath=off"])
-        .args(["-c", "core.optionalLocks=false"])
-        .args(args)
-        .current_dir(project_root)
-        .output()
-        .map_err(|e| format!("git command failed ({}): {}", args.join(" "), e))?;
-
-    let status_code = output.status.code().unwrap_or(-1);
-    if !allowed_codes.contains(&status_code) {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!(
-            "git {} failed (code {}): {}",
-            args.join(" "),
-            status_code,
-            stderr
-        ));
+    paths: impl IntoIterator<Item = &'a str>,
+    staged: bool,
+) -> String {
+    let mut out = String::new();
+    for path in paths {
+        if let Some(diff) = git_backend::file_diff_text(project_root, path, staged) {
+            out.push_str(&diff);
+        }
     }
-
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim_end()
-        .to_string())
+    out
 }
 
 #[cfg(test)]

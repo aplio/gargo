@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// Resolve a project root by probing `start` first, then falling back to CWD.
 /// Uses the first ancestor directory containing a `.git` marker (dir or file).
@@ -55,7 +54,7 @@ fn find_git_root_from(start_dir: &Path) -> Option<PathBuf> {
 }
 
 /// Collect files under `root`.
-/// If inside a git repo, uses `git ls-files` to respect `.gitignore`.
+/// If inside a git repo, uses gix to respect `.gitignore`.
 /// Otherwise falls back to a recursive directory walk.
 pub fn collect_files(root: &Path) -> Vec<String> {
     if has_git_marker(root)
@@ -98,54 +97,7 @@ fn has_git_marker(dir: &Path) -> bool {
 }
 
 fn collect_files_git(root: &Path) -> Option<Vec<String>> {
-    // One `git ls-files` instead of two: `-t` prefixes each path with a status
-    // tag, so a single invocation yields both the tracked+untracked listing and
-    // the deleted set that used to require a separate `--deleted` call. The tags
-    // we read (each line is `<tag><space><path>`):
-    //   `H` cached/tracked-and-present, `?` other/untracked  -> candidate
-    //   `R` removed (tracked but missing from the working tree) -> exclude
-    // `--cached` lists index entries even when their working-tree copy is gone
-    // (e.g. a tracked file deleted with a plain `rm`, which is what the web
-    // editor's Delete does), so such a path shows up under BOTH `H` and `R`;
-    // dropping the `R` paths keeps it (and any directory that only held it) from
-    // lingering in the sidebar as a phantom after a restart.
-    let output = Command::new("git")
-        .args([
-            "-c",
-            "core.quotepath=off",
-            "ls-files",
-            "-t",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--deleted",
-        ])
-        .current_dir(root)
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Collect the deleted paths first (they may be tagged `R` after their `H`
-    // line), then emit the present files that aren't among them.
-    let deleted: std::collections::HashSet<&str> = stdout
-        .lines()
-        .filter_map(|line| line.strip_prefix("R "))
-        .collect();
-
-    let files: Vec<String> = stdout
-        .lines()
-        .filter_map(|line| {
-            let (tag, path) = line.split_once(' ')?;
-            (matches!(tag, "H" | "?") && !path.is_empty() && !deleted.contains(path))
-                .then(|| path.to_string())
-        })
-        .collect();
-    Some(files)
+    crate::command::git_backend::collect_files(root)
 }
 
 fn collect_files_walk(dir: &Path, root: &Path) -> Vec<String> {
@@ -196,6 +148,39 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
+    }
+
+    fn git_ls_files_present(repo: &Path) -> Vec<String> {
+        let output = Command::new("git")
+            .args([
+                "-c",
+                "core.quotepath=off",
+                "ls-files",
+                "-t",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "--deleted",
+            ])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let deleted: std::collections::HashSet<&str> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("R "))
+            .collect();
+        let mut files: Vec<String> = stdout
+            .lines()
+            .filter_map(|line| {
+                let (tag, path) = line.split_once(' ')?;
+                (matches!(tag, "H" | "?") && !path.is_empty() && !deleted.contains(path))
+                    .then(|| path.to_string())
+            })
+            .collect();
+        files.sort();
+        files
     }
 
     /// Canonicalize the tempdir path. On macOS `tempdir()` returns `/var/...`
@@ -379,6 +364,34 @@ mod tests {
             jp_name,
             files
         );
+    }
+
+    #[test]
+    fn collect_files_gix_matches_git_ls_files_oracle() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        init_git_repo(&repo);
+
+        std::fs::create_dir_all(repo.join("tracked_dir")).unwrap();
+        std::fs::write(repo.join("tracked_dir/keep.txt"), "keep\n").unwrap();
+        std::fs::write(repo.join("tracked_dir/delete.txt"), "delete\n").unwrap();
+        std::fs::write(repo.join("日本語.txt"), "hello\n").unwrap();
+        let output = Command::new("git")
+            .args(["add", "--all"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        std::fs::remove_file(repo.join("tracked_dir/delete.txt")).unwrap();
+        std::fs::write(repo.join("untracked.txt"), "new\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(repo.join("ignored.txt"), "ignored\n").unwrap();
+
+        let mut got = collect_files(&repo);
+        got.sort();
+        assert_eq!(got, git_ls_files_present(&repo));
     }
 
     #[test]

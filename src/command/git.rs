@@ -155,111 +155,24 @@ pub fn git_status_files_in(
 fn git_status_files_in_impl(
     project_root: Option<&Path>,
 ) -> Result<(Vec<GitFileEntry>, Vec<GitFileEntry>), String> {
-    let raw = git_output_in(project_root, &["status", "--porcelain"])?;
-    let mut changed = Vec::new();
-    let mut staged = Vec::new();
-    for line in raw.lines() {
-        if line.len() < 4 {
-            continue;
-        }
-        let bytes = line.as_bytes();
-        let index_status = bytes[0] as char;
-        let worktree_status = bytes[1] as char;
-        let path = line[3..].to_string();
-
-        // Index (staged) changes
-        if index_status != ' ' && index_status != '?' {
-            staged.push(GitFileEntry {
-                path: path.clone(),
-                status_char: index_status,
-                staged: true,
-                additions: 0,
-                deletions: 0,
-            });
-        }
-        // Worktree (unstaged) changes
-        if worktree_status != ' ' {
-            changed.push(GitFileEntry {
-                path: path.clone(),
-                status_char: if worktree_status == '?' {
-                    '?'
-                } else {
-                    worktree_status
-                },
-                staged: false,
-                additions: 0,
-                deletions: 0,
-            });
-        }
-    }
-
-    let unstaged_stats = numstat_map(project_root, false);
-    let staged_stats = numstat_map(project_root, true);
-    for entry in changed.iter_mut() {
-        if entry.status_char == '?' {
-            entry.additions = count_file_lines(project_root, &entry.path);
-            entry.deletions = 0;
-        } else if let Some(&(adds, dels)) = unstaged_stats.get(&entry.path) {
-            entry.additions = adds;
-            entry.deletions = dels;
-        }
-    }
-    for entry in staged.iter_mut() {
-        if let Some(&(adds, dels)) = staged_stats.get(&entry.path) {
-            entry.additions = adds;
-            entry.deletions = dels;
-        }
-    }
-    Ok((changed, staged))
+    let root = match project_root {
+        Some(root) => root.to_path_buf(),
+        None => std::env::current_dir().map_err(|e| format!("git error: {}", e))?,
+    };
+    git_backend::status_files(&root).ok_or_else(|| "git error: failed to read status".to_string())
 }
 
-fn numstat_map(project_root: Option<&Path>, cached: bool) -> HashMap<String, (usize, usize)> {
-    let args: &[&str] = if cached {
-        &["diff", "--cached", "--numstat"]
-    } else {
-        &["diff", "--numstat"]
-    };
-    let raw = match git_output_in(project_root, args) {
-        Ok(s) => s,
-        Err(_) => return HashMap::new(),
-    };
-    let mut map = HashMap::new();
-    for line in raw.lines() {
-        let mut parts = line.splitn(3, '\t');
-        let adds = parts.next().unwrap_or("0");
-        let dels = parts.next().unwrap_or("0");
-        let path = match parts.next() {
-            Some(p) => p,
-            None => continue,
-        };
-        let adds = adds.parse::<usize>().unwrap_or(0);
-        let dels = dels.parse::<usize>().unwrap_or(0);
-        map.insert(path.to_string(), (adds, dels));
-    }
-    map
-}
-
-fn count_file_lines(project_root: Option<&Path>, rel_path: &str) -> usize {
-    let abs = match project_root {
-        Some(root) => root.join(rel_path),
-        None => match std::env::current_dir() {
-            Ok(cwd) => cwd.join(rel_path),
-            Err(_) => return 0,
-        },
-    };
-    let bytes = match std::fs::read(&abs) {
-        Ok(b) => b,
-        Err(_) => return 0,
-    };
-    if bytes.is_empty() {
-        return 0;
-    }
-    let nl_count = bytes.iter().filter(|b| **b == b'\n').count();
-    if bytes.last() == Some(&b'\n') {
-        nl_count
-    } else {
-        nl_count + 1
-    }
+fn diff_file_entries(diff: &str) -> Vec<GitFileEntry> {
+    crate::diff_render::parse_unified_diff(diff)
+        .into_iter()
+        .map(|file| GitFileEntry {
+            path: file.path,
+            status_char: file.status.as_str().chars().next().unwrap_or('M'),
+            staged: false,
+            additions: file.additions,
+            deletions: file.deletions,
+        })
+        .collect()
 }
 
 pub fn git_diff(path: &str, staged: bool) -> Result<String, String> {
@@ -275,11 +188,12 @@ fn git_diff_in_impl(
     path: &str,
     staged: bool,
 ) -> Result<String, String> {
-    if staged {
-        git_output_in(project_root, &["diff", "--cached", "--", path])
-    } else {
-        git_output_in(project_root, &["diff", "--", path])
-    }
+    let root = match project_root {
+        Some(root) => root.to_path_buf(),
+        None => std::env::current_dir().map_err(|e| format!("git error: {}", e))?,
+    };
+    git_backend::file_diff_text(&root, path, staged)
+        .ok_or_else(|| "git error: failed to read diff".to_string())
 }
 
 /// List of files that differ between `base_branch` and HEAD, parsed
@@ -288,97 +202,14 @@ pub fn git_branch_diff_files_in(
     project_root: &Path,
     base_branch: &str,
 ) -> Result<Vec<GitFileEntry>, String> {
-    let range = format!("{}...HEAD", base_branch);
-    let raw = git_output_in_allow_codes(
-        Some(project_root),
-        &["diff", "--name-status", &range],
-        &[0, 1],
-    )?;
-
-    let mut entries = Vec::new();
-    for line in raw.lines() {
-        // Format: "<status>\t<path>" or "R100\t<old>\t<new>" for renames.
-        let mut parts = line.split('\t');
-        let status_field = match parts.next() {
-            Some(s) if !s.is_empty() => s,
-            _ => continue,
-        };
-        let status_char = status_field
-            .chars()
-            .next()
-            .unwrap_or('M')
-            .to_ascii_uppercase();
-        let path = match status_char {
-            'R' | 'C' => {
-                // Rename/copy: keep the new path.
-                parts.next();
-                match parts.next() {
-                    Some(p) if !p.is_empty() => p.to_string(),
-                    _ => continue,
-                }
-            }
-            _ => match parts.next() {
-                Some(p) if !p.is_empty() => p.to_string(),
-                _ => continue,
-            },
-        };
-        entries.push(GitFileEntry {
-            path,
-            status_char,
-            staged: false,
-            additions: 0,
-            deletions: 0,
-        });
-    }
-
-    // Per-file numstat for additions/deletions.
-    let numstat_raw =
-        git_output_in_allow_codes(Some(project_root), &["diff", "--numstat", &range], &[0, 1])
-            .unwrap_or_default();
-    let mut stats: HashMap<String, (usize, usize)> = HashMap::new();
-    for line in numstat_raw.lines() {
-        let mut parts = line.splitn(3, '\t');
-        let adds = parts.next().unwrap_or("0");
-        let dels = parts.next().unwrap_or("0");
-        let path = match parts.next() {
-            Some(p) => p,
-            None => continue,
-        };
-        let adds = adds.parse::<usize>().unwrap_or(0);
-        let dels = dels.parse::<usize>().unwrap_or(0);
-        stats.insert(path.to_string(), (adds, dels));
-    }
-    for entry in entries.iter_mut() {
-        if let Some(&(adds, dels)) = stats.get(&entry.path) {
-            entry.additions = adds;
-            entry.deletions = dels;
-        }
-    }
-
-    Ok(entries)
+    let diff = git_backend::compare_diff_text(project_root, base_branch, "HEAD", None)
+        .ok_or_else(|| "git error: failed to read branch diff".to_string())?;
+    Ok(diff_file_entries(&diff))
 }
 
 pub fn git_local_branches_in(project_root: &Path) -> Result<Vec<(String, bool)>, String> {
-    let raw = git_output_in(
-        Some(project_root),
-        &["branch", "--format=%(refname:short)|%(HEAD)"],
-    )?;
-    let mut branches = Vec::new();
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let (name, head_marker) = line.split_once('|').unwrap_or((line, ""));
-        let name = name.trim();
-        if name.is_empty() {
-            continue;
-        }
-        let is_current = head_marker.trim() == "*";
-        branches.push((name.to_string(), is_current));
-    }
-    branches.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(branches)
+    git_backend::list_local_branches(project_root)
+        .ok_or_else(|| "git error: failed to list branches".to_string())
 }
 
 pub fn git_branch_preview_in(project_root: &Path, branch: &str) -> Result<Vec<String>, String> {
@@ -387,34 +218,35 @@ pub fn git_branch_preview_in(project_root: &Path, branch: &str) -> Result<Vec<St
         String::new(),
         "Working tree status:".to_string(),
     ];
-    match git_output_in(Some(project_root), &["status", "--short", "--branch"]) {
-        Ok(status) => {
-            if status.trim().is_empty() {
-                lines.push("(clean)".to_string());
-            } else {
-                lines.extend(status.lines().map(|line| line.to_string()));
+    match git_backend::status_files(project_root) {
+        Some((changed, staged)) if changed.is_empty() && staged.is_empty() => {
+            lines.push("(clean)".to_string());
+        }
+        Some((changed, staged)) => {
+            if let Some(current) = git_backend::current_branch(project_root) {
+                lines.push(format!("## {current}"));
+            }
+            for entry in staged.iter().chain(changed.iter()) {
+                let index = if entry.staged { entry.status_char } else { ' ' };
+                let worktree = if entry.staged { ' ' } else { entry.status_char };
+                lines.push(format!("{index}{worktree} {}", entry.path));
             }
         }
-        Err(err) => {
-            lines.push(format!("(status unavailable: {})", err));
-        }
+        None => lines.push("(status unavailable: git error: failed to read status)".to_string()),
     }
 
     lines.push(String::new());
     lines.push(format!("Recent commits on {}:", branch));
-    match git_output_in(
-        Some(project_root),
-        &["log", "--oneline", "--decorate", "-n", "15", branch],
-    ) {
-        Ok(log) => {
-            if log.trim().is_empty() {
-                lines.push("(no commits)".to_string());
-            } else {
-                lines.extend(log.lines().map(|line| line.to_string()));
-            }
+    match git_backend::commit_log_for_rev(project_root, branch, 0, 15) {
+        Some(rows) if rows.is_empty() => lines.push("(no commits)".to_string()),
+        Some(rows) => {
+            lines.extend(
+                rows.into_iter()
+                    .map(|row| format!("{} {}", row.hash, row.message)),
+            );
         }
-        Err(err) => {
-            lines.push(format!("(log unavailable: {})", err));
+        None => {
+            lines.push("(log unavailable: git error: failed to read commit log)".to_string());
         }
     }
     Ok(lines)
@@ -434,40 +266,13 @@ pub fn git_switch_branch_in(project_root: &Path, branch: &str) -> Result<(), Str
 }
 
 pub fn git_has_staged_changes_in(project_root: &Path) -> Result<bool, String> {
-    let output = ProcessCommand::new("git")
-        .current_dir(project_root)
-        .args(["diff", "--cached", "--quiet"])
-        .output()
-        .map_err(|e| format!("git error: {}", e))?;
-
-    match output.status.code() {
-        Some(0) => Ok(false),
-        Some(1) => Ok(true),
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            if stderr.is_empty() {
-                Err("git error: failed to check staged changes".to_string())
-            } else {
-                Err(format!("git error: {}", stderr))
-            }
-        }
-    }
+    git_backend::has_staged_changes(project_root)
+        .ok_or_else(|| "git error: failed to check staged changes".to_string())
 }
 
 pub fn git_commit_editmsg_path_in(project_root: &Path) -> Result<PathBuf, String> {
-    let path = git_output_in(
-        Some(project_root),
-        &["rev-parse", "--git-path", "COMMIT_EDITMSG"],
-    )?;
-    if path.is_empty() {
-        return Err("git error: failed to resolve COMMIT_EDITMSG path".to_string());
-    }
-    let path_buf = PathBuf::from(path);
-    if path_buf.is_absolute() {
-        Ok(path_buf)
-    } else {
-        Ok(project_root.join(path_buf))
-    }
+    git_backend::git_path(project_root, "COMMIT_EDITMSG")
+        .ok_or_else(|| "git error: failed to resolve COMMIT_EDITMSG path".to_string())
 }
 
 pub fn git_prepare_commit_editmsg_template_in(
@@ -708,7 +513,7 @@ pub fn repo_root_for_path(path: &Path) -> Result<PathBuf, String> {
     } else {
         path.parent().unwrap_or(path)
     };
-    git_output_in(Some(dir), &["rev-parse", "--show-toplevel"]).map(PathBuf::from)
+    git_backend::repo_root(dir).ok_or_else(|| "git error: failed to resolve repo root".to_string())
 }
 
 fn git_output_in(project_root: Option<&Path>, args: &[&str]) -> Result<String, String> {
@@ -726,29 +531,6 @@ fn git_output_in(project_root: Option<&Path>, args: &[&str]) -> Result<String, S
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!("git error: {}", stderr));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim_end()
-        .to_string())
-}
-
-fn git_output_in_allow_codes(
-    project_root: Option<&Path>,
-    args: &[&str],
-    allowed_codes: &[i32],
-) -> Result<String, String> {
-    let mut cmd = ProcessCommand::new("git");
-    cmd.args(["-c", "core.quotepath=off"]);
-    cmd.args(["-c", "core.optionalLocks=false"]);
-    cmd.args(args);
-    if let Some(root) = project_root {
-        cmd.current_dir(root);
-    }
-    let output = cmd.output().map_err(|e| format!("git error: {}", e))?;
-    let code = output.status.code().unwrap_or(-1);
-    if !allowed_codes.contains(&code) {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("git error (code {}): {}", code, stderr));
     }
     Ok(String::from_utf8_lossy(&output.stdout)
         .trim_end()
@@ -777,7 +559,8 @@ fn build_github_file_url(editor: &Editor, branch: &str) -> Result<String, String
         .ok_or_else(|| "No file path".to_string())?;
 
     let repo_root = repo_root_for_path(file_path)?;
-    let remote = git_output_in(Some(&repo_root), &["config", "--get", "remote.origin.url"])?;
+    let remote = git_backend::remote_origin_url(&repo_root)
+        .ok_or_else(|| "git error: remote.origin.url is not set".to_string())?;
     let base_url = remote_to_github_url(&remote)
         .ok_or_else(|| format!("Could not parse remote URL: {}", remote))?;
 
@@ -802,13 +585,13 @@ fn build_github_file_url(editor: &Editor, branch: &str) -> Result<String, String
 }
 
 fn default_branch_for(project_root: Option<&Path>) -> Result<String, String> {
-    git_output_in(project_root, &["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .map(|s| {
-            s.strip_prefix("refs/remotes/origin/")
-                .unwrap_or(&s)
-                .to_string()
-        })
-        .or_else(|_| Ok("main".to_string()))
+    let root = match project_root {
+        Some(root) => root.to_path_buf(),
+        None => std::env::current_dir().map_err(|e| format!("git error: {}", e))?,
+    };
+    Ok(git_backend::origin_head_short(&root)
+        .and_then(|s| s.strip_prefix("origin/").map(|name| name.to_string()))
+        .unwrap_or_else(|| "main".to_string()))
 }
 
 fn current_branch_for(project_root: Option<&Path>) -> Result<String, String> {
@@ -816,12 +599,11 @@ fn current_branch_for(project_root: Option<&Path>) -> Result<String, String> {
 }
 
 fn current_branch_in(project_root: Option<&Path>) -> Result<String, String> {
-    let branch = git_output_in(project_root, &["branch", "--show-current"])?;
-    if branch.is_empty() {
-        Err("Not on a branch (detached HEAD)".to_string())
-    } else {
-        Ok(branch)
-    }
+    let root = match project_root {
+        Some(root) => root.to_path_buf(),
+        None => std::env::current_dir().map_err(|e| format!("git error: {}", e))?,
+    };
+    git_backend::current_branch(&root).ok_or_else(|| "Not on a branch (detached HEAD)".to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -833,35 +615,48 @@ pub fn git_log_oneline_in(
     skip: usize,
     count: usize,
 ) -> Result<String, String> {
-    git_output_in(
-        Some(project_root),
-        &[
-            "log",
-            "--pretty=format:%h%x00%H%x00%an%x00%ar%x00%s",
-            "-n",
-            &count.to_string(),
-            "--skip",
-            &skip.to_string(),
-        ],
-    )
+    let rows = git_backend::commit_log(project_root, skip, count)
+        .ok_or_else(|| "git error: failed to read commit log".to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            format!(
+                "{}\0{}\0{}\0{}\0{}",
+                row.hash, row.full_hash, row.author, row.date, row.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 pub fn git_show_metadata_in(project_root: &Path, hash: &str) -> Result<String, String> {
-    git_output_in(
-        Some(project_root),
-        &["show", "--format=%H%n%an%n%ae%n%ar%n%B", "-s", hash],
-    )
+    let meta = git_backend::commit_meta(project_root, hash)
+        .ok_or_else(|| "git error: failed to read commit metadata".to_string())?;
+    Ok(format!(
+        "{}\n{}\n{}\n{}\n{}",
+        meta.full_hash, meta.author, meta.author_email, meta.date, meta.message
+    ))
 }
 
 pub fn git_diff_tree_in(project_root: &Path, hash: &str) -> Result<String, String> {
-    git_output_in(
-        Some(project_root),
-        &["diff-tree", "--no-commit-id", "-r", "--name-status", hash],
-    )
+    let diff = git_backend::commit_diff_text(project_root, hash, None)
+        .ok_or_else(|| "git error: failed to read commit diff".to_string())?;
+    Ok(crate::diff_render::parse_unified_diff(&diff)
+        .into_iter()
+        .map(|file| {
+            format!(
+                "{}\t{}",
+                file.status.as_str().chars().next().unwrap_or('M'),
+                file.path
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 pub fn git_show_diff_in(project_root: &Path, hash: &str) -> Result<String, String> {
-    git_output_in(Some(project_root), &["show", "--format=", hash])
+    git_backend::commit_diff_text(project_root, hash, None)
+        .ok_or_else(|| "git error: failed to read commit diff".to_string())
 }
 
 pub fn register(registry: &mut CommandRegistry) {
@@ -1037,6 +832,16 @@ mod tests {
         temp
     }
 
+    fn git_stdout(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {:?} failed", args);
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
     #[test]
     fn test_ssh_remote() {
         assert_eq!(
@@ -1121,6 +926,51 @@ mod tests {
             .expect("read staged files");
         assert!(staged.lines().any(|line| line == "a.txt"));
         assert!(staged.lines().any(|line| line == "b.txt"));
+    }
+
+    #[test]
+    fn git_status_files_matches_porcelain_oracle() {
+        let repo = setup_repo();
+        fs::write(repo.path().join("tracked.txt"), "one\n").expect("write tracked");
+        fs::write(repo.path().join("staged.txt"), "old\n").expect("write staged");
+        run_git(repo.path(), &["add", "tracked.txt", "staged.txt"]);
+        run_git(repo.path(), &["commit", "-m", "init"]);
+
+        fs::write(repo.path().join("tracked.txt"), "one\ntwo\n").expect("modify tracked");
+        fs::write(repo.path().join("staged.txt"), "new\n").expect("modify staged");
+        run_git(repo.path(), &["add", "staged.txt"]);
+        fs::write(repo.path().join("new.txt"), "new\n").expect("write new");
+
+        let (changed, staged) = git_status_files_in(repo.path()).expect("gix status");
+        let changed_facts: Vec<(String, char)> = changed
+            .into_iter()
+            .map(|entry| (entry.path, entry.status_char))
+            .collect();
+        let staged_facts: Vec<(String, char)> = staged
+            .into_iter()
+            .map(|entry| (entry.path, entry.status_char))
+            .collect();
+
+        let raw = git_stdout(repo.path(), &["status", "--porcelain"]);
+        let mut expected_changed = Vec::new();
+        let mut expected_staged = Vec::new();
+        for line in raw.lines() {
+            let bytes = line.as_bytes();
+            let index_status = bytes[0] as char;
+            let worktree_status = bytes[1] as char;
+            let path = line[3..].to_string();
+            if index_status != ' ' && index_status != '?' {
+                expected_staged.push((path.clone(), index_status));
+            }
+            if worktree_status != ' ' {
+                expected_changed.push((path, worktree_status));
+            }
+        }
+        expected_changed.sort();
+        expected_staged.sort();
+
+        assert_eq!(changed_facts, expected_changed);
+        assert_eq!(staged_facts, expected_staged);
     }
 
     #[test]

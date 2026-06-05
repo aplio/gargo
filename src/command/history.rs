@@ -79,22 +79,12 @@ impl CommandHistory {
 
     /// Extract repository name from git remote or use directory name
     fn extract_repo_name(project_root: &Path) -> String {
-        // Try to get git remote URL
-        if let Ok(output) = std::process::Command::new("git")
-            .arg("remote")
-            .arg("get-url")
-            .arg("origin")
-            .current_dir(project_root)
-            .output()
-            && output.status.success()
-            && let Ok(url) = String::from_utf8(output.stdout)
-        {
-            let url = url.trim();
+        if let Some(url) = crate::command::git_backend::remote_origin_url(project_root) {
             // Parse owner/repo from URL
             // Examples:
             // - git@github.com:aplio/gargo.git -> aplio/gargo
             // - https://github.com/aplio/gargo.git -> aplio/gargo
-            if let Some(repo) = Self::parse_repo_from_url(url) {
+            if let Some(repo) = Self::parse_repo_from_url(&url) {
                 return repo;
             }
         }

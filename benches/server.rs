@@ -5,20 +5,16 @@
 //! A HAR captured from a real browsing session showed nearly all request time
 //! is server-side `wait` (not transfer), dominated by:
 //! - `/api/files` ~120ms each, called repeatedly, never cached
-//!   -> `project::collect_files` (spawns `git ls-files` twice)
+//!   -> `project::collect_files`
 //! - `/blob/...` ~217ms, `/api/highlight` ~55ms
 //!   -> `syntax::highlight::highlight_text` (tree-sitter)
 //!
 //! This bench exercises those two functions against THIS repo so numbers are
 //! reproducible and reflect a realistic working tree.
 //!
-//! A later HAR (gargo_v2.har) showed the `/status` and `/branches` pages were
-//! dominated by *serial* git subprocess spawns: the HTML handlers awaited 4
-//! `git` processes one-at-a-time (one redundantly re-fetching the remote URL),
-//! and `/api/status` awaited `git diff` then `git diff --cached` in sequence.
-//! The `status git spawns` section below measures that serial-vs-concurrent
-//! gap directly, since the handlers themselves are `pub(crate)` and unreachable
-//! from a bench crate.
+//! A later HAR showed the `/status`, `/branches`, and commit pages were
+//! dominated by read-only git work. The final section measures the public
+//! gix-backed helpers now used by those paths.
 //!
 //! Run: cargo run --bench bench-server --release
 //!  (or: cargo bench --bench bench-server)
@@ -29,6 +25,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use gargo::command::git;
 use gargo::project::collect_files;
 use gargo::syntax::highlight::highlight_text;
 use gargo::syntax::language::LanguageRegistry;
@@ -123,133 +120,32 @@ fn bench_highlight_hit(
 }
 
 // ---------------------------------------------------------------------------
-// Benchmark: status / page-context git spawns  (/status, /branches, /api/status)
+// Benchmark: gix-backed read-only git helpers
 // ---------------------------------------------------------------------------
 
-/// Mirror of the server's `git_output_in_repo`: same `-c` flags so spawn cost
-/// matches the real handlers.
-async fn git_out(root: &Path, args: &[&str]) -> String {
-    let mut cmd = tokio::process::Command::new("git");
-    cmd.args(["-c", "core.quotepath=off"]);
-    cmd.args(["-c", "core.optionalLocks=false"]);
-    cmd.args(args);
-    cmd.current_dir(root);
-    match cmd.output().await {
-        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
-        Err(_) => String::new(),
+async fn status_snapshot(root: &Path) {
+    let (changed, staged) = git::git_status_files_in(root).unwrap_or_default();
+    for entry in changed {
+        let _ = git::git_diff_in(root, &entry.path, false);
+    }
+    for entry in staged {
+        let _ = git::git_diff_in(root, &entry.path, true);
     }
 }
 
-/// `/api/status` git work, the OLD way: two diffs awaited back-to-back.
-async fn status_diffs_serial(root: &Path) {
-    let _unstaged = git_out(root, &["diff"]).await;
-    let _staged = git_out(root, &["diff", "--cached"]).await;
+async fn page_context(root: &Path) {
+    let _branch = git::git_branch_in(root);
+    let _branches = git::git_local_branches_in(root);
 }
 
-/// `/api/status` git work, the NEW way: both diffs spawned concurrently.
-async fn status_diffs_parallel(root: &Path) {
-    let _ = tokio::join!(
-        git_out(root, &["diff"]),
-        git_out(root, &["diff", "--cached"]),
-    );
+async fn commit_detail(root: &Path) {
+    let _meta = git::git_show_metadata_in(root, "HEAD");
+    let _files = git::git_diff_tree_in(root, "HEAD");
+    let _diff = git::git_show_diff_in(root, "HEAD");
 }
 
-/// `/status` / `/branches` header context, the OLD way: 4 serial spawns, the
-/// 3rd a redundant re-fetch of the remote URL.
-async fn page_context_serial(root: &Path) {
-    let _remote = git_out(root, &["config", "--get", "remote.origin.url"]).await;
-    let _branch = git_out(root, &["rev-parse", "--abbrev-ref", "HEAD"]).await;
-    let _remote_again = git_out(root, &["config", "--get", "remote.origin.url"]).await;
-    let _default = git_out(
-        root,
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    )
-    .await;
-}
-
-/// `/status` / `/branches` header context, the NEW way: dedup the remote URL and
-/// spawn the 3 distinct lookups concurrently. (Caching makes steady-state state
-/// even cheaper — this measures the cold, uncached path.)
-async fn page_context_parallel(root: &Path) {
-    let _ = tokio::join!(
-        git_out(root, &["config", "--get", "remote.origin.url"]),
-        git_out(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        git_out(
-            root,
-            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
-        ),
-    );
-}
-
-/// `/api/commit/<hash>` git work, the OLD way: meta, name-status, and full diff
-/// awaited back-to-back (3 serial spawns). Uses HEAD as a stable real commit.
-async fn commit_serial(root: &Path) {
-    let _meta = git_out(
-        root,
-        &["show", "-s", "--format=%H%n%an%n%ae%n%ad%n%B", "HEAD"],
-    )
-    .await;
-    let _files = git_out(
-        root,
-        &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"],
-    )
-    .await;
-    let _diff = git_out(root, &["show", "--format=", "--no-ext-diff", "HEAD"]).await;
-}
-
-/// `/api/commit/<hash>` git work, the NEW way: all three spawned concurrently.
-async fn commit_parallel(root: &Path) {
-    let _ = tokio::join!(
-        git_out(
-            root,
-            &["show", "-s", "--format=%H%n%an%n%ae%n%ad%n%B", "HEAD"]
-        ),
-        git_out(
-            root,
-            &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"]
-        ),
-        git_out(root, &["show", "--format=", "--no-ext-diff", "HEAD"]),
-    );
-}
-
-/// `/api/branches` git work, the OLD way: for-each-ref then the origin/HEAD probe
-/// awaited serially.
-async fn branches_serial(root: &Path) {
-    let _refs = git_out(
-        root,
-        &[
-            "for-each-ref",
-            "--format=%(refname)|%(refname:short)|%(HEAD)",
-            "refs/heads/",
-            "refs/remotes/",
-        ],
-    )
-    .await;
-    let _origin = git_out(
-        root,
-        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-    )
-    .await;
-}
-
-/// `/api/branches` git work, the NEW way: the ref listing and origin/HEAD probe
-/// run concurrently (the probe is independent of parsing the ref list).
-async fn branches_parallel(root: &Path) {
-    let _ = tokio::join!(
-        git_out(
-            root,
-            &[
-                "for-each-ref",
-                "--format=%(refname)|%(refname:short)|%(HEAD)",
-                "refs/heads/",
-                "refs/remotes/"
-            ],
-        ),
-        git_out(
-            root,
-            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
-        ),
-    );
+async fn branch_diff(root: &Path) {
+    let _files = git::git_branch_diff_files_in(root, "HEAD~1");
 }
 
 /// Time an async closure over warmup + iterations, returning per-iter micros.
@@ -353,10 +249,10 @@ fn main() {
     }
 
     // -----------------------------------------------------------------------
-    // 3. status / page-context git spawns  (/status, /branches, /api/status)
+    // 3. gix-backed read-only git helpers
     // -----------------------------------------------------------------------
     println!();
-    println!("=== git-spawn pattern: serial (old) vs concurrent (new) ===");
+    println!("=== gix read-only git helpers ===");
     println!("{:>26} {:>10} {:>10} {:>10}", "case", "avg", "p95", "p99");
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -371,20 +267,12 @@ fn main() {
         println!("{label:>26} {avg:>10} {p95:>10} {p99:>10}");
     };
 
-    let mut t = time_async(&rt, warmup, iterations, || status_diffs_serial(&root));
-    report("api/status diffs: serial", &mut t);
-    let mut t = time_async(&rt, warmup, iterations, || status_diffs_parallel(&root));
-    report("api/status diffs: parallel", &mut t);
-    let mut t = time_async(&rt, warmup, iterations, || page_context_serial(&root));
-    report("page ctx (4 spawns): serial", &mut t);
-    let mut t = time_async(&rt, warmup, iterations, || page_context_parallel(&root));
-    report("page ctx (dedup): parallel", &mut t);
-    let mut t = time_async(&rt, warmup, iterations, || commit_serial(&root));
-    report("api/commit (3 git): serial", &mut t);
-    let mut t = time_async(&rt, warmup, iterations, || commit_parallel(&root));
-    report("api/commit (3 git): parallel", &mut t);
-    let mut t = time_async(&rt, warmup, iterations, || branches_serial(&root));
-    report("api/branches: serial", &mut t);
-    let mut t = time_async(&rt, warmup, iterations, || branches_parallel(&root));
-    report("api/branches: parallel", &mut t);
+    let mut t = time_async(&rt, warmup, iterations, || status_snapshot(&root));
+    report("api/status snapshot", &mut t);
+    let mut t = time_async(&rt, warmup, iterations, || page_context(&root));
+    report("page branch context", &mut t);
+    let mut t = time_async(&rt, warmup, iterations, || commit_detail(&root));
+    report("api/commit detail", &mut t);
+    let mut t = time_async(&rt, warmup, iterations, || branch_diff(&root));
+    report("api/branch diff", &mut t);
 }

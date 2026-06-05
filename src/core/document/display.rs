@@ -36,40 +36,16 @@ impl Document {
 
     /// Returns (repo_name, relative_path) if the file is in a git repo
     fn get_git_repo_info(file_path: &std::path::Path) -> Option<(String, String)> {
-        use std::path::Path;
-        use std::process::Command;
-
-        // Get the directory containing the file
         let file_dir = file_path.parent()?;
-
-        // Get git repo root
-        let output = Command::new("git")
-            .current_dir(file_dir)
-            .args(["rev-parse", "--show-toplevel"])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        let repo_root_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let repo_root = Path::new(&repo_root_str);
+        let repo_root = crate::command::git_backend::repo_root(file_dir).or_else(|| {
+            let root = crate::project::find_project_root(Some(file_path));
+            root.join(".git").exists().then_some(root)
+        })?;
+        let repo_root = repo_root.canonicalize().ok().unwrap_or(repo_root);
 
         // Extract repo name from remote URL (preferred)
-        let repo_name = Command::new("git")
-            .current_dir(file_dir)
-            .args(["config", "--get", "remote.origin.url"])
-            .output()
-            .ok()
-            .and_then(|out| {
-                if out.status.success() {
-                    let remote = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                    Self::extract_repo_name_from_remote(&remote)
-                } else {
-                    None
-                }
-            })
+        let repo_name = crate::command::git_backend::remote_origin_url(&repo_root)
+            .and_then(|remote| Self::extract_repo_name_from_remote(&remote))
             .or_else(|| {
                 // Fallback: use the directory name of the repo root
                 repo_root

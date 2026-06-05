@@ -895,32 +895,13 @@ struct PathCommitInfo {
 /// `git log -1` for a path — the commit that last touched the file/dir.
 /// Used for the GitHub-style "last commit" strip above the code/dir view.
 async fn path_last_commit(repo_root: &Path, rel_path: &str) -> Option<PathCommitInfo> {
-    let mut args: Vec<&str> = vec!["log", "-1", "--format=%h%x00%H%x00%s%x00%an%x00%ar"];
-    let path_owned = if rel_path == "." || rel_path.is_empty() {
-        None
-    } else {
-        Some(rel_path.to_string())
-    };
-    if let Some(ref p) = path_owned {
-        args.push("--");
-        args.push(p.as_str());
-    }
-    let out = git_output_in_repo(repo_root, &args).await.ok()?;
-    let mut parts = out.split('\0');
-    let short_hash = parts.next()?.to_string();
-    let full_hash = parts.next()?.to_string();
-    let subject = parts.next()?.to_string();
-    let author = parts.next()?.to_string();
-    let ago = parts.next()?.trim_end().to_string();
-    if short_hash.is_empty() {
-        return None;
-    }
+    let commit = crate::command::git_backend::last_commit_for_path(repo_root, rel_path)?;
     Some(PathCommitInfo {
-        short_hash,
-        full_hash,
-        subject,
-        author,
-        ago,
+        short_hash: commit.hash,
+        full_hash: commit.full_hash,
+        subject: commit.message,
+        author: commit.author,
+        ago: commit.date,
     })
 }
 
@@ -2076,23 +2057,6 @@ pub(crate) fn remote_to_github_url(remote: &str) -> Option<String> {
 
     let url = url.strip_suffix(".git").unwrap_or(&url);
     Some(url.to_string())
-}
-
-async fn git_output_in_repo(repo_root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = tokio::process::Command::new("git")
-        .args(["-c", "core.optionalLocks=false"])
-        .args(args)
-        .current_dir(repo_root)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to execute git: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("git error: {}", stderr));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Render error message

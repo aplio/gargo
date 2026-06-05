@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -17,7 +17,7 @@ use gix::status::{
 use gix::{Commit, ObjectId, Repository, ThreadSafeRepository};
 use imara_diff::{Algorithm, InternedInput, Interner};
 
-use crate::command::git::{GitFileStatus, GitLineStatus};
+use crate::command::git::{GitFileEntry, GitFileStatus, GitLineStatus};
 
 const ALGORITHM: Algorithm = Algorithm::Histogram;
 const MAX_DIFF_LINES: usize = 64 * u16::MAX as usize;
@@ -99,6 +99,142 @@ pub fn status_map(project_root: &Path) -> HashMap<String, GitFileStatus> {
     }
 
     map
+}
+
+/// `git ls-files -t --cached --others --exclude-standard --deleted`, reduced to
+/// present tracked files plus ignored-filtered untracked files.
+pub(crate) fn collect_files(root: &Path) -> Option<Vec<String>> {
+    let repo = shared_repo(root)?.to_thread_local();
+    let work_dir = repo.workdir()?.to_path_buf();
+    let index = repo.index_or_load_from_head_or_empty().ok()?;
+
+    let mut files: HashSet<String> = HashSet::new();
+    for entry in index.entries() {
+        if entry.stage() != gix::index::entry::Stage::Unconflicted {
+            continue;
+        }
+        let path = entry.path(&index).to_str_lossy().into_owned();
+        if work_dir.join(&path).exists() {
+            files.insert(path);
+        }
+    }
+
+    for (path, status) in status_map(root) {
+        if status == GitFileStatus::Untracked {
+            files.insert(path);
+        }
+    }
+
+    let mut files: Vec<String> = files.into_iter().collect();
+    files.sort();
+    Some(files)
+}
+
+/// Porcelain-style changed/staged file entries and line counts without spawning
+/// `git status`/`git diff --numstat`.
+pub(crate) fn status_files(root: &Path) -> Option<(Vec<GitFileEntry>, Vec<GitFileEntry>)> {
+    let repo = shared_repo(root)?.to_thread_local();
+    let work_dir = repo.workdir()?.to_path_buf();
+    let index = repo.index_or_load_from_head_or_empty().ok()?;
+
+    let mut staged = staged_entries(&repo, &index);
+    let mut changed = Vec::new();
+
+    let status_platform = repo
+        .status(gix::progress::Discard)
+        .ok()?
+        .untracked_files(UntrackedFiles::Files)
+        .index_worktree_rewrites(Some(Rewrites {
+            copies: None,
+            percentage: Some(0.5),
+            limit: 1000,
+            ..Default::default()
+        }));
+    let status_iter = status_platform.into_index_worktree_iter(Vec::new()).ok()?;
+    for item in status_iter.flatten() {
+        match item {
+            Item::Modification {
+                entry,
+                rela_path,
+                status,
+                ..
+            } => {
+                let path = rela_path.to_str_lossy().into_owned();
+                let status_char = status_char_from_entry_status(status);
+                let (additions, deletions) = match status_char {
+                    'D' => (0, blob_line_count(&blob_bytes(&repo, entry.id))),
+                    _ => {
+                        let new_bytes = std::fs::read(work_dir.join(&path)).unwrap_or_default();
+                        diff_counts(&blob_bytes(&repo, entry.id), &new_bytes)
+                    }
+                };
+                changed.push(GitFileEntry {
+                    path,
+                    status_char,
+                    staged: false,
+                    additions,
+                    deletions,
+                });
+            }
+            Item::DirectoryContents { entry, .. } if entry.status == Status::Untracked => {
+                let Ok(path) = entry.rela_path.to_path() else {
+                    continue;
+                };
+                let path = path.to_string_lossy().to_string();
+                changed.push(GitFileEntry {
+                    additions: file_line_count(&work_dir.join(&path)),
+                    deletions: 0,
+                    path,
+                    status_char: '?',
+                    staged: false,
+                });
+            }
+            Item::Rewrite {
+                source,
+                dirwalk_entry,
+                ..
+            } => {
+                let Ok(from_path) = source.rela_path().to_path() else {
+                    continue;
+                };
+                let Ok(to_path) = dirwalk_entry.rela_path.to_path() else {
+                    continue;
+                };
+                let deletions = match &source {
+                    gix::status::index_worktree::RewriteSource::RewriteFromIndex {
+                        source_entry,
+                        ..
+                    } => blob_line_count(&blob_bytes(&repo, source_entry.id)),
+                    gix::status::index_worktree::RewriteSource::CopyFromDirectoryEntry {
+                        source_dirwalk_entry,
+                        ..
+                    } => {
+                        file_line_count(&work_dir.join(source_dirwalk_entry.rela_path.to_string()))
+                    }
+                };
+                changed.push(GitFileEntry {
+                    path: from_path.to_string_lossy().to_string(),
+                    status_char: 'D',
+                    staged: false,
+                    additions: 0,
+                    deletions,
+                });
+                let to_path = to_path.to_string_lossy().to_string();
+                changed.push(GitFileEntry {
+                    additions: file_line_count(&work_dir.join(&to_path)),
+                    deletions: 0,
+                    path: to_path,
+                    status_char: 'A',
+                    staged: false,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    changed.sort_by(|a, b| a.path.cmp(&b.path));
+    staged.sort_by(|a, b| a.path.cmp(&b.path));
+    Some((changed, staged))
 }
 
 pub fn diff_line_status_for_content(path: &Path, content: &str) -> HashMap<usize, GitLineStatus> {
@@ -268,6 +404,22 @@ pub(crate) fn head_short_hash(root: &Path) -> Option<String> {
     Some(id.shorten_or_id().to_string())
 }
 
+pub(crate) fn repo_root(root: &Path) -> Option<PathBuf> {
+    let repo = shared_repo(root)?.to_thread_local();
+    Some(repo.workdir()?.to_path_buf())
+}
+
+pub(crate) fn git_path(root: &Path, path: &str) -> Option<PathBuf> {
+    let repo = shared_repo(root)?.to_thread_local();
+    Some(repo.git_dir().join(path))
+}
+
+pub(crate) fn has_staged_changes(root: &Path) -> Option<bool> {
+    let repo = shared_repo(root)?.to_thread_local();
+    let index = repo.index_or_load_from_head_or_empty().ok()?;
+    Some(!staged_entries(&repo, &index).is_empty())
+}
+
 /// Local + remote branches with the layout `/api/branches` needs. `branches`
 /// holds every short name (heads then remotes) in `for-each-ref` lexical order
 /// by full refname, `remotes` the remote subset, `current` the checked-out
@@ -319,6 +471,27 @@ pub(crate) fn list_branches(root: &Path) -> Option<BranchList> {
     })
 }
 
+pub(crate) fn list_local_branches(root: &Path) -> Option<Vec<(String, bool)>> {
+    let repo = shared_repo(root)?.to_thread_local();
+    let current = repo
+        .head_name()
+        .ok()
+        .flatten()
+        .map(|n| n.shorten().to_str_lossy().into_owned());
+    let mut branches = Vec::new();
+    for reference in repo.references().ok()?.all().ok()?.flatten() {
+        let full = reference.name().as_bstr().to_str_lossy();
+        if !full.starts_with("refs/heads/") {
+            continue;
+        }
+        let name = reference.name().shorten().to_str_lossy().into_owned();
+        let is_current = current.as_deref() == Some(name.as_str());
+        branches.push((name, is_current));
+    }
+    branches.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(branches)
+}
+
 /// One row of the commits list (`git log --pretty`).
 pub(crate) struct CommitInfo {
     pub hash: String,      // %h (min-unique abbreviation)
@@ -332,11 +505,20 @@ pub(crate) struct CommitInfo {
 /// first. Returns `None` when HEAD can't be resolved (e.g. an unborn branch),
 /// matching the previous subprocess path which errored there.
 pub(crate) fn commit_log(root: &Path, skip: usize, count: usize) -> Option<Vec<CommitInfo>> {
+    commit_log_for_rev(root, "HEAD", skip, count)
+}
+
+pub(crate) fn commit_log_for_rev(
+    root: &Path,
+    rev: &str,
+    skip: usize,
+    count: usize,
+) -> Option<Vec<CommitInfo>> {
     use gix::revision::walk::Sorting;
     use gix::traverse::commit::simple::CommitTimeOrder;
 
     let repo = shared_repo(root)?.to_thread_local();
-    let head = repo.head_id().ok()?;
+    let head = repo.rev_parse_single(rev.as_bytes().as_bstr()).ok()?;
     let walk = repo
         .rev_walk([head.detach()])
         .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
@@ -367,6 +549,68 @@ pub(crate) fn commit_log(root: &Path, skip: usize, count: usize) -> Option<Vec<C
         });
     }
     Some(out)
+}
+
+pub(crate) fn last_commit_for_path(root: &Path, rel_path: &str) -> Option<CommitInfo> {
+    use gix::revision::walk::Sorting;
+    use gix::traverse::commit::simple::CommitTimeOrder;
+
+    let repo = shared_repo(root)?.to_thread_local();
+    let head = repo.head_id().ok()?;
+    let walk = repo
+        .rev_walk([head.detach()])
+        .sorting(Sorting::ByCommitTime(CommitTimeOrder::NewestFirst))
+        .all()
+        .ok()?;
+    let path = (rel_path != "." && !rel_path.is_empty()).then_some(rel_path);
+
+    for info in walk {
+        let Ok(info) = info else { break };
+        let Ok(commit) = repo.find_commit(info.id) else {
+            break;
+        };
+        if let Some(path) = path
+            && !commit_changes_path(&commit, path)
+        {
+            continue;
+        }
+        let Ok(author) = commit.author() else { break };
+        let date = match author.time() {
+            Ok(time) => time.format_or_unix(gix::date::time::format::SHORT),
+            Err(_) => String::new(),
+        };
+        let message = commit
+            .message()
+            .map(|m| m.summary().to_str_lossy().into_owned())
+            .unwrap_or_default();
+        return Some(CommitInfo {
+            hash: info.id().shorten_or_id().to_string(),
+            full_hash: info.id.to_string(),
+            author: author.name.to_str_lossy().into_owned(),
+            date,
+            message,
+        });
+    }
+    None
+}
+
+fn commit_changes_path(commit: &Commit<'_>, rel_path: &str) -> bool {
+    let Ok(tree) = commit.tree() else {
+        return false;
+    };
+    let current = tree
+        .lookup_entry_by_path(rel_path)
+        .ok()
+        .flatten()
+        .map(|entry| entry.object_id());
+    let parent = commit
+        .parent_ids()
+        .next()
+        .and_then(|pid| commit.repo.find_commit(pid.detach()).ok())
+        .and_then(|parent| parent.tree().ok())
+        .and_then(|tree| tree.lookup_entry_by_path(rel_path).ok().flatten())
+        .map(|entry| entry.object_id());
+    current != parent
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +710,38 @@ pub(crate) fn compare_diff_text(
     ))
 }
 
+pub(crate) fn file_diff_text(root: &Path, path: &str, staged: bool) -> Option<String> {
+    let repo = shared_repo(root)?.to_thread_local();
+    let old = if staged {
+        blob_at_revspec(root, &format!("HEAD:{path}")).map(String::into_bytes)
+    } else {
+        blob_at_revspec(root, &format!(":{path}"))
+            .or_else(|| blob_at_revspec(root, &format!("HEAD:{path}")))
+            .map(String::into_bytes)
+    };
+    let new = if staged {
+        blob_at_revspec(root, &format!(":{path}")).map(String::into_bytes)
+    } else {
+        let work_dir = repo.workdir()?;
+        std::fs::read(work_dir.join(path)).ok()
+    };
+
+    if old == new {
+        return Some(String::new());
+    }
+
+    let kind = match (&old, &new) {
+        (None, Some(_)) => FileChangeKind::Added,
+        (Some(_), None) => FileChangeKind::Deleted,
+        _ => FileChangeKind::Modified,
+    };
+    let old = old.unwrap_or_default();
+    let new = new.unwrap_or_default();
+    let mut out = String::new();
+    append_file_diff(&mut out, path, path, &old, &new, kind);
+    Some(out)
+}
+
 /// Build git-style unified diff text for every change between two trees, in
 /// path order, optionally filtered to a single file.
 fn tree_diff_text(
@@ -509,6 +785,159 @@ fn blob_bytes(repo: &Repository, id: gix::ObjectId) -> Vec<u8> {
     repo.find_object(id)
         .map(|o| o.detach().data)
         .unwrap_or_default()
+}
+
+fn staged_entries(repo: &Repository, index: &gix::index::File) -> Vec<GitFileEntry> {
+    let mut entries = Vec::new();
+    let head_tree_id = repo.head().ok().and_then(|head| head.id()).and_then(|id| {
+        id.object()
+            .ok()
+            .and_then(|obj| obj.peel_to_commit().ok())
+            .and_then(|commit| commit.tree_id().ok())
+    });
+
+    let Some(tree_id) = head_tree_id else {
+        for entry in index.entries() {
+            if entry.stage() != gix::index::entry::Stage::Unconflicted {
+                continue;
+            }
+            let path = entry.path(index).to_str_lossy().into_owned();
+            entries.push(GitFileEntry {
+                additions: blob_line_count(&blob_bytes(repo, entry.id)),
+                deletions: 0,
+                path,
+                status_char: 'A',
+                staged: true,
+            });
+        }
+        return entries;
+    };
+
+    let _ = repo.tree_index_status(
+        tree_id.as_ref(),
+        index,
+        None,
+        gix::status::tree_index::TrackRenames::Disabled,
+        |change,
+         _tree_index,
+         _worktree_index|
+         -> Result<gix::diff::index::Action, std::convert::Infallible> {
+            use gix::diff::index::ChangeRef;
+            match change {
+                ChangeRef::Addition { location, id, .. } => {
+                    entries.push(GitFileEntry {
+                        path: location.to_str_lossy().into_owned(),
+                        status_char: 'A',
+                        staged: true,
+                        additions: blob_line_count(&blob_bytes(repo, id.as_ref().to_owned())),
+                        deletions: 0,
+                    });
+                }
+                ChangeRef::Deletion { location, id, .. } => {
+                    entries.push(GitFileEntry {
+                        path: location.to_str_lossy().into_owned(),
+                        status_char: 'D',
+                        staged: true,
+                        additions: 0,
+                        deletions: blob_line_count(&blob_bytes(repo, id.as_ref().to_owned())),
+                    });
+                }
+                ChangeRef::Modification {
+                    location,
+                    previous_id,
+                    id,
+                    ..
+                } => {
+                    let (additions, deletions) = diff_counts(
+                        &blob_bytes(repo, previous_id.as_ref().to_owned()),
+                        &blob_bytes(repo, id.as_ref().to_owned()),
+                    );
+                    entries.push(GitFileEntry {
+                        path: location.to_str_lossy().into_owned(),
+                        status_char: 'M',
+                        staged: true,
+                        additions,
+                        deletions,
+                    });
+                }
+                ChangeRef::Rewrite {
+                    location,
+                    source_id,
+                    id,
+                    ..
+                } => {
+                    let (additions, deletions) = diff_counts(
+                        &blob_bytes(repo, source_id.as_ref().to_owned()),
+                        &blob_bytes(repo, id.as_ref().to_owned()),
+                    );
+                    entries.push(GitFileEntry {
+                        path: location.to_str_lossy().into_owned(),
+                        status_char: 'R',
+                        staged: true,
+                        additions,
+                        deletions,
+                    });
+                }
+            }
+            Ok(std::ops::ControlFlow::Continue(()))
+        },
+    );
+
+    entries
+}
+
+fn status_char_from_entry_status<TSubmodule, TConflict>(
+    status: EntryStatus<TSubmodule, TConflict>,
+) -> char {
+    match status {
+        EntryStatus::Conflict { .. } => 'U',
+        EntryStatus::Change(Change::Removed) => 'D',
+        EntryStatus::IntentToAdd => '?',
+        EntryStatus::Change(_) | EntryStatus::NeedsUpdate(_) => 'M',
+    }
+}
+
+fn file_line_count(path: &Path) -> usize {
+    std::fs::read(path)
+        .map(|bytes| blob_line_count(&bytes))
+        .unwrap_or(0)
+}
+
+fn blob_line_count(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let nl_count = bytes.iter().filter(|b| **b == b'\n').count();
+    if bytes.last() == Some(&b'\n') {
+        nl_count
+    } else {
+        nl_count + 1
+    }
+}
+
+fn diff_counts(old_bytes: &[u8], new_bytes: &[u8]) -> (usize, usize) {
+    if looks_binary(old_bytes) || looks_binary(new_bytes) {
+        return (0, 0);
+    }
+    let old = String::from_utf8_lossy(old_bytes);
+    let new = String::from_utf8_lossy(new_bytes);
+    let mut input = InternedInput {
+        before: Vec::new(),
+        after: Vec::new(),
+        interner: Interner::new(0),
+    };
+    input.update_before(old.split_inclusive('\n'));
+    input.update_after(new.split_inclusive('\n'));
+
+    let mut diff = imara_diff::Diff::compute(imara_diff::Algorithm::Myers, &input);
+    diff.postprocess_lines(&input);
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    for hunk in diff.hunks() {
+        additions += (hunk.after.end - hunk.after.start) as usize;
+        deletions += (hunk.before.end - hunk.before.start) as usize;
+    }
+    (additions, deletions)
 }
 
 fn append_change(

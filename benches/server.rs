@@ -181,6 +181,77 @@ async fn page_context_parallel(root: &Path) {
     );
 }
 
+/// `/api/commit/<hash>` git work, the OLD way: meta, name-status, and full diff
+/// awaited back-to-back (3 serial spawns). Uses HEAD as a stable real commit.
+async fn commit_serial(root: &Path) {
+    let _meta = git_out(
+        root,
+        &["show", "-s", "--format=%H%n%an%n%ae%n%ad%n%B", "HEAD"],
+    )
+    .await;
+    let _files = git_out(
+        root,
+        &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"],
+    )
+    .await;
+    let _diff = git_out(root, &["show", "--format=", "--no-ext-diff", "HEAD"]).await;
+}
+
+/// `/api/commit/<hash>` git work, the NEW way: all three spawned concurrently.
+async fn commit_parallel(root: &Path) {
+    let _ = tokio::join!(
+        git_out(
+            root,
+            &["show", "-s", "--format=%H%n%an%n%ae%n%ad%n%B", "HEAD"]
+        ),
+        git_out(
+            root,
+            &["diff-tree", "--no-commit-id", "--name-status", "-r", "HEAD"]
+        ),
+        git_out(root, &["show", "--format=", "--no-ext-diff", "HEAD"]),
+    );
+}
+
+/// `/api/branches` git work, the OLD way: for-each-ref then the origin/HEAD probe
+/// awaited serially.
+async fn branches_serial(root: &Path) {
+    let _refs = git_out(
+        root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)|%(refname:short)|%(HEAD)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    )
+    .await;
+    let _origin = git_out(
+        root,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .await;
+}
+
+/// `/api/branches` git work, the NEW way: the ref listing and origin/HEAD probe
+/// run concurrently (the probe is independent of parsing the ref list).
+async fn branches_parallel(root: &Path) {
+    let _ = tokio::join!(
+        git_out(
+            root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)|%(refname:short)|%(HEAD)",
+                "refs/heads/",
+                "refs/remotes/"
+            ],
+        ),
+        git_out(
+            root,
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]
+        ),
+    );
+}
+
 /// Time an async closure over warmup + iterations, returning per-iter micros.
 fn time_async<F, Fut>(
     rt: &tokio::runtime::Runtime,
@@ -308,4 +379,12 @@ fn main() {
     report("page ctx (4 spawns): serial", &mut t);
     let mut t = time_async(&rt, warmup, iterations, || page_context_parallel(&root));
     report("page ctx (dedup): parallel", &mut t);
+    let mut t = time_async(&rt, warmup, iterations, || commit_serial(&root));
+    report("api/commit (3 git): serial", &mut t);
+    let mut t = time_async(&rt, warmup, iterations, || commit_parallel(&root));
+    report("api/commit (3 git): parallel", &mut t);
+    let mut t = time_async(&rt, warmup, iterations, || branches_serial(&root));
+    report("api/branches: serial", &mut t);
+    let mut t = time_async(&rt, warmup, iterations, || branches_parallel(&root));
+    report("api/branches: parallel", &mut t);
 }

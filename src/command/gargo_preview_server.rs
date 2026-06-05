@@ -700,7 +700,7 @@ static DEFAULT_BRANCH_CACHE: std::sync::OnceLock<Mutex<HashMap<PathBuf, Option<S
     std::sync::OnceLock::new();
 
 /// `github_repo_url`, memoized per repo root.
-async fn cached_github_repo_url(repo_root: &Path) -> Option<String> {
+pub(crate) async fn cached_github_repo_url(repo_root: &Path) -> Option<String> {
     let cache = REPO_URL_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(hit) = cache.lock().unwrap().get(repo_root).cloned() {
         return hit;
@@ -714,7 +714,7 @@ async fn cached_github_repo_url(repo_root: &Path) -> Option<String> {
 }
 
 /// `default_branch_name`, memoized per repo root.
-async fn cached_default_branch_name(repo_root: &Path) -> Option<String> {
+pub(crate) async fn cached_default_branch_name(repo_root: &Path) -> Option<String> {
     let cache = DEFAULT_BRANCH_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(hit) = cache.lock().unwrap().get(repo_root).cloned() {
         return hit;

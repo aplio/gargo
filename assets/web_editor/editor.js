@@ -580,19 +580,22 @@
         if (previewOpen) refreshPreview();
       }
 
-      // On boot, re-open the preview pane if it was left on in this tab and the
-      // current file supports preview. A persisted "on" for a non-previewable
-      // file is kept (not cleared), so navigating back to a Markdown/HTML file
-      // in the same tab re-opens it.
-      function restorePreviewState() {
-        let want = false;
-        try { want = sessionStorage.getItem("gargo_preview") === "true"; } catch (_) {}
-        if (!want || !previewableKind(filePath)) return;
-        previewOpen = true;
-        els.previewPane.hidden = false;
-        els.previewResizer.hidden = false;
-        render();
-        refreshPreview();
+      // Reconcile the split preview with the current file on every load/swap:
+      // keep it open if the file supports preview and this tab wants it (either
+      // it's already open, or sessionStorage remembers "on"), otherwise hide the
+      // pane. A persisted "on" for a non-previewable file is kept (not cleared),
+      // so navigating back to a Markdown/HTML file in the same tab re-opens it.
+      // The caller renders afterwards, so this doesn't render itself.
+      function syncPreview() {
+        let want = previewOpen;
+        if (!want) {
+          try { want = sessionStorage.getItem("gargo_preview") === "true"; } catch (_) {}
+        }
+        const ok = want && !!previewableKind(filePath);
+        previewOpen = ok;
+        els.previewPane.hidden = !ok;
+        els.previewResizer.hidden = !ok;
+        if (ok) refreshPreview();
       }
 
       function syncStatus(model) {
@@ -1714,17 +1717,52 @@
         } catch (_) {}
       }
 
+      // Switch the editor to `path` (optionally with a #L hash) in place — no full
+      // page reload. The old path called window.location.assign, which re-fetched
+      // and re-instantiated the wasm module and rebuilt every listener on each
+      // open; loadFile() reuses all of that and only swaps the buffer.
+      async function navigateToFile(path, hash) {
+        if (path === filePath && !hash) return; // already here
+        // beforeunload can't guard an in-page swap, so confirm here instead.
+        if (
+          isModified() &&
+          !window.confirm("You have unsaved changes. Discard them and switch files?")
+        ) {
+          return;
+        }
+        history.pushState({ path }, "", editorUrl(path) + (hash || ""));
+        await loadFile(path, hash || "");
+      }
+
       function openFile(path) {
-        // Full navigation; boot() loads the file.
-        window.location.assign(editorUrl(path));
+        navigateToFile(path, null);
       }
 
       // Open a file and land the caret on a specific location. The target is
-      // carried in the URL hash (#L<line>:<col>, 1-based) so it survives the
-      // full-page navigation; boot() parses it and positions the cursor.
+      // carried in the URL hash (#L<line>:<col>, 1-based); loadFile()/jumpToHash()
+      // read it back and position the cursor once the new core is in place.
       function openFileAt(path, line, col) {
-        const hash = "#L" + (line + 1) + ":" + (col + 1);
-        window.location.assign(editorUrl(path) + hash);
+        navigateToFile(path, "#L" + (line + 1) + ":" + (col + 1));
+      }
+
+      // Back/forward between files visited in this tab. The address bar has
+      // already changed, so a cancelled unsaved-changes prompt re-pushes the
+      // current file to keep the URL honest; a same-file pop just re-jumps to the
+      // (possibly new) #L hash.
+      async function onPopState() {
+        const path = pathFromLocation();
+        if (path === filePath) {
+          jumpToHash();
+          return;
+        }
+        if (
+          isModified() &&
+          !window.confirm("You have unsaved changes. Discard them and switch files?")
+        ) {
+          history.pushState({ path: filePath }, "", editorUrl(filePath));
+          return;
+        }
+        await loadFile(path, window.location.hash || "");
       }
 
       // Parse #L<line>:<col> (1-based) from the URL and place the caret there.
@@ -3130,25 +3168,22 @@
 
       // ---- boot ------------------------------------------------------------
 
-      async function boot() {
-        await init();
-        measureCharWidth();
-
-        filePath = decodeURIComponent(
+      // Repo-relative path the URL currently points at.
+      function pathFromLocation() {
+        return decodeURIComponent(
           window.location.pathname.replace(/^\/editor\/?/, "")
         );
+      }
+
+      // Load (or swap to) a file in place — no full page reload. Re-instantiating
+      // the wasm module and attaching listeners is boot()'s one-time job; this
+      // runs on every file switch and rebuilds only what's file-specific. Returns
+      // true if the file failed to load.
+      async function loadFile(path, hash) {
+        filePath = path;
         els.path.textContent = filePath || "(no file — Cmd+P to open)";
         document.title =
           (filePath ? filePath.split("/").pop() : "(no file)") + " — gargo";
-
-        // One-shot flag set just before the bare-/editor auto-redirect below, so
-        // we can tell an auto-reopened file apart from one the user navigated to
-        // directly and fall back to the picker (instead of looping) if it's gone.
-        let autoOpened = false;
-        try {
-          autoOpened = sessionStorage.getItem("gargo_autoopen") === "1";
-          sessionStorage.removeItem("gargo_autoopen");
-        } catch (_) {}
 
         let content = "";
         let loadFailed = false;
@@ -3171,19 +3206,68 @@
           }
         }
 
+        // Drop the previous core so its wasm allocation is freed now rather than
+        // whenever the FinalizationRegistry happens to run.
+        if (editor) {
+          try { editor.free(); } catch (_) {}
+        }
         editor = new WebEditor(filePath, content);
         // Baseline for the "● modified" indicator. Read it back from the editor
         // (not the raw server string) so any normalization the core applies on
         // load doesn't make a freshly-opened file look modified.
         baseContent = editor.content();
-        // Always-insert: switch into Insert mode once at boot (Normal 'i' →
+        modifiedVersion = -1;
+        modifiedValue = false;
+        // Always-insert: switch into Insert mode once on load (Normal 'i' →
         // ChangeMode(Insert); also begins the undo transaction). Escape is
         // swallowed in onKeyDown so we stay here.
         editor.key("i", false, false, false);
 
-        // Warn before leaving (tab close, reload, or navigating to another file)
-        // while there are unsaved edits. Native browsers ignore custom text and
-        // show their own prompt; setting returnValue is what triggers it.
+        // Reset everything scoped to the file we just left. renderedWrap = null
+        // makes the next render() tear down and rebuild the surface DOM for the
+        // new document (resetSurface), so stale rows/carets/spans can't survive.
+        renderedWrap = null;
+        lastModel = null;
+        lastVersion = -1;
+        maxCols = 0;
+        highlightSpans = new Map();
+        highlightedVersion = -1;
+        gitGutter = new Map();
+        gitGutterVersion = -1;
+        if (highlightTimer) { clearTimeout(highlightTimer); highlightTimer = null; }
+        if (gitGutterTimer) { clearTimeout(gitGutterTimer); gitGutterTimer = null; }
+
+        // A find/preview tied to the previous buffer is meaningless now: drop the
+        // find overlay and reconcile the preview pane against the new file.
+        if (findOpen) closeFind();
+        syncPreview();
+
+        els.ime.focus();
+        render();
+
+        // Caret target carried in #L<line>:<col> (needs the new core in place).
+        if (filePath) jumpToHash();
+
+        // Reuse the in-memory sidebar tree: expand to and re-mark the active row
+        // (renderTree reads filePath), with no /api/files refetch.
+        expandToFile(filePath);
+        renderTree();
+
+        // Populate syntax highlight + git gutter for the new file.
+        if (filePath) fetchHighlight();
+        if (filePath) fetchGitGutter();
+
+        return loadFailed;
+      }
+
+      async function boot() {
+        await init();
+        measureCharWidth();
+
+        // Warn before leaving (tab close or reload) while there are unsaved edits.
+        // In-page file switches are guarded separately (navigateToFile/onPopState)
+        // since beforeunload doesn't fire for them. Native browsers ignore custom
+        // text and show their own prompt; setting returnValue is what triggers it.
         window.addEventListener("beforeunload", (e) => {
           if (isModified()) {
             e.preventDefault();
@@ -3303,36 +3387,45 @@
           if (e.target === els.fsprompt) closeFsPrompt(null);
         });
 
-        els.ime.focus();
-        render();
-
-        // Jump to a location passed in the URL hash (#L<line>:<col>, 1-based),
-        // e.g. when opened from a global-search result. Clamp defensively.
-        if (filePath) jumpToHash();
-
-        // Re-open the split preview if it was left on in this browser tab and
-        // the current file supports it (per-tab persistence via sessionStorage).
-        restorePreviewState();
-
         // Keyboard navigation in the file explorer. Bound to the sidebar so it
         // only fires when the sidebar (not the editor textarea) holds focus —
         // the two never collide because DOM focus is mutually exclusive.
         els.sidebar.setAttribute("tabindex", "0");
         els.sidebar.addEventListener("keydown", onExplorerKeyDown);
 
-        // Populate the sidebar file tree and the initial syntax highlight.
+        // Back/forward between files visited in this tab (in-page swaps).
+        window.addEventListener("popstate", onPopState);
+
+        // Populate the sidebar file tree once; it's reused across file switches.
         initSidebar();
-        if (filePath) fetchHighlight();
-        if (filePath) fetchGitGutter();
+
+        // One-shot flag distinguishing an auto-reopened file from a directly
+        // navigated one, so a since-deleted auto file falls back to the picker
+        // (instead of looping).
+        let autoOpened = false;
+        try {
+          autoOpened = sessionStorage.getItem("gargo_autoopen") === "1";
+          sessionStorage.removeItem("gargo_autoopen");
+        } catch (_) {}
+
+        // Load the file named in the URL. loadFile handles render, jump-to-hash,
+        // preview, highlight, and the sidebar active row.
+        const initialPath = pathFromLocation();
+        const loadFailed = await loadFile(initialPath, window.location.hash || "");
 
         // Opened without a file (the rail's "Editor" link): reopen the last file
         // for this repo if we have one, else jump straight to the file picker.
-        if (!filePath) {
+        if (!initialPath) {
           const last = await readLastFile();
           if (last) {
-            try { sessionStorage.setItem("gargo_autoopen", "1"); } catch (_) {}
-            // replace() so the bare /editor entry doesn't pollute history.
-            window.location.replace(editorUrl(last));
+            // replaceState so the bare /editor entry doesn't pollute history.
+            history.replaceState({ path: last }, "", editorUrl(last));
+            const failed = await loadFile(last, "");
+            if (failed) {
+              // The remembered file is gone (deleted/renamed) → forget it.
+              clearLastFile();
+              openPicker();
+            }
             return;
           }
           openPicker();

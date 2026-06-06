@@ -80,6 +80,8 @@ const HELP_SECTIONS = [
       ["t", "Open file tree"],
       ["i / Enter", "Edit (insert) mode"],
       ["Esc", "Back to app focus"],
+      ["⌘D", "Select word / next occurrence"],
+      ["⌘Z / ⌘⇧Z", "Undo / redo"],
       ["j / k", "Scroll"],
       ["g g", "Jump to head of file"],
       ["G", "Jump to tail of file"],
@@ -502,6 +504,31 @@ function scrollEditorToCursor(behavior = "smooth") {
   const view = surface.clientHeight - 31; // subtract sticky toolbar height
   if (caretY < top + 40 || caretY > top + view - 40) {
     surface.scrollTo({ top: Math.max(0, caretY - surface.clientHeight / 2), behavior });
+  }
+}
+
+// Cmd+D: with no selection, expand to the word under the caret; with a word
+// already selected, jump the selection to the next occurrence (wrapping). A
+// single moving selection is the textarea-compatible subset of VSCode's Cmd+D
+// (true multi-cursor isn't possible in a <textarea>).
+const WORD_CHAR = /[A-Za-z0-9_]/;
+function selectWordOrNext(input) {
+  const value = input.value;
+  const { selectionStart: start, selectionEnd: end } = input;
+  if (start === end) {
+    let s = start, e = start;
+    while (s > 0 && WORD_CHAR.test(value[s - 1])) s--;
+    while (e < value.length && WORD_CHAR.test(value[e])) e++;
+    if (e > s) input.setSelectionRange(s, e);
+    return;
+  }
+  const selected = value.slice(start, end);
+  if (!selected) return;
+  let idx = value.indexOf(selected, end);
+  if (idx < 0) idx = value.indexOf(selected); // wrap to the first match
+  if (idx >= 0) {
+    input.setSelectionRange(idx, idx + selected.length);
+    scrollEditorToCursor("auto");
   }
 }
 
@@ -1515,6 +1542,20 @@ window.addEventListener("keydown", async event => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
     await saveCurrentFile();
+    return;
+  }
+  if (event.metaKey && !event.shiftKey && event.key.toLowerCase() === "d"
+      && event.target.classList?.contains("editor-input")) {
+    event.preventDefault();
+    selectWordOrNext(event.target);
+    return;
+  }
+  // Cmd+Z / Cmd+Shift+Z fall through to the textarea's native undo/redo; map
+  // Cmd+Y to redo as well for users who expect it.
+  if (event.metaKey && event.key.toLowerCase() === "y"
+      && event.target.classList?.contains("editor-input")) {
+    event.preventDefault();
+    document.execCommand("redo");
     return;
   }
   if (event.key === "Escape") {

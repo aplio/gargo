@@ -59,6 +59,7 @@ const state = {
   quickSymbols: [],
   quickSymbolsLoaded: false,
   quickMode: "files",
+  menuActions: [],
 };
 
 const HELP_SECTIONS = [
@@ -91,6 +92,7 @@ const HELP_SECTIONS = [
       ["h / Esc", "Focus previous pane / component"],
       ["Ctrl-d / Ctrl-u", "Scroll preview"],
       ["o", "Open selected file in editor"],
+      ["O", "Open menu: GitHub · copy path · copy content"],
       ["v", "Toggle viewed"],
     ],
   },
@@ -639,7 +641,7 @@ async function renderCompare() {
   await renderDiffView({
     kind: "compare",
     title: "Compare",
-    hint: `<span>Any branch, tag, or commit ref · <span class="key">B/C</span> base/compare · <span class="key">j/k</span> files · <span class="key">J/K</span> preview · <span class="key">v</span> viewed · <span class="key">o</span> edit</span>`,
+    hint: `<span>Any branch, tag, or commit ref · <span class="key">B/C</span> base/compare · <span class="key">j/k</span> files · <span class="key">J/K</span> preview · <span class="key">v</span> viewed · <span class="key">o</span> edit · <span class="key">O</span> menu</span>`,
     panes: [
       {
         title: "Source · ref pair", name: "ref pair and changed files",
@@ -700,7 +702,7 @@ async function renderStatus() {
   await renderDiffView({
     kind: "status",
     title: "Status",
-    hint: `<span>Worktree vs HEAD · <span class="key">j/k</span> files · <span class="key">v</span> viewed · <span class="key">o</span> edit · <span class="key">Ctrl-d/u</span> preview</span>`,
+    hint: `<span>Worktree vs HEAD · <span class="key">j/k</span> files · <span class="key">v</span> viewed · <span class="key">o</span> edit · <span class="key">O</span> menu · <span class="key">Ctrl-d/u</span> preview</span>`,
     panes: [
       { title: "Changed files", name: "changed files", body: fileList(state.statusFiles, state.statusFile, { viewed: true }) },
       { title: "Preview", name: "preview", body: diffSurfaceHtml() },
@@ -868,6 +870,114 @@ async function openSelectedDiffFileInEditor() {
   } catch (error) {
     notify(`Cannot open ${file.path}: ${error.message}`);
   }
+}
+
+// The file `O` (open menu) acts on: the selected file in status/compare lists,
+// else the file open in the explorer.
+function openMenuTarget() {
+  if (state.component === "status" && state.pane === 0) return state.statusFiles[state.statusFile]?.path || "";
+  if (state.component === "compare" && state.pane === 0) return state.compareFiles[state.compareFile]?.path || "";
+  if (state.component === "explorer") return state.currentFile || "";
+  return "";
+}
+
+function githubBlobUrl(remote, branch, path) {
+  return `${remote}/blob/${encodeURIComponent(branch)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    notify("Copied");
+  } catch (_) {
+    const area = document.createElement("textarea");
+    area.value = text;
+    document.body.appendChild(area);
+    area.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) {}
+    area.remove();
+    notify(ok ? "Copied" : "Copy failed");
+  }
+}
+
+async function copyFileContent(path) {
+  try {
+    const content = path === state.currentFile
+      ? state.fileContent
+      : (await api(`/api/file?path=${encodeURIComponent(path)}`)).content;
+    await copyText(content);
+  } catch (error) {
+    notify(`Copy failed: ${error.message}`);
+  }
+}
+
+// `O` — file actions menu (open on GitHub, copy paths/content) for the file the
+// editor would open with `o`.
+function openOpenMenu() {
+  const path = openMenuTarget();
+  if (!path) { notify("No file to act on"); return; }
+  const info = state.repoInfo || {};
+  const actions = [];
+  if (info.remote_url) {
+    const def = info.default_branch || "main";
+    actions.push({ key: "g", label: `Open on GitHub (${def})`, run: () => window.open(githubBlobUrl(info.remote_url, def, path), "_blank") });
+    if (info.branch && info.branch !== def) {
+      actions.push({ key: "G", label: `Open on GitHub (${info.branch})`, run: () => window.open(githubBlobUrl(info.remote_url, info.branch, path), "_blank") });
+    }
+  }
+  actions.push({ key: "r", label: "Copy relative path", run: () => copyText(path) });
+  actions.push({ key: "a", label: "Copy absolute path", run: () => copyText(info.root ? `${info.root.replace(/\/$/, "")}/${path}` : path) });
+  actions.push({ key: "y", label: "Copy whole content", run: () => copyFileContent(path) });
+  showMenuPopup(`Open · ${path}`, actions);
+}
+
+function showMenuPopup(title, actions) {
+  state.popup = "menu";
+  state.menuActions = actions;
+  state.popupIndex = 0;
+  popupTitle.textContent = title;
+  popupInput.hidden = true;
+  popup.classList.remove("tree-popup");
+  popupPreview.hidden = true;
+  popupPreview.innerHTML = "";
+  popupHint.textContent = "↑↓/jk move · Enter select · shortcut keys shown · Esc close";
+  popupBackdrop.hidden = false;
+  renderMenu();
+  popup.focus();
+}
+
+function renderMenu() {
+  popupList.innerHTML = state.menuActions.map((action, index) =>
+    `<li data-index="${index}" class="${index === state.popupIndex ? "selected" : ""}">${escapeHtml(action.label)}<span class="hint">${escapeHtml(action.key)}</span></li>`
+  ).join("");
+  popupList.querySelectorAll("[data-index]").forEach(li => li.addEventListener("click", () => chooseMenu(Number(li.dataset.index))));
+  popupList.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
+}
+
+async function chooseMenu(index = state.popupIndex) {
+  const action = state.menuActions[index];
+  closePopup();
+  if (action) await action.run();
+}
+
+function handleMenuKey(event) {
+  if (event.key === "Escape") { event.preventDefault(); closePopup(); return; }
+  if (event.key === "ArrowDown" || event.key === "j") {
+    event.preventDefault();
+    state.popupIndex = Math.min(state.popupIndex + 1, state.menuActions.length - 1);
+    renderMenu();
+    return;
+  }
+  if (event.key === "ArrowUp" || event.key === "k") {
+    event.preventDefault();
+    state.popupIndex = Math.max(0, state.popupIndex - 1);
+    renderMenu();
+    return;
+  }
+  if (event.key === "Enter") { event.preventDefault(); chooseMenu(); return; }
+  const idx = state.menuActions.findIndex(action => action.key === event.key);
+  if (idx >= 0) { event.preventDefault(); chooseMenu(idx); }
 }
 
 function fuzzyScore(text, query) {
@@ -1271,6 +1381,7 @@ popupInput.addEventListener("keydown", event => {
 });
 
 popup.addEventListener("keydown", event => {
+  if (state.popup === "menu") { handleMenuKey(event); return; }
   if (state.popup !== "tree" || !popupInput.hidden) return;
   if (event.key === "Escape") {
     event.preventDefault();
@@ -1385,6 +1496,11 @@ window.addEventListener("keydown", async event => {
   if (event.key === "?") {
     event.preventDefault();
     toggleHelp();
+    return;
+  }
+  if (event.key === "O") {
+    event.preventDefault();
+    openOpenMenu();
     return;
   }
 

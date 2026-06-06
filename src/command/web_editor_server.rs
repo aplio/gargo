@@ -243,6 +243,39 @@ pub(crate) async fn handle_api_git_status(State(state): State<Arc<GargoServerSta
     ok_json(&GitStatusResponse { statuses })
 }
 
+#[derive(Serialize)]
+struct RepoInfoResponse {
+    /// GitHub owner (or `local` when there is no GitHub remote).
+    owner: String,
+    /// Repo name (from the remote, else the working-tree folder name).
+    repo: String,
+    /// Current branch (or short hash when detached).
+    branch: String,
+    /// Default branch (`main`/`master`/origin HEAD), when resolvable.
+    default_branch: Option<String>,
+    /// Normalized `https://github.com/owner/repo` remote, when present.
+    remote_url: Option<String>,
+    /// Absolute repo root, for copy-absolute-path actions.
+    root: String,
+}
+
+/// Repository identity for the editor header and the file "open" menu: owner,
+/// repo, current/default branch, and the GitHub remote URL (used to build
+/// `…/blob/<branch>/<path>` links). Wraps [`resolve_page_context`], which caches
+/// the remote/default-branch git lookups per repo root.
+pub(crate) async fn handle_api_repo_info(State(state): State<Arc<GargoServerState>>) -> Response {
+    let (ctx, remote_url, default_branch) =
+        crate::command::gargo_preview_server::resolve_page_context(&state.repo_root).await;
+    ok_json(&RepoInfoResponse {
+        owner: ctx.owner,
+        repo: ctx.repo,
+        branch: ctx.branch,
+        default_branch,
+        remote_url,
+        root: state.repo_root.display().to_string(),
+    })
+}
+
 #[derive(Deserialize)]
 pub(crate) struct SearchQuery {
     q: String,

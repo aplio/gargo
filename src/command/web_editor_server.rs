@@ -257,6 +257,8 @@ struct RepoInfoResponse {
     remote_url: Option<String>,
     /// Absolute repo root, for copy-absolute-path actions.
     root: String,
+    /// Running gargo version, for the header version label.
+    version: String,
 }
 
 /// Repository identity for the editor header and the file "open" menu: owner,
@@ -273,7 +275,42 @@ pub(crate) async fn handle_api_repo_info(State(state): State<Arc<GargoServerStat
         default_branch,
         remote_url,
         root: state.repo_root.display().to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+#[derive(Serialize)]
+struct UpdateCheckResponse {
+    /// Running version.
+    current: String,
+    /// Latest released version, when the check succeeded.
+    latest: Option<String>,
+    /// True when a newer release is available.
+    has_update: bool,
+}
+
+/// Lightweight update probe for the header's version badge. Runs the same
+/// GitHub release check as `gargo --check` on the blocking pool so it never
+/// stalls the async runtime. Network/parse failures degrade to
+/// `has_update: false` (the badge simply stays hidden) rather than erroring.
+pub(crate) async fn handle_api_update_check(
+    State(_state): State<Arc<GargoServerState>>,
+) -> Response {
+    let status = tokio::task::spawn_blocking(crate::upgrade::check_status).await;
+    let current = env!("CARGO_PKG_VERSION").to_string();
+    let body = match status {
+        Ok(Ok(status)) => UpdateCheckResponse {
+            current: status.current_version().to_string(),
+            latest: Some(status.latest_version().to_string()),
+            has_update: status.has_update(),
+        },
+        _ => UpdateCheckResponse {
+            current,
+            latest: None,
+            has_update: false,
+        },
+    };
+    ok_json(&body)
 }
 
 #[derive(Deserialize)]

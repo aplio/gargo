@@ -52,7 +52,27 @@ button { color: inherit; }
 #repo-link { color: var(--accent); text-decoration: none; white-space: nowrap; }
 #repo-link[href]:hover { text-decoration: underline; }
 #repo-link[hidden], #repo-sep[hidden] { display: none; }
-#focus-path { margin-left: auto; color: var(--muted); font-size: 11px; }
+#app-version { margin-left: auto; font-size: 11px; white-space: nowrap; }
+#version-text { color: #687481; }
+#version-update {
+  margin-left: 4px;
+  color: var(--accent);
+  text-decoration: none;
+  font-weight: 600;
+}
+#version-update[hidden] { display: none; }
+#version-update:hover { text-decoration: underline; }
+#help-toggle {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+}
+#help-toggle:hover, #help-toggle:focus { color: var(--accent); border-color: var(--accent); }
 
 #app { flex: 1 1 auto; min-height: 0; outline: none; }
 .component, .panes, .pane, .code-surface { height: 100%; min-height: 0; }
@@ -449,5 +469,5 @@ button { color: inherit; }
 @media (max-width: 800px) {
   .panes.history { grid-template-columns: 42% 58% 100%; overflow-x: auto; }
   .panes.compare, .panes.status { grid-template-columns: 46% 100%; overflow-x: auto; }
-  #focus-path { display: none; }
+  #app-version { display: none; }
 }

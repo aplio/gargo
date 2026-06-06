@@ -557,6 +557,7 @@ async fn run_server(
         )
         .route("/api/git-status", get(editor::handle_api_git_status))
         .route("/api/repo-info", get(editor::handle_api_repo_info))
+        .route("/api/update-check", get(editor::handle_api_update_check))
         .route("/api/search", get(editor::handle_api_search))
         .route("/api/save", post(editor::handle_api_save))
         .route("/api/fs/create", post(editor::handle_api_fs_create))

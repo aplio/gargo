@@ -21,7 +21,10 @@
       <button data-component="compare">Compare</button>
       <span>|</span>
       <button data-component="status">Status</button>
-      <div id="focus-path" aria-live="polite"></div>
+      <span id="app-version" aria-live="polite">
+        <span id="version-text"></span><a id="version-update" href="#" role="button" hidden>↑</a>
+      </span>
+      <button type="button" id="help-toggle" aria-label="Show keybindings" title="Keybindings (?)">?</button>
     </header>
 
     <main id="app" tabindex="-1"></main>

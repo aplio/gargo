@@ -1,6 +1,8 @@
 const app = document.getElementById("app");
 const header = document.getElementById("header");
-const focusPath = document.getElementById("focus-path");
+const versionText = document.getElementById("version-text");
+const versionUpdate = document.getElementById("version-update");
+const helpToggle = document.getElementById("help-toggle");
 const popupBackdrop = document.getElementById("popup-backdrop");
 const popupTitle = document.getElementById("popup-title");
 const popupInput = document.getElementById("popup-input");
@@ -187,7 +189,30 @@ async function loadRepoInfo() {
     state.repoInfo = null;
   }
   renderRepoLink();
+  renderVersion();
   updateTitle();
+}
+
+function renderVersion() {
+  const version = state.repoInfo?.version;
+  versionText.textContent = version ? `gargo v${version}` : "gargo";
+}
+
+// Probe for a newer release (same check as `gargo --check`) and reveal the ↑
+// badge if one exists. Fire-and-forget: failures (offline, rate-limited) leave
+// the badge hidden. Clicking it points the user at the upgrade command.
+async function checkForUpdate() {
+  let data;
+  try {
+    data = await api("/api/update-check");
+  } catch (_) {
+    return;
+  }
+  if (!data?.has_update) return;
+  versionUpdate.hidden = false;
+  versionUpdate.title = data.latest
+    ? `Update available: v${data.latest} — run \`gargo --update\``
+    : "Update available — run `gargo --update`";
 }
 
 function renderRepoLink() {
@@ -245,11 +270,9 @@ function setFocus(level, pane = state.pane) {
 
 function updateFocusChrome() {
   header.querySelectorAll("button").forEach(button => {
+    if (!button.dataset.component) return;
     button.classList.toggle("active", button.dataset.component === state.component);
   });
-  const paneName = activePane()?.dataset.name || "";
-  focusPath.textContent = [state.focusLevel, state.component, state.focusLevel === "pane" ? paneName : ""]
-    .filter(Boolean).join(" › ");
   updateTitle();
 }
 
@@ -2259,6 +2282,15 @@ header.addEventListener("click", event => {
   if (button) switchComponent(button.dataset.component);
 });
 
+// Header `?` button mirrors the `?` key: toggle the keybindings popup.
+helpToggle.addEventListener("click", () => toggleHelp());
+
+// Update badge: surface the upgrade command rather than navigating.
+versionUpdate.addEventListener("click", event => {
+  event.preventDefault();
+  notify(versionUpdate.title || "Update available — run `gargo --update`");
+});
+
 // Click the dimmed area outside a picker / help dialog → dismiss it. The dialog
 // itself (`#popup` / `#help`) stops the event from reaching the backdrop.
 popupBackdrop.addEventListener("mousedown", event => {
@@ -2398,8 +2430,7 @@ window.addEventListener("keydown", async event => {
   if (event.key === "g") {
     event.preventDefault();
     state.gPending = true;
-    focusPath.textContent = "g …";
-    setTimeout(() => { state.gPending = false; updateFocusChrome(); }, 10000);
+    setTimeout(() => { state.gPending = false; }, 10000);
     return;
   }
   if (state.focusLevel === "app" && event.key === "t") {
@@ -2536,6 +2567,7 @@ window.addEventListener("beforeunload", event => {
 async function boot() {
   try {
     loadRepoInfo();
+    checkForUpdate();
     const last = await api("/api/last-file").catch(() => ({ path: null }));
     if (last.path) {
       const data = await api(`/api/file?path=${encodeURIComponent(last.path)}`);

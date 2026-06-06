@@ -169,6 +169,11 @@ fn unified_gargo_server_serves_code_diffs_compare_commits_and_events() {
             .as_str()
             .is_some_and(|root| !root.is_empty())
     );
+    // The header's version label reads `version` from /api/repo-info.
+    assert_eq!(
+        repo_info["version"],
+        serde_json::json!(env!("CARGO_PKG_VERSION"))
+    );
 
     let blob_html = get_text_with_retry(&format!("{base_url}/aplio/gargo/blob/master/README.md"));
     assert!(blob_html.contains("Test Repo"));

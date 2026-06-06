@@ -33,7 +33,7 @@
 - [x] editor should have git gutter(only in code view or editor view)
 - [x] fix tab name to have ${reponame}/${opened file or open tab} or something like more informative, not `gargo`
 - [x] scroll rattle so want it to be more smooth
-- [ ] make status view real time
+- [x] make status view real time
 - [ ] make history real time
 
 ## memo1

@@ -41,6 +41,8 @@ const state = {
   compareFile: 0,
   statusFiles: [],
   statusFile: 0,
+  statusSignature: "",
+  statusPollTimer: null,
   popup: null,
   popupItems: [],
   popupFiltered: [],
@@ -224,6 +226,7 @@ function updateFocusChrome() {
 
 async function switchComponent(component) {
   if (!COMPONENTS.includes(component)) return;
+  stopStatusPolling();
   state.component = component;
   state.pane = 0;
   state.focusLevel = component === "explorer" ? "app" : "pane";
@@ -234,6 +237,7 @@ async function switchComponent(component) {
   if (component === "compare") await renderCompare();
   if (component === "status") await renderStatus();
   setFocus(component === "explorer" ? "app" : "pane", 0);
+  if (component === "status") startStatusPolling();
 }
 
 function componentBar(title, hint) {
@@ -357,6 +361,7 @@ async function openFile(path, line = null, col = 0) {
   state.fileHash = data.hash;
   state.editorMode = "readonly";
   state.gitGutter = {};
+  stopStatusPolling();
   await api("/api/last-file", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ path }),
@@ -782,21 +787,67 @@ async function loadCompare() {
   state.compareFile = Math.min(state.compareFile, Math.max(0, state.compareFiles.length - 1));
 }
 
-async function renderStatus() {
-  const data = await api("/api/status");
-  state.statusFiles = ["unstaged", "staged", "untracked"].flatMap(section =>
+function statusFilesFrom(data) {
+  return ["unstaged", "staged", "untracked"].flatMap(section =>
     (data[section] || []).map(file => ({ ...file, section }))
   );
+}
+
+function statusSignature(files) {
+  return files.map(file =>
+    `${file.section}:${file.path}:${file.status}:${file.additions || 0}:${file.deletions || 0}:${file.viewed ? 1 : 0}`
+  ).join("|");
+}
+
+async function renderStatus() {
+  const data = await api("/api/status");
+  state.statusFiles = statusFilesFrom(data);
   state.statusFile = Math.min(state.statusFile, Math.max(0, state.statusFiles.length - 1));
+  state.statusSignature = statusSignature(state.statusFiles);
+  await renderStatusView();
+}
+
+async function renderStatusView() {
   await renderDiffView({
     kind: "status",
     title: "Status",
-    hint: `<span>Worktree vs HEAD · <span class="key">j/k</span> files · <span class="key">v</span> viewed · <span class="key">o</span> edit · <span class="key">O</span> menu · <span class="key">Ctrl-d/u</span> preview</span>`,
+    hint: `<span>Worktree vs HEAD · live · <span class="key">j/k</span> files · <span class="key">v</span> viewed · <span class="key">o</span> edit · <span class="key">O</span> menu · <span class="key">Ctrl-d/u</span> preview</span>`,
     panes: [
       { title: "Changed files", name: "changed files", body: fileList(state.statusFiles, state.statusFile, { viewed: true }) },
       { title: "Preview", name: "preview", body: diffSurfaceHtml() },
     ],
   });
+}
+
+// Item 36: keep Status live. While it is the active component, poll the
+// worktree and re-render only when the file set actually changes (signature
+// diff) so navigation/focus isn't disturbed on every tick.
+function startStatusPolling() {
+  stopStatusPolling();
+  state.statusPollTimer = setInterval(refreshStatusIfChanged, 1500);
+}
+
+function stopStatusPolling() {
+  if (state.statusPollTimer) {
+    clearInterval(state.statusPollTimer);
+    state.statusPollTimer = null;
+  }
+}
+
+async function refreshStatusIfChanged() {
+  if (state.component !== "status" || state.popup || state.help || document.hidden) return;
+  let data;
+  try { data = await api("/api/status"); } catch (_) { return; }
+  if (state.component !== "status" || state.popup || state.help) return;
+  const files = statusFilesFrom(data);
+  const signature = statusSignature(files);
+  if (signature === state.statusSignature) return;
+  const focusLevel = state.focusLevel, pane = state.pane;
+  state.statusFiles = files;
+  state.statusFile = Math.min(state.statusFile, Math.max(0, files.length - 1));
+  state.statusSignature = signature;
+  await renderStatusView();
+  setFocus(focusLevel, pane);
 }
 
 async function loadCurrentDiffPreview() {

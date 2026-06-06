@@ -315,6 +315,19 @@ function scrollEditorToCursor(behavior = "smooth") {
   }
 }
 
+// Jump the explorer surface (and caret, if present) to the top or bottom of
+// the file — `gg` goes to the head, `G` to the tail.
+function gotoEditorEdge(edge) {
+  const surface = editorScroller();
+  if (!surface) return;
+  const input = app.querySelector(".editor-input");
+  if (input) {
+    const offset = edge === "top" ? 0 : input.value.length;
+    input.setSelectionRange(offset, offset);
+  }
+  surface.scrollTo({ top: edge === "top" ? 0 : surface.scrollHeight, behavior: "smooth" });
+}
+
 function numberedPlainText(content) {
   return content.split("\n").map((line, index) =>
     `<span class="line-number">${index + 1}</span>${escapeHtml(line)}`
@@ -988,6 +1001,11 @@ window.addEventListener("keydown", async event => {
 
   if (state.gPending) {
     state.gPending = false;
+    if (event.key === "g" && state.component === "explorer") {
+      event.preventDefault();
+      gotoEditorEdge("top");
+      return;
+    }
     const target = ({ e: "explorer", h: "history", c: "compare", s: "status" })[event.key];
     if (target) { event.preventDefault(); await switchComponent(target); }
     return;
@@ -1010,6 +1028,11 @@ window.addEventListener("keydown", async event => {
       && (event.key === "j" || event.key === "k")) {
     event.preventDefault();
     scrollExplorer(event.key === "j" ? 1 : -1);
+    return;
+  }
+  if (state.component === "explorer" && state.focusLevel === "app" && event.key === "G") {
+    event.preventDefault();
+    gotoEditorEdge("bottom");
     return;
   }
   if (state.component === "compare" && event.shiftKey && event.key === "J") {

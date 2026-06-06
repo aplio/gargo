@@ -478,9 +478,20 @@ function enterEditorInsertMode() {
   const input = app.querySelector(".editor-input");
   if (!input) return false;
   input.readOnly = false;
+  // Drop the caret on the first visible line so entering edit mode keeps the
+  // viewport where the user was reading instead of jumping to the old caret
+  // (item 40). Line height is 20px with 12px top padding (see editor.css).
+  const surface = editorScroller();
+  if (surface) {
+    const lines = input.value.split("\n");
+    const topLine = Math.max(0, Math.min(Math.round((surface.scrollTop - 12) / 20), lines.length - 1));
+    const offset = lines.slice(0, topLine).reduce((sum, line) => sum + line.length + 1, 0);
+    input.setSelectionRange(offset, offset);
+  }
   updateEditorModeIndicator();
   setFocus("editor", 0);
-  scrollEditorToCursor();
+  // No scroll-to-cursor here: the caret was just placed on a visible line, so
+  // scrolling would re-center it and undo the point of item 40.
   return true;
 }
 

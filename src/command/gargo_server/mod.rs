@@ -25,7 +25,6 @@ pub(crate) use commit_pages::*;
 pub(crate) use repo_api::*;
 pub(crate) use util::*;
 
-
 #[derive(Debug, Clone)]
 pub enum GargoServerRoute {
     Root,

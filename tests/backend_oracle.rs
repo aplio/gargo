@@ -244,13 +244,18 @@ fn backend_oracle_read_endpoints() {
     assert_golden("status", get_json_with_retry(&format!("{d}/api/status")));
     assert_golden(
         "status_file_unstaged",
-        get_json_with_retry(&format!("{d}/api/status/file?section=unstaged&path=src/lib.rs")),
+        get_json_with_retry(&format!(
+            "{d}/api/status/file?section=unstaged&path=src/lib.rs"
+        )),
     );
     assert_golden(
         "status_file_staged",
         get_json_with_retry(&format!("{d}/api/status/file?section=staged&path=added.rs")),
     );
-    assert_golden("branches", get_json_with_retry(&format!("{d}/api/branches")));
+    assert_golden(
+        "branches",
+        get_json_with_retry(&format!("{d}/api/branches")),
+    );
     assert_golden(
         "compare",
         get_json_with_retry(&format!("{d}/api/compare?base=master&compare=feature")),
@@ -263,7 +268,10 @@ fn backend_oracle_read_endpoints() {
     );
 
     // gargo server endpoints
-    assert_golden("tree_src", get_json_with_retry(&format!("{g}/api/tree/src")));
+    assert_golden(
+        "tree_src",
+        get_json_with_retry(&format!("{g}/api/tree/src")),
+    );
     assert_golden(
         "blob_readme",
         get_json_with_retry(&format!("{g}/api/blob/README.md")),

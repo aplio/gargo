@@ -10,9 +10,7 @@ use axum::{
 };
 
 use crate::command::diff_server::{self};
-use crate::command::gargo_preview_server::{
-    self,
-};
+use crate::command::gargo_preview_server::{self};
 use crate::diff_render::parse_unified_diff;
 
 pub(crate) async fn handle_api_tree(

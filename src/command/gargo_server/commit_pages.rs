@@ -9,12 +9,12 @@ use axum::{
     response::{Html, IntoResponse},
 };
 
-use crate::command::gargo_preview_server::{
-    self,
-};
+use crate::command::gargo_preview_server::{self};
 use crate::diff_render::render_diff_styles;
 
-pub(crate) async fn handle_commits_html(State(state): State<Arc<GargoServerState>>) -> impl IntoResponse {
+pub(crate) async fn handle_commits_html(
+    State(state): State<Arc<GargoServerState>>,
+) -> impl IntoResponse {
     // Memoized + concurrent: avoids two serial cold git spawns per page load.
     let (repo_url, default_branch) = tokio::join!(
         gargo_preview_server::cached_github_repo_url(&state.repo_root),

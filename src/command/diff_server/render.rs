@@ -4,7 +4,6 @@ use super::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-
 use crate::diff_render::{
     DiffFile, DiffHighlights, LineKind, content_hash_of, render_file_body_html,
     render_file_body_html_with_highlights,
@@ -24,10 +23,8 @@ pub(crate) fn file_metadata_json(file: &DiffFile, viewed: bool) -> serde_json::V
     })
 }
 
-
 /// `(section, path) -> stored content hash` for one page / branch context.
 pub(crate) type ViewedMap = HashMap<(String, String), String>;
-
 
 /// Load every viewed-file record for a page / branch context off the async
 /// runtime, since a contended SQLite read can block briefly on `busy_timeout`.
@@ -46,7 +43,6 @@ pub(crate) async fn load_viewed_map(
     .await
     .unwrap_or_default()
 }
-
 
 /// Persist (or, with `hash == None`, clear) a file's viewed record off the
 /// async runtime. Best-effort: failures leave the viewed state unpersisted.
@@ -75,7 +71,6 @@ pub(crate) async fn store_viewed(
     .await;
 }
 
-
 /// Whether `file`'s current content matches its stored viewed record.
 pub(crate) fn diff_file_is_viewed(viewed: &ViewedMap, section: &str, file: &DiffFile) -> bool {
     viewed
@@ -83,12 +78,10 @@ pub(crate) fn diff_file_is_viewed(viewed: &ViewedMap, section: &str, file: &Diff
         .is_some_and(|stored| *stored == content_hash_of(file))
 }
 
-
 pub(crate) fn empty_diff_html() -> String {
     r#"<div class="gr-diff-body"><div class="gr-line gr-line-hunk"><span class="gr-ln"></span><span class="gr-lnr"></span><span class="gr-sign"></span><span class="gr-text">(no content changes)</span></div></div>"#
         .to_string()
 }
-
 
 /// Render `file` to HTML, applying tree-sitter syntax highlighting when
 /// the file's extension maps to a known language. Falls back to plain
@@ -104,7 +97,6 @@ pub(crate) fn render_highlighted(file: &DiffFile) -> String {
     let highlights = compute_diff_highlights(file, lang);
     render_file_body_html_with_highlights(file, &highlights)
 }
-
 
 /// Reconstruct the new- and old-side line streams for `file`, run
 /// `highlight_text` over each, and translate the per-row span maps back
@@ -184,7 +176,6 @@ pub(crate) fn compute_diff_highlights(file: &DiffFile, lang: &LanguageDef) -> Di
     result
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,4 +239,3 @@ Binary files a/img.rs and b/img.rs differ
         assert!(!html.contains("gr-hl-"));
     }
 }
-

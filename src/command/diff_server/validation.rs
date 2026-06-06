@@ -1,11 +1,9 @@
 //! Request validation + small response/HTML helpers.
 
-
 use axum::{
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Json, Response},
 };
-
 
 pub(crate) fn parse_bool_param(value: Option<&String>, default: bool) -> bool {
     match value.map(|v| v.as_str()) {
@@ -15,7 +13,6 @@ pub(crate) fn parse_bool_param(value: Option<&String>, default: bool) -> bool {
     }
 }
 
-
 pub(crate) fn html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -23,7 +20,6 @@ pub(crate) fn html_escape(text: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
-
 
 /// Validate a relative path used as a git diff argument.
 ///
@@ -48,7 +44,6 @@ pub(crate) fn parse_diff_path(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-
 /// Validate a git branch name to block flag injection and command injection.
 ///
 /// Accepts the conservative subset `[A-Za-z0-9._/\-]`, rejects names that start
@@ -70,7 +65,6 @@ pub(crate) fn parse_branch_name(value: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-
 pub(crate) fn bad_request(message: impl Into<String>) -> Response {
     let payload = serde_json::json!({ "error": message.into() });
     let mut response = (StatusCode::BAD_REQUEST, Json(payload)).into_response();
@@ -81,7 +75,6 @@ pub(crate) fn bad_request(message: impl Into<String>) -> Response {
     response
 }
 
-
 pub(crate) fn ok_json(payload: serde_json::Value) -> Response {
     let mut response = (StatusCode::OK, Json(payload)).into_response();
     response.headers_mut().insert(
@@ -90,7 +83,6 @@ pub(crate) fn ok_json(payload: serde_json::Value) -> Response {
     );
     response
 }
-
 
 pub(crate) fn repo_ctx_script(
     ctx: &crate::command::gargo_preview_server::RepoUrlContext,
@@ -105,4 +97,3 @@ pub(crate) fn repo_ctx_script(
         default_branch,
     )
 }
-

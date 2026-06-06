@@ -27,7 +27,6 @@ pub(crate) enum SplitSource {
     Commit { hash: String },
 }
 
-
 pub(crate) fn parse_split_source(params: &HashMap<String, String>) -> Result<SplitSource, String> {
     let src = params
         .get("source")
@@ -70,7 +69,6 @@ pub(crate) fn parse_split_source(params: &HashMap<String, String>) -> Result<Spl
     }
 }
 
-
 /// Map a split source to `(old_ref, new_ref)`. `None` means "working tree";
 /// `Some("")` means the git index (`git show :path`).
 pub(crate) fn split_refs(source: &SplitSource) -> (Option<String>, Option<String>) {
@@ -86,7 +84,6 @@ pub(crate) fn split_refs(source: &SplitSource) -> (Option<String>, Option<String
     }
 }
 
-
 /// 64-hex limit covers SHA-256; the gargo_server module has a duplicate.
 /// Kept private here so `/split` doesn't depend on the github router module.
 pub(crate) fn parse_commit_hash_value(hash: &str) -> Option<String> {
@@ -99,7 +96,6 @@ pub(crate) fn parse_commit_hash_value(hash: &str) -> Option<String> {
         None
     }
 }
-
 
 /// Fetch full file contents at a ref (or working tree). Returns `None` when
 /// the path does not exist on that side (added on new, deleted on old, etc.)
@@ -125,7 +121,6 @@ pub(crate) async fn read_full_file_at_ref(
     Ok(Some(lines))
 }
 
-
 /// Load the parsed `DiffFile` for any split source. Reuses the existing
 /// per-page loaders so status/compare paths share identical git invocations
 /// with their non-split counterparts.
@@ -147,7 +142,6 @@ pub(crate) async fn load_split_diff_file(
     }
 }
 
-
 pub(crate) fn ref_label(r: Option<&str>) -> String {
     match r {
         None => "working tree".to_string(),
@@ -156,12 +150,10 @@ pub(crate) fn ref_label(r: Option<&str>) -> String {
     }
 }
 
-
 /// Soft cap on combined old + new line count. The split view loads the
 /// whole file into the DOM in a single pass; beyond this much content the
 /// browser stalls long enough to feel broken.
 pub(crate) const SPLIT_MAX_LINES: usize = 50_000;
-
 
 /// Build per-line highlight maps (keyed by 1-based line number) from the
 /// full text of one side using the language inferred from `path`.
@@ -191,7 +183,6 @@ pub(crate) fn build_line_highlights(lines: &[String], path: &str) -> Option<Line
     Some(out)
 }
 
-
 pub(crate) fn split_back_url(
     source: &SplitSource,
     url_ctx: &crate::command::gargo_preview_server::RepoUrlContext,
@@ -212,7 +203,6 @@ pub(crate) fn split_back_url(
         }
     }
 }
-
 
 /// Serve the split-view HTML page for a single file.
 pub(crate) async fn handle_split_request(
@@ -375,4 +365,3 @@ pub(crate) async fn handle_split_request(
 
     Html(html).into_response()
 }
-

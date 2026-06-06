@@ -11,9 +11,7 @@ use axum::{
 
 use crate::command::diff_viewed::PAGE_STATUS;
 use crate::command::git_backend;
-use crate::diff_render::{
-    content_hash_of, parse_unified_diff,
-};
+use crate::diff_render::{content_hash_of, parse_unified_diff};
 
 /// API endpoint that returns unstaged/staged diffs and untracked files.
 pub(crate) async fn handle_api_status_request(
@@ -102,7 +100,6 @@ pub(crate) async fn handle_api_status_request(
     }))
 }
 
-
 pub(crate) async fn handle_api_status_file_request(
     State(state): State<Arc<DiffServerState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -146,15 +143,16 @@ pub(crate) async fn handle_api_status_file_request(
     }
 }
 
-
-pub(crate) fn parse_usize_param(params: &HashMap<String, String>, key: &str) -> Result<usize, String> {
+pub(crate) fn parse_usize_param(
+    params: &HashMap<String, String>,
+    key: &str,
+) -> Result<usize, String> {
     params
         .get(key)
         .ok_or_else(|| format!("missing `{}` query parameter", key))?
         .parse::<usize>()
         .map_err(|e| format!("invalid `{}`: {}", key, e))
 }
-
 
 pub(crate) async fn handle_api_status_context_request(
     State(state): State<Arc<DiffServerState>>,
@@ -187,14 +185,12 @@ pub(crate) async fn handle_api_status_context_request(
     }
 }
 
-
 #[derive(serde::Deserialize)]
 pub(crate) struct StatusViewedRequest {
     section: String,
     path: String,
     viewed: bool,
 }
-
 
 /// POST endpoint: persist the "Viewed" checkbox for one status-page file.
 ///
@@ -255,12 +251,10 @@ pub(crate) async fn handle_api_status_viewed_request(
     ok_json(serde_json::json!({ "viewed": true }))
 }
 
-
 #[derive(serde::Deserialize)]
 pub(crate) struct StagePathRequest {
     path: String,
 }
-
 
 /// Content hash anchoring a "Viewed" record for `path` as rendered in
 /// `section`, or `None` when the file has no content in that section right now
@@ -279,7 +273,6 @@ pub(crate) async fn viewed_hash_for_section(
         _ => None,
     }
 }
-
 
 /// The first of `from_sections` in which `path` is genuinely viewed *right now*
 /// — a stored record whose hash still matches the file's content. Call this
@@ -303,7 +296,6 @@ pub(crate) async fn viewed_source_section(
     }
     None
 }
-
 
 /// Move a file's "Viewed" record from `from` to the first of `to_sections`
 /// whose representation now has content, re-pinning it to a freshly computed
@@ -343,7 +335,6 @@ pub(crate) async fn move_viewed_record(
     }
 }
 
-
 /// POST endpoint: stage one file (`git add -- <path>`). Works for modified,
 /// deleted, and untracked paths alike — `git add` records each appropriately.
 pub(crate) async fn handle_api_status_stage_request(
@@ -367,7 +358,6 @@ pub(crate) async fn handle_api_status_stage_request(
         Err(e) => bad_request(e),
     }
 }
-
 
 /// POST endpoint: unstage one file. `git reset -- <path>` restores the index
 /// entry from HEAD (and works before the first commit, where it just removes
@@ -394,7 +384,6 @@ pub(crate) async fn handle_api_status_unstage_request(
         Err(e) => bad_request(e),
     }
 }
-
 
 /// GET endpoint backing the commit page: the list of staged files, the current
 /// branch, and HEAD's subject+body (so the amend toggle can prefill it).
@@ -430,14 +419,12 @@ pub(crate) async fn handle_api_commit_prepare_request(
     }))
 }
 
-
 #[derive(serde::Deserialize)]
 pub(crate) struct CommitRequest {
     message: String,
     #[serde(default)]
     amend: bool,
 }
-
 
 /// POST endpoint: create a commit from the staged changes. With `amend` it
 /// rewrites HEAD instead. The message is passed via stdin-free `-m`, and the
@@ -465,4 +452,3 @@ pub(crate) async fn handle_api_commit_request(
         Err(e) => bad_request(e),
     }
 }
-

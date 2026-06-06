@@ -11,9 +11,7 @@ use axum::{
 };
 
 use crate::command::diff_viewed::PAGE_COMPARE;
-use crate::diff_render::{
-    DiffFile, content_hash_of, parse_unified_diff,
-};
+use crate::diff_render::{DiffFile, content_hash_of, parse_unified_diff};
 
 pub(crate) async fn handle_api_compare_context_request(
     State(state): State<Arc<DiffServerState>>,
@@ -44,7 +42,6 @@ pub(crate) async fn handle_api_compare_context_request(
         Err(e) => bad_request(e),
     }
 }
-
 
 /// List local and remote branches in the repo along with the current HEAD.
 ///
@@ -79,7 +76,6 @@ pub(crate) async fn handle_api_branches_request(
     }))
 }
 
-
 /// Best-effort detection of the repository's default branch from an already-fetched
 /// `origin/HEAD` symbolic-ref output (pass `None` when the probe failed).
 ///
@@ -88,7 +84,10 @@ pub(crate) async fn handle_api_branches_request(
 /// locally. Returns `None` only for repos without remote and without either
 /// conventional name. Kept as a pure function so the `symbolic-ref` spawn can run
 /// concurrently with `for-each-ref` in the caller.
-pub(crate) fn resolve_default_from(origin_head: Option<String>, known: &[String]) -> Option<String> {
+pub(crate) fn resolve_default_from(
+    origin_head: Option<String>,
+    known: &[String],
+) -> Option<String> {
     if let Some(output) = origin_head {
         let trimmed = output.trim();
         if let Some(rest) = trimmed.strip_prefix("origin/")
@@ -105,7 +104,6 @@ pub(crate) fn resolve_default_from(origin_head: Option<String>, known: &[String]
     }
     None
 }
-
 
 /// Compute `git diff base...compare` for the requested branches.
 pub(crate) async fn handle_api_compare_request(
@@ -146,7 +144,6 @@ pub(crate) async fn handle_api_compare_request(
     }))
 }
 
-
 /// `base...compare` diff for a single file via in-process gix, parsed.
 pub(crate) async fn load_compare_diff_file(
     repo_root: &Path,
@@ -168,7 +165,6 @@ pub(crate) async fn load_compare_diff_file(
     .ok_or_else(|| "invalid base/compare ref".to_string())?;
     Ok(parse_unified_diff(&diff).into_iter().next())
 }
-
 
 pub(crate) async fn handle_api_compare_file_request(
     State(state): State<Arc<DiffServerState>>,
@@ -215,7 +211,6 @@ pub(crate) async fn handle_api_compare_file_request(
     }
 }
 
-
 #[derive(serde::Deserialize)]
 pub(crate) struct CompareViewedRequest {
     base: String,
@@ -223,7 +218,6 @@ pub(crate) struct CompareViewedRequest {
     path: String,
     viewed: bool,
 }
-
 
 /// POST endpoint: persist the "Viewed" checkbox for one compare-page file.
 ///
@@ -281,9 +275,10 @@ pub(crate) async fn handle_api_compare_viewed_request(
     ok_json(serde_json::json!({ "viewed": true }))
 }
 
-
 #[allow(clippy::result_large_err)]
-pub(crate) fn parse_compare_branches(params: &HashMap<String, String>) -> Result<(String, String), Response> {
+pub(crate) fn parse_compare_branches(
+    params: &HashMap<String, String>,
+) -> Result<(String, String), Response> {
     let base_raw = params
         .get("base")
         .ok_or_else(|| bad_request("missing `base` query parameter"))?;
@@ -296,4 +291,3 @@ pub(crate) fn parse_compare_branches(params: &HashMap<String, String>) -> Result
         .ok_or_else(|| bad_request(format!("invalid branch name: {}", compare_raw)))?;
     Ok((base, compare))
 }
-

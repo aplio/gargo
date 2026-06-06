@@ -21,14 +21,14 @@ use crate::command::diff_viewed::ViewedStore;
 use crate::command::registry::{CommandContext, CommandEffect, CommandEntry, CommandRegistry};
 use crate::input::action::{Action, AppAction, IntegrationAction};
 
-mod templates;
-mod validation;
-mod render;
+mod compare_api;
 mod git_ops;
 mod html_pages;
+mod render;
 mod split;
 mod status_api;
-mod compare_api;
+mod templates;
+mod validation;
 
 pub(crate) use compare_api::*;
 pub(crate) use git_ops::*;
@@ -52,7 +52,6 @@ pub enum DiffServerCommand {
     Stop,
 }
 
-
 /// Events emitted by the diff server
 #[derive(Debug, Clone)]
 pub enum DiffServerEvent {
@@ -61,14 +60,12 @@ pub enum DiffServerEvent {
     Error(String),
 }
 
-
 /// Handle for communicating with the diff server worker thread
 pub struct DiffServerHandle {
     pub command_tx: mpsc::Sender<DiffServerCommand>,
     pub event_rx: mpsc::Receiver<DiffServerEvent>,
     _worker_thread: Option<thread::JoinHandle<()>>,
 }
-
 
 impl DiffServerHandle {
     pub fn new() -> Result<Self, String> {
@@ -98,7 +95,6 @@ impl DiffServerHandle {
     }
 }
 
-
 /// Worker thread that manages the Tokio runtime and HTTP server
 struct DiffServerWorker {
     command_rx: mpsc::Receiver<DiffServerCommand>,
@@ -106,7 +102,6 @@ struct DiffServerWorker {
     tokio_runtime: tokio::runtime::Runtime,
     server_shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }
-
 
 impl DiffServerWorker {
     fn run(mut self) {
@@ -187,13 +182,11 @@ impl DiffServerWorker {
     }
 }
 
-
 pub(crate) struct DiffServerState {
     pub(crate) project_root: PathBuf,
     /// On-disk persistence for per-file "Viewed" checkboxes.
     pub(crate) viewed: ViewedStore,
 }
-
 
 impl DiffServerState {
     /// Stable key for this repo in the viewed-state database.
@@ -201,7 +194,6 @@ impl DiffServerState {
         self.project_root.to_string_lossy().to_string()
     }
 }
-
 
 /// Run the HTTP server
 async fn run_server(
@@ -260,7 +252,6 @@ async fn run_server(
         .await;
 }
 
-
 /// Register diff server commands in the command palette
 pub fn register(registry: &mut CommandRegistry) {
     registry.register(CommandEntry {
@@ -302,4 +293,3 @@ pub fn register(registry: &mut CommandRegistry) {
         }),
     });
 }
-

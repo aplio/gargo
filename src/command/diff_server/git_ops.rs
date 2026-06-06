@@ -2,12 +2,8 @@
 
 use std::path::Path;
 
-
 use crate::command::git_backend;
-use crate::diff_render::{
-    DiffFile, FileStatus,
-    content_hash_of_bytes, parse_unified_diff,
-};
+use crate::diff_render::{DiffFile, FileStatus, content_hash_of_bytes, parse_unified_diff};
 
 /// Scan an untracked file: count its lines, detect whether it is binary, and
 /// fingerprint its content for the "Viewed" checkbox.
@@ -57,7 +53,6 @@ pub(crate) async fn scan_untracked_file(repo_root: &Path, rel_path: &str) -> (us
     (lines, false, hash)
 }
 
-
 pub(crate) async fn git_output_in_repo(repo_root: &Path, args: &[&str]) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["-c", "core.quotepath=off"]);
@@ -66,7 +61,6 @@ pub(crate) async fn git_output_in_repo(repo_root: &Path, args: &[&str]) -> Resul
     cmd.current_dir(repo_root);
     git_output_from_command(cmd, &[], &format!("git {}", args.join(" "))).await
 }
-
 
 pub(crate) async fn git_output_from_command(
     mut cmd: tokio::process::Command,
@@ -94,7 +88,6 @@ pub(crate) async fn git_output_from_command(
         Err(e) => Err(format!("Failed to execute git: {}", e)),
     }
 }
-
 
 /// Fetch N lines from a file at a given git ref (or working tree).
 ///
@@ -136,7 +129,6 @@ pub(crate) async fn read_file_range_at_ref(
         .collect())
 }
 
-
 /// Run the per-file `git diff` for a status section and return the parsed
 /// [`DiffFile`], if any. Shared by the file-HTML and set-viewed endpoints so
 /// both hash and render over identical data.
@@ -161,7 +153,6 @@ pub(crate) async fn load_status_diff_file(
     Ok(files.into_iter().next())
 }
 
-
 pub(crate) fn status_diff_text(repo_root: &Path, staged: bool) -> Result<String, String> {
     let (changed_entries, staged_entries) = git_backend::status_files(repo_root)
         .ok_or_else(|| "failed to read git status".to_string())?;
@@ -181,4 +172,3 @@ pub(crate) fn status_diff_text(repo_root: &Path, staged: bool) -> Result<String,
     }
     Ok(out)
 }
-

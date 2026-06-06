@@ -1,10 +1,6 @@
 //! Small helpers + page-specific CSS for the gargo server pages.
 
-
-
-use crate::command::gargo_preview_server::{
-    self,
-};
+use crate::command::gargo_preview_server::{self};
 
 pub(crate) fn parse_commit_hash(hash: &str) -> Option<String> {
     if hash.is_empty() || hash.len() > 64 {
@@ -112,4 +108,3 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Libe
 #go-top-btn.visible { opacity: 1; pointer-events: auto; transform: translateY(0); }
 #go-top-btn:hover { background: #eef2f7; }
 </style>"#;
-

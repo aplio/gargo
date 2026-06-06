@@ -36,7 +36,6 @@ pub(crate) async fn handle_html_request(
     )
 }
 
-
 /// Serve the commit page: a focused view that lists the staged files and takes
 /// a commit message + optional amend, then POSTs to `/api/status/commit`.
 pub(crate) async fn handle_commit_html_request(
@@ -61,7 +60,6 @@ pub(crate) async fn handle_commit_html_request(
             ),
     )
 }
-
 
 /// Serve the compare-branches HTML page.
 pub(crate) async fn handle_compare_html_request(
@@ -88,4 +86,3 @@ pub(crate) async fn handle_compare_html_request(
             .replace("{{DIFF_STYLES}}", render_diff_styles()),
     )
 }
-

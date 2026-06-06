@@ -94,6 +94,7 @@ const state = {
     wholeWord: false,
     regex: false,
     pendingCaret: null, // where the next i/Enter should drop the caret (last match)
+    kept: null,         // {start,end} of a match kept highlighted after the bar closes
   },
 };
 
@@ -570,6 +571,7 @@ async function renderCodeSurface(container, options) {
   container.insertAdjacentHTML("beforeend", FIND_BAR_HTML);
   wireFindBar();
   input.addEventListener("mousedown", () => {
+    clearFindKept(); // a click moves the caret → drop any kept find highlight
     if (state.editorMode === "readonly") {
       // Click into a read-only editor → enter insert mode with the caret where
       // the click lands. Don't preventDefault: the native mousedown positions
@@ -602,7 +604,7 @@ function enterEditorInsertMode() {
   // Just searched? Drop the caret at the start of the match the find bar left us
   // on, instead of the first visible line.
   const pending = state.find.pendingCaret;
-  state.find.pendingCaret = null;
+  clearFindKept(); // editing begins → drop the kept highlight
   if (pending != null) {
     input.setSelectionRange(pending, pending);
     updateEditorModeIndicator();
@@ -665,7 +667,7 @@ function explorerScrollTarget() {
 }
 
 function scrollExplorer(direction) {
-  state.find.pendingCaret = null; // moved away from the match → drop the find caret
+  clearFindKept(); // moved away from the match → drop the kept highlight
   smoothScrollBy(explorerScrollTarget(), direction * 80);
 }
 
@@ -1003,6 +1005,7 @@ function resetFindState() {
   state.find.matches = [];
   state.find.index = -1;
   state.find.pendingCaret = null;
+  state.find.kept = null;
 }
 
 function findBar() { return app.querySelector("#find"); }
@@ -1054,22 +1057,31 @@ function closeFind() {
   const bar = findBar();
   if (bar) bar.hidden = true;
   const input = app.querySelector(".editor-input");
-  // Remember the current match's start so a follow-up i/Enter can drop the caret
-  // there. Only meaningful when closing over a read-only editor — in insert mode
-  // we keep the textarea focused and Enter types a newline.
-  f.pendingCaret = (input && f.matches.length && state.editorMode !== "insert")
-    ? input.selectionStart : null;
+  // Closing over a read-only editor with a live match: keep the match highlighted
+  // (a persisted band) and remember it, so j/k still scroll, Cmd+C copies the
+  // match, and i/Enter enters insert mode at its start. In insert mode we instead
+  // keep the textarea focused so Enter types a newline.
+  const hasMatch = input && f.matches.length && state.editorMode !== "insert";
+  f.pendingCaret = hasMatch ? input.selectionStart : null;
+  f.kept = hasMatch ? { start: input.selectionStart, end: input.selectionEnd } : null;
   f.matches = [];
   f.index = -1;
-  renderFindMatches();
-  if (!input) return;
+  if (!input) { renderFindMatches(); return; }
   if (state.editorMode === "insert") {
     input.focus({ preventScroll: true });
   } else {
-    // Hand focus back to the pane (the editor's resting state) so j/k and Enter
-    // work as usual; Enter is what enters insert mode at pendingCaret.
-    setFocus("app", 0);
+    setFocus("app", 0); // editor's resting state — j/k / Enter / Cmd+C all work
   }
+  renderFindMatches(); // draw the kept band (or clear, if there's no match)
+}
+
+// Drop the post-find kept highlight (and its caret), e.g. once the user scrolls
+// away, starts editing, or dismisses it.
+function clearFindKept() {
+  if (state.find.pendingCaret == null && !state.find.kept) return;
+  state.find.pendingCaret = null;
+  state.find.kept = null;
+  renderFindMatches();
 }
 
 function toggleReplaceRow() {
@@ -1180,17 +1192,21 @@ function renderFindMatches() {
   if (!overlay) return;
   const input = app.querySelector(".editor-input");
   const f = state.find;
-  if (!input || !f.open || !f.matches.length) { overlay.innerHTML = ""; return; }
+  // While the bar is open: a band per match (current emphasized). Once closed: just
+  // the single "kept" match left highlighted after Esc. Otherwise nothing.
+  const ranges = f.open ? f.matches : (f.kept ? [f.kept] : []);
+  const current = f.open ? f.index : 0;
+  if (!input || !ranges.length) { overlay.innerHTML = ""; return; }
   const value = input.value;
   const cw = editorCharWidth();
-  overlay.innerHTML = f.matches.map((m, i) => {
+  overlay.innerHTML = ranges.map((m, i) => {
     const a = offsetToVisual(value, m.start);
     const b = offsetToVisual(value, m.end);
     if (a.line !== b.line) return ""; // skip the rare match that spans lines
     const top = EDITOR_PAD_TOP + a.line * EDITOR_LINE_H;
     const left = EDITOR_PAD_LEFT + a.vcol * cw;
     const width = Math.max(2, (b.vcol - a.vcol) * cw);
-    const cls = i === f.index ? "find-band current" : "find-band";
+    const cls = i === current ? "find-band current" : "find-band";
     return `<div class="${cls}" style="top:${top}px;left:${left}px;width:${width}px"></div>`;
   }).join("");
 }
@@ -1334,7 +1350,7 @@ function onEditorKeyDown(event) {
 // Jump the explorer surface (and caret, if present) to the top or bottom of
 // the file — `gg` goes to the head, `G` to the tail.
 function gotoEditorEdge(edge) {
-  state.find.pendingCaret = null; // jumped to head/tail → drop the find caret
+  clearFindKept(); // jumped to head/tail → drop the kept highlight
   const surface = explorerScrollTarget();
   if (!surface) return;
   const input = app.querySelector(".editor-input");
@@ -2796,6 +2812,15 @@ window.addEventListener("keydown", async event => {
     editorRedo();
     return;
   }
+  // Cmd+C with a match still highlighted from a just-closed find bar → copy it.
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey
+      && event.key.toLowerCase() === "c" && state.find.kept
+      && state.component === "explorer" && state.focusLevel === "app") {
+    event.preventDefault();
+    const input = app.querySelector(".editor-input");
+    if (input) copyText(input.value.slice(state.find.kept.start, state.find.kept.end));
+    return;
+  }
   if (event.key === "Escape") {
     if (isText && event.target.classList.contains("editor-input")) {
       event.preventDefault();
@@ -2808,6 +2833,8 @@ window.addEventListener("keydown", async event => {
         leaveEditorInsertMode();
       }
     } else if (state.component === "explorer" && state.focusLevel === "app") {
+      // A kept find highlight? First Esc dismisses it; otherwise nothing to do.
+      if (state.find.kept) { event.preventDefault(); clearFindKept(); }
       return;
     } else if (state.focusLevel === "pane" && state.pane > 0) {
       event.preventDefault();

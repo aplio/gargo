@@ -5,5 +5,17 @@
   ],
   "current": "master",
   "default": "master",
+  "info": {
+    "feature": {
+      "hash": "<HASH>",
+      "message": "feature commit",
+      "time": 1622548800
+    },
+    "master": {
+      "hash": "<HASH>",
+      "message": "initial commit",
+      "time": 1622548800
+    }
+  },
   "remotes": []
 }

@@ -87,7 +87,7 @@ const HELP_SECTIONS = [
   {
     title: "History / Compare", keys: [
       ["J / K", "History: prev/next changed file · Compare: scroll preview"],
-      ["b / c", "Compare: focus base / compare ref"],
+      ["B / C", "Compare: focus base / compare ref"],
     ],
   },
   {
@@ -556,14 +556,15 @@ async function renderCompare() {
   await renderDiffView({
     kind: "compare",
     title: "Compare",
-    hint: `<span>Any branch, tag, or commit ref · <span class="key">b/c</span> base/compare · <span class="key">j/k</span> files · <span class="key">J/K</span> preview · <span class="key">v</span> viewed · <span class="key">o</span> edit</span>`,
+    hint: `<span>Any branch, tag, or commit ref · <span class="key">B/C</span> base/compare · <span class="key">j/k</span> files · <span class="key">J/K</span> preview · <span class="key">v</span> viewed · <span class="key">o</span> edit</span>`,
     panes: [
       {
         title: "Source · ref pair", name: "ref pair and changed files",
         body: `<form class="ref-form" id="ref-form">
-          <input name="base" value="${escapeHtml(state.compareBase)}" list="refs" aria-label="Base ref">
-          <span>…</span>
-          <input name="target" value="${escapeHtml(state.compareTarget)}" list="refs" aria-label="Target ref">
+          <label class="ref-label" for="ref-base">Base</label>
+          <input id="ref-base" name="base" value="${escapeHtml(state.compareBase)}" list="refs" aria-label="Base ref">
+          <label class="ref-label" for="ref-compare">Compare</label>
+          <input id="ref-compare" name="target" value="${escapeHtml(state.compareTarget)}" list="refs" aria-label="Compare ref">
           <button class="small-button" type="submit">Load</button>
           <datalist id="refs">${options}</datalist>
         </form>
@@ -1289,9 +1290,9 @@ window.addEventListener("keydown", async event => {
     await moveHistoryFile(-1);
     return;
   }
-  if (state.component === "compare" && (event.key === "b" || event.key === "c")) {
+  if (state.component === "compare" && (event.key === "B" || event.key === "C")) {
     const input = document.querySelector(
-      `#ref-form input[name="${event.key === "b" ? "base" : "target"}"]`);
+      `#ref-form input[name="${event.key === "B" ? "base" : "target"}"]`);
     if (input) {
       event.preventDefault();
       input.focus();

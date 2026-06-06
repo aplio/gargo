@@ -20,7 +20,7 @@
 - [x] want ${org}/${reponame} (also these are link to remote) in top left, left to Explorer | History...
 - [ ] command picker, symbol picker, file picker should follow `>`, `@`, `` rule as cli one
 - [ ] in app focus in explorer, want `p` to preview/code toggle for markdown. HTML also. default code. use mermaid js for medaid rendering
-- [ ] in compare's branch selection, want `Base` and `Compare` text. Also make keybind `B` and `C` not `b` and `c`
+- [x] in compare's branch selection, want `Base` and `Compare` text. Also make keybind `B` and `C` not `b` and `c`
 - [ ] want global search result to look more old one(more narrow result, per file mathed line tree. see old master impl)
 - [ ] for where `o` works for open in editor, want to have `O` to open `open menu popup`. select from following(and shortcut key if possible)
   - open in github(main/master)

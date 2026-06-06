@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Split — {{PATH}}</title>
+    {{SHARED_CSS}}
+    <style>
+{{DIFF_STYLES}}
+    </style>
+{{SPLIT_STYLES}}
+</head>
+<body data-page="split">
+{{REPO_CTX_SCRIPT}}
+<div class="app-shell">
+{{APP_RAIL}}
+<main class="app-main">
+<header class="split-header">
+    <a class="split-back" href="{{BACK_URL}}">← Back</a>
+    <span class="split-path">{{PATH_LABEL}}</span>
+    <span class="split-refs">{{REFS_LABEL}}</span>
+</header>
+{{NOTICE}}
+<div class="split-grid">{{SPLIT_BODY}}</div>
+</main>
+</div>
+{{SHORTCUTS_JS}}
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    var target = document.getElementById("first-diff");
+    if (target && typeof target.scrollIntoView === "function") {
+        target.scrollIntoView({ block: "center" });
+    }
+});
+</script>
+</body>
+</html>

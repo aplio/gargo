@@ -34,6 +34,8 @@ const state = {
   historyCommit: 0,
   historyFile: 0,
   historyData: null,
+  historySignature: "",
+  historyPollTimer: null,
   refs: [],
   compareBase: "",
   compareTarget: "",
@@ -227,6 +229,7 @@ function updateFocusChrome() {
 async function switchComponent(component) {
   if (!COMPONENTS.includes(component)) return;
   stopStatusPolling();
+  stopHistoryPolling();
   state.component = component;
   state.pane = 0;
   state.focusLevel = component === "explorer" ? "app" : "pane";
@@ -238,6 +241,7 @@ async function switchComponent(component) {
   if (component === "status") await renderStatus();
   setFocus(component === "explorer" ? "app" : "pane", 0);
   if (component === "status") startStatusPolling();
+  if (component === "history") startHistoryPolling();
 }
 
 function componentBar(title, hint) {
@@ -362,6 +366,7 @@ async function openFile(path, line = null, col = 0) {
   state.editorMode = "readonly";
   state.gitGutter = {};
   stopStatusPolling();
+  stopHistoryPolling();
   await api("/api/last-file", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ path }),
@@ -646,6 +651,7 @@ async function renderHistory() {
   if (!state.commits.length) {
     const data = await api("/api/commits");
     state.commits = data.commits || [];
+    state.historySignature = historySignature(state.commits);
   }
   if (state.commits.length && !state.historyData) await loadHistoryCommit();
   const files = state.historyData?.files || [];
@@ -847,6 +853,45 @@ async function refreshStatusIfChanged() {
   state.statusFile = Math.min(state.statusFile, Math.max(0, files.length - 1));
   state.statusSignature = signature;
   await renderStatusView();
+  setFocus(focusLevel, pane);
+}
+
+// Item 37: keep History live — poll the commit log and re-render only when it
+// changes (new commit, amend, rebase). Selection is preserved by commit hash so
+// the user stays on the commit they were inspecting when it still exists.
+function historySignature(commits) {
+  return `${commits.length}:${commits[0]?.full_hash || ""}:${commits[commits.length - 1]?.full_hash || ""}`;
+}
+
+function startHistoryPolling() {
+  stopHistoryPolling();
+  state.historyPollTimer = setInterval(refreshHistoryIfChanged, 2500);
+}
+
+function stopHistoryPolling() {
+  if (state.historyPollTimer) {
+    clearInterval(state.historyPollTimer);
+    state.historyPollTimer = null;
+  }
+}
+
+async function refreshHistoryIfChanged() {
+  if (state.component !== "history" || state.popup || state.help || document.hidden) return;
+  let data;
+  try { data = await api("/api/commits"); } catch (_) { return; }
+  if (state.component !== "history" || state.popup || state.help) return;
+  const commits = data.commits || [];
+  const signature = historySignature(commits);
+  if (signature === state.historySignature) return;
+  const prevHash = state.commits[state.historyCommit]?.full_hash;
+  state.commits = commits;
+  state.historySignature = signature;
+  const idx = prevHash ? commits.findIndex(commit => commit.full_hash === prevHash) : -1;
+  state.historyCommit = idx >= 0 ? idx : 0;
+  state.historyData = null;
+  await loadHistoryCommit();
+  const focusLevel = state.focusLevel, pane = state.pane;
+  await renderHistory();
   setFocus(focusLevel, pane);
 }
 

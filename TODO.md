@@ -34,7 +34,7 @@
 - [x] fix tab name to have ${reponame}/${opened file or open tab} or something like more informative, not `gargo`
 - [x] scroll rattle so want it to be more smooth
 - [x] make status view real time
-- [ ] make history real time
+- [x] make history real time
 
 ## memo1
 - have app to have two focus in explorer tab. app(with editor READONLY) or editor(writable)

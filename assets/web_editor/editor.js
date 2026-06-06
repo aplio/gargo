@@ -187,6 +187,7 @@ async function openFile(path, line = null, col = 0) {
     const offset = lines.slice(0, line).reduce((n, value) => n + value.length + 1, 0) + col;
     input.setSelectionRange(offset, offset);
     setFocus("editor", 0);
+    scrollEditorToCursor("auto");
   } else {
     setFocus("app", 0);
   }
@@ -275,6 +276,7 @@ function enterEditorInsertMode() {
   input.readOnly = false;
   updateEditorModeIndicator();
   setFocus("editor", 0);
+  scrollEditorToCursor();
   return true;
 }
 
@@ -289,6 +291,28 @@ function scrollExplorer(direction) {
   const surface = app.querySelector("#explorer-surface .code-surface")
     || app.querySelector("#explorer-surface");
   surface?.scrollBy({ top: direction * 40, behavior: "smooth" });
+}
+
+function editorScroller() {
+  return app.querySelector("#explorer-surface .code-surface")
+    || app.querySelector("#explorer-surface");
+}
+
+// Bring the caret line into view inside the scrollable code surface. The
+// textarea is fully expanded (overflow hidden) so it never scrolls itself;
+// the surrounding `.code-surface` does. Line height is 20px and the editor
+// has 12px top padding (see editor.css), so caret pixel = 12 + line * 20.
+function scrollEditorToCursor(behavior = "smooth") {
+  const input = app.querySelector(".editor-input");
+  const surface = editorScroller();
+  if (!input || !surface) return;
+  const line = input.value.slice(0, input.selectionStart).split("\n").length - 1;
+  const caretY = 12 + line * 20;
+  const top = surface.scrollTop;
+  const view = surface.clientHeight - 31; // subtract sticky toolbar height
+  if (caretY < top + 40 || caretY > top + view - 40) {
+    surface.scrollTo({ top: Math.max(0, caretY - surface.clientHeight / 2), behavior });
+  }
 }
 
 function numberedPlainText(content) {

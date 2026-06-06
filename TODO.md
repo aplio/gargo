@@ -10,6 +10,13 @@
 - [x] compare : also v checkbox
 - [x] history : shift j and shift k to up/down in changed files
 - [x] explorer(editor) : see memo1
+- [x] if enter to enter edit mode, scroll to cursor position
+- [ ] explorer(editor) : gg to go head, gh to head, G to top
+- [ ] compare : j,k to scroll in compare preview not working
+- [ ] tree view : alt enter, cmd tab to open that file in new tab
+- [ ] in compare, b to focus input field for base branch, c for compare
+- [ ] `?` to show keybinding and help
+- [ ] in exlorer or editor, cmd shift f to global search. refer to old impl for what it should do
 
 ## memo1
 - have app to have two focus in explorer tab. app(with editor READONLY) or editor(writable)

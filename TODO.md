@@ -40,7 +40,7 @@
 - [ ] (if possible) when entering insert mode, want to add cursor at position where peek is on. e.g. when L140 - L180 is shown, add cursor on L140
 - [x] in editor, when typing, it has little bit of lag before shown in editor.
 - [x] when selected in insert mode, cannot see text selected
-- [ ] when selected in insert mode and esc was hit, rather than focus app, want to clear selection w/o focus to app
+- [x] when selected in insert mode and esc was hit, rather than focus app, want to clear selection w/o focus to app
 - [ ] NO NEED TO IMPL AT THIS TIME : maybe rather than view-only code view, behaving like normal mode in gargo cli is much nicer...
 
 ## memo1

@@ -1680,7 +1680,14 @@ window.addEventListener("keydown", async event => {
   if (event.key === "Escape") {
     if (isText && event.target.classList.contains("editor-input")) {
       event.preventDefault();
-      leaveEditorInsertMode();
+      // Esc collapses an active selection first (staying in insert mode);
+      // only a second Esc (no selection) returns to app focus (item 43).
+      const input = event.target;
+      if (input.selectionStart !== input.selectionEnd) {
+        input.setSelectionRange(input.selectionEnd, input.selectionEnd);
+      } else {
+        leaveEditorInsertMode();
+      }
     } else if (state.component === "explorer" && state.focusLevel === "app") {
       return;
     } else if (state.focusLevel === "pane" && state.pane > 0) {

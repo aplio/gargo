@@ -21,18 +21,28 @@ pub(crate) async fn handle_api_status_request(
     let show_untracked = parse_bool_param(params.get("show_untracked"), true);
     let repo_root = &state.project_root;
 
-    let (unstaged_res, staged_res) = (
-        status_diff_text(repo_root, false),
-        status_diff_text(repo_root, true),
-    );
-    let viewed = load_viewed_map(&state, PAGE_STATUS, String::new(), String::new()).await;
-    let unstaged_raw = match unstaged_res {
-        Ok(output) => output,
-        Err(error) => return bad_request(error),
+    // `status_diff_text` does blocking gix object reads + file I/O. Offload both
+    // to the blocking pool and let them run concurrently, so a polling client
+    // (the editor live-refreshes Status) never stalls a Tokio worker and the two
+    // diffs overlap instead of running back-to-back.
+    let unstaged_task = {
+        let root = repo_root.clone();
+        tokio::task::spawn_blocking(move || status_diff_text(&root, false))
     };
-    let staged_raw = match staged_res {
-        Ok(output) => output,
-        Err(error) => return bad_request(error),
+    let staged_task = {
+        let root = repo_root.clone();
+        tokio::task::spawn_blocking(move || status_diff_text(&root, true))
+    };
+    let viewed = load_viewed_map(&state, PAGE_STATUS, String::new(), String::new()).await;
+    let unstaged_raw = match unstaged_task.await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return bad_request(error),
+        Err(_) => return bad_request("failed to compute status diff"),
+    };
+    let staged_raw = match staged_task.await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => return bad_request(error),
+        Err(_) => return bad_request("failed to compute status diff"),
     };
 
     let unstaged_files: Vec<serde_json::Value> = parse_unified_diff(&unstaged_raw)
@@ -45,13 +55,18 @@ pub(crate) async fn handle_api_status_request(
         .collect();
 
     let untracked_files: Vec<serde_json::Value> = if show_untracked {
-        let paths: Vec<String> = match git_backend::status_files(repo_root) {
-            Some((changed, _)) => changed
+        // `status_files` is a blocking gix status walk; keep it off the worker.
+        let status = {
+            let root = repo_root.clone();
+            tokio::task::spawn_blocking(move || git_backend::status_files(&root)).await
+        };
+        let paths: Vec<String> = match status {
+            Ok(Some((changed, _))) => changed
                 .into_iter()
                 .filter(|entry| entry.status_char == '?')
                 .map(|entry| entry.path)
                 .collect(),
-            None => return bad_request("failed to read git status"),
+            _ => return bad_request("failed to read git status"),
         };
 
         // Scan every untracked file concurrently — each scan is independent
@@ -93,8 +108,16 @@ pub(crate) async fn handle_api_status_request(
         Vec::new()
     };
 
+    let branch = {
+        let root = repo_root.clone();
+        tokio::task::spawn_blocking(move || git_backend::current_branch(&root))
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    };
     ok_json(serde_json::json!({
-        "branch": git_backend::current_branch(repo_root).unwrap_or_default(),
+        "branch": branch,
         "unstaged": unstaged_files,
         "staged": staged_files,
         "untracked": untracked_files,
@@ -391,21 +414,28 @@ pub(crate) async fn handle_api_status_unstage_request(
 pub(crate) async fn handle_api_commit_prepare_request(
     State(state): State<Arc<DiffServerState>>,
 ) -> Response {
-    let repo_root = &state.project_root;
-    let staged_raw = match status_diff_text(repo_root, true) {
-        Ok(output) => output,
-        Err(error) => return bad_request(error),
+    // The staged diff, branch lookup, and HEAD metadata are all blocking gix
+    // work; run them together off the Tokio worker. HEAD's full message prefills
+    // the amend toggle (empty before the first commit, in which case amend is
+    // not offered).
+    let repo_root = state.project_root.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        let staged_raw = status_diff_text(&repo_root, true)?;
+        let branch = git_backend::current_branch(&repo_root).unwrap_or_default();
+        let head_meta = git_backend::commit_meta(&repo_root, "HEAD");
+        Ok::<_, String>((staged_raw, branch, head_meta))
+    })
+    .await;
+    let (staged_raw, branch, head_meta) = match prepared {
+        Ok(Ok(value)) => value,
+        Ok(Err(error)) => return bad_request(error),
+        Err(_) => return bad_request("failed to prepare commit"),
     };
     let staged: Vec<serde_json::Value> = parse_unified_diff(&staged_raw)
         .iter()
         .map(|f| file_metadata_json(f, false))
         .collect();
 
-    let branch = git_backend::current_branch(repo_root).unwrap_or_default();
-
-    // HEAD's full message for the amend toggle to prefill. Empty before the
-    // first commit, in which case amend is not offered.
-    let head_meta = git_backend::commit_meta(repo_root, "HEAD");
     let last_message = head_meta
         .as_ref()
         .map(|m| m.message.trim_end().to_string())

@@ -65,6 +65,7 @@ const state = {
   statusSignature: "",
   statusPollTimer: null,
   previewToken: 0,
+  paneSizes: {},        // kind -> [fr, …] column widths for the diff-view panes
   popup: null,
   popupItems: [],
   popupFiltered: [],
@@ -1652,9 +1653,121 @@ async function renderDiffView(source) {
     <div class="panes ${source.kind}">
       ${source.panes.map((item, index) => pane(item.title, item.name, index, item.body)).join("")}
     </div></section>`;
+  installPaneResizers(app.querySelector(".panes"), source.kind);
   source.bind?.();
   bindListClicks();
   await loadCurrentDiffPreview();
+}
+
+// Default column proportions (arbitrary `fr` units; only the ratio matters) that
+// mirror the CSS fallbacks in editor.css. Used on first run and on dbl-click
+// reset of a divider.
+const PANE_DEFAULTS = {
+  history: [25, 25, 50],
+  compare: [34, 66],
+  status: [34, 66],
+};
+
+function loadPaneSizes(kind, count) {
+  if (state.paneSizes[kind]?.length === count) return state.paneSizes[kind].slice();
+  let sizes;
+  try {
+    const raw = localStorage.getItem(`gargo:panes:${kind}`);
+    const parsed = raw && JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.length === count
+        && parsed.every(n => typeof n === "number" && n > 0)) {
+      sizes = parsed;
+    }
+  } catch (_) { /* localStorage unavailable or malformed — fall through */ }
+  sizes = sizes || (PANE_DEFAULTS[kind] || Array(count).fill(1)).slice();
+  state.paneSizes[kind] = sizes.slice();
+  return sizes.slice();
+}
+
+function savePaneSizes(kind, sizes) {
+  state.paneSizes[kind] = sizes.slice();
+  try { localStorage.setItem(`gargo:panes:${kind}`, JSON.stringify(sizes)); } catch (_) {}
+}
+
+function applyPaneTemplate(panesEl, sizes) {
+  panesEl.style.gridTemplateColumns =
+    sizes.map(fr => `minmax(120px, ${fr.toFixed(4)}fr)`).join(" 6px ");
+}
+
+// Insert draggable dividers between the panes of a diff view. The drag uses the
+// Pointer Events API with setPointerCapture, which behaves identically across
+// Chromium, WebKit (Safari) and Gecko (Firefox) — no per-browser branching. The
+// chosen widths persist per layout in localStorage; double-clicking a divider
+// resets that boundary to the default split.
+function installPaneResizers(panesEl, kind) {
+  if (!panesEl) return;
+  const panes = [...panesEl.querySelectorAll(":scope > .pane")];
+  if (panes.length < 2) return;
+  // Below this width the CSS switches to a stacked/scrolling layout; leave it.
+  if (window.matchMedia("(max-width: 800px)").matches) return;
+
+  panesEl.classList.add("resizable");
+  const sizes = loadPaneSizes(kind, panes.length);
+  applyPaneTemplate(panesEl, sizes);
+
+  for (let h = 0; h < panes.length - 1; h++) {
+    const handle = document.createElement("div");
+    handle.className = "pane-resizer";
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-orientation", "vertical");
+    handle.title = "Drag to resize · double-click to reset";
+    panes[h].after(handle);
+    attachResizer(handle, panesEl, panes, sizes, kind, h);
+  }
+}
+
+function attachResizer(handle, panesEl, panes, sizes, kind, h) {
+  const MIN = 140; // px: keep both neighbouring panes usable
+  let startX = 0, leftPx = 0, sumPx = 0, sumFr = 0, dragging = false;
+
+  const onMove = (e) => {
+    if (!dragging) return;
+    const newLeft = Math.max(MIN, Math.min(sumPx - MIN, leftPx + (e.clientX - startX)));
+    sizes[h] = sumFr * (newLeft / sumPx);
+    sizes[h + 1] = sumFr - sizes[h];
+    applyPaneTemplate(panesEl, sizes);
+  };
+  const onUp = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove("dragging");
+    document.body.classList.remove("col-resizing");
+    try { handle.releasePointerCapture(e.pointerId); } catch (_) {}
+    savePaneSizes(kind, sizes);
+  };
+
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    const lr = panes[h].getBoundingClientRect();
+    const rr = panes[h + 1].getBoundingClientRect();
+    sumPx = lr.width + rr.width;
+    if (sumPx < MIN * 2) return; // too narrow to split meaningfully
+    e.preventDefault();
+    leftPx = lr.width;
+    sumFr = sizes[h] + sizes[h + 1];
+    startX = e.clientX;
+    dragging = true;
+    handle.classList.add("dragging");
+    document.body.classList.add("col-resizing");
+    try { handle.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  handle.addEventListener("pointermove", onMove);
+  handle.addEventListener("pointerup", onUp);
+  handle.addEventListener("pointercancel", onUp);
+  handle.addEventListener("dblclick", () => {
+    const def = PANE_DEFAULTS[kind];
+    if (!def) return;
+    const sumFr2 = sizes[h] + sizes[h + 1];
+    sizes[h] = sumFr2 * def[h] / (def[h] + def[h + 1]);
+    sizes[h + 1] = sumFr2 - sizes[h];
+    applyPaneTemplate(panesEl, sizes);
+    savePaneSizes(kind, sizes);
+  });
 }
 
 function diffSurfaceHtml() {
@@ -3006,6 +3119,15 @@ window.addEventListener("beforeunload", event => {
   if (state.currentFile && state.fileContent !== state.fileBaseContent) {
     event.preventDefault();
     event.returnValue = "";
+  }
+});
+
+// Re-render the active diff view when crossing the 800px breakpoint so the
+// resizable desktop layout and the stacked mobile layout swap cleanly (an
+// inline grid-template would otherwise pin the desktop columns on a narrow tab).
+window.matchMedia("(max-width: 800px)").addEventListener("change", () => {
+  if (["history", "compare", "status"].includes(state.component)) {
+    switchComponent(state.component);
   }
 });
 

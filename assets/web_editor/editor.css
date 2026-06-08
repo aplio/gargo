@@ -102,6 +102,34 @@ button { color: inherit; }
 }
 .pane:last-child { border-right: 0; background: var(--bg); }
 .pane.focused { box-shadow: inset 0 0 0 1px var(--line-strong); }
+
+/* Draggable column dividers (injected by installPaneResizers). The 6px grid
+   track is the hit area; the divider line is drawn centered inside it, so the
+   panes themselves drop their own right border to avoid a double line. */
+.panes.resizable > .pane { border-right: 0; }
+.pane-resizer {
+  position: relative;
+  z-index: 3;
+  cursor: col-resize;
+  touch-action: none;        /* let pointermove drive the drag on touch devices */
+  background: transparent;
+}
+.pane-resizer::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 1px;
+  margin: 0 auto;
+  background: var(--line);
+  transition: background .1s, width .1s;
+}
+.pane-resizer:hover::before,
+.pane-resizer.dragging::before { width: 3px; background: var(--accent); }
+/* While dragging, keep the col-resize cursor everywhere and stop the preview
+   iframe from swallowing pointer moves. */
+body.col-resizing { cursor: col-resize; user-select: none; -webkit-user-select: none; }
+body.col-resizing iframe { pointer-events: none; }
+
 .pane-title {
   position: sticky;
   top: 0;

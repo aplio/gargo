@@ -581,13 +581,25 @@ async function navigateEditorLink(href) {
   if (isExternalLink(href)) { window.open(href, "_blank", "noopener"); return; }
   let clean = href.split("#")[0].split("?")[0];
   try { clean = decodeURIComponent(clean); } catch (_) { /* keep raw */ }
-  const target = resolveRelativePath(state.currentFile, clean);
-  if (!target) return;
-  try {
-    await openFile(target);
-  } catch (error) {
-    notify(`Can't open ${target}: ${error.message}`);
+  // Try resolving the link from the repo root first; if no such file exists,
+  // fall back to the legacy current-file-relative resolution. (openFile throws
+  // before mutating state when the file is missing, so a failed attempt is safe.)
+  const rootTarget = resolveRelativePath("", clean);
+  const relTarget = resolveRelativePath(state.currentFile, clean);
+  const candidates = [];
+  if (rootTarget) candidates.push(rootTarget);
+  if (relTarget && relTarget !== rootTarget) candidates.push(relTarget);
+  if (!candidates.length) return;
+  let lastError;
+  for (const target of candidates) {
+    try {
+      await openFile(target);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
   }
+  notify(`Can't open ${candidates[candidates.length - 1]}: ${lastError.message}`);
 }
 
 async function saveCurrentFile() {

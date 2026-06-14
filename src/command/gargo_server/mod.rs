@@ -207,11 +207,17 @@ impl GargoServerWorker {
             viewed: ViewedStore::open(),
             diff_cache: diff_cache.clone(),
         });
+        let is_git = crate::project::has_git_marker(&repo_root);
+        let workspace_index =
+            crate::command::workspace_index::WorkspaceIndex::new(repo_root.clone(), is_git);
         let github_state = Arc::new(GargoServerState {
             repo_root,
-            files_cache: std::sync::Mutex::new(None),
+            port,
             fs_generation: std::sync::atomic::AtomicU64::new(0),
+            search_generation: std::sync::atomic::AtomicU64::new(0),
             diff_cache,
+            workspace_index,
+            child_servers: std::sync::Mutex::new(std::collections::HashMap::new()),
         });
 
         self.tokio_runtime.spawn(async move {
@@ -397,22 +403,26 @@ fn bridge_preview_events(
 /// the last time the file was opened in gargo (CLI or web editor), 0 if never.
 pub(crate) type FileEntry = (String, u64, bool, u64);
 
-/// A cached `/api/files` listing: `(generation, cached_at, files, entries)`,
-/// reused while the generation matches and the entry is within the TTL.
-type FilesCache = (u64, std::time::Instant, Vec<String>, Vec<FileEntry>);
-
-#[derive(Debug)]
 pub(crate) struct GargoServerState {
     pub(crate) repo_root: PathBuf,
-    /// Short-lived cache for the `/api/files` listing (`git ls-files`), which the
-    /// editor hits on every Cmd+P open.
-    pub(crate) files_cache: std::sync::Mutex<Option<FilesCache>>,
-    /// Bumped by filesystem-mutating editor handlers (create/rename/delete/save)
-    /// so `files_cache` is invalidated immediately rather than waiting for the TTL.
+    pub(crate) port: u16,
+    /// Bumped by filesystem-mutating editor handlers.
     pub(crate) fs_generation: std::sync::atomic::AtomicU64,
+    /// Incremented for each search request so superseded work stops early.
+    pub(crate) search_generation: std::sync::atomic::AtomicU64,
     /// In-memory cache of rendered immutable (commit) file diffs, shared with the
     /// compare endpoint's `DiffServerState`.
     pub(crate) diff_cache: Arc<diff_server::DiffRenderCache>,
+    /// Shared, incrementally published file and search index.
+    pub(crate) workspace_index: Arc<crate::command::workspace_index::WorkspaceIndex>,
+    /// Child servers opened from workspace directories, keyed by canonical root.
+    pub(crate) child_servers:
+        std::sync::Mutex<std::collections::HashMap<PathBuf, ChildGargoServer>>,
+}
+
+pub(crate) struct ChildGargoServer {
+    pub(crate) url: String,
+    pub(crate) _handle: GargoServerHandle,
 }
 
 async fn run_server(
@@ -581,6 +591,7 @@ async fn run_server(
         .route("/api/fs/rename", post(editor::handle_api_fs_rename))
         .route("/api/fs/delete", post(editor::handle_api_fs_delete))
         .route("/api/fs/reveal", post(editor::handle_api_fs_reveal))
+        .route("/api/server/open", post(editor::handle_api_server_open))
         .route("/api/highlight", post(editor::handle_api_highlight))
         .route("/api/symbols", post(editor::handle_api_symbols))
         .route("/api/git-gutter", post(editor::handle_api_git_gutter))

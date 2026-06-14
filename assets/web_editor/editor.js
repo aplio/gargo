@@ -31,6 +31,7 @@ const commitSubmit = document.getElementById("commit-submit");
 const commitCancel = document.getElementById("commit-cancel");
 
 const COMPONENTS = ["explorer", "history", "compare", "status", "search"];
+const GIT_COMPONENTS = new Set(["history", "compare", "status"]);
 const state = {
   component: "explorer",
   connected: true,
@@ -39,6 +40,8 @@ const state = {
   gPending: false,
   files: [],
   fileEntries: [],
+  fileIndexReady: false,
+  fileIndexLoading: false,
   currentFile: "",
   fileContent: "",
   fileBaseContent: "",
@@ -185,7 +188,7 @@ const HELP_SECTIONS = [
       ["j / k", "Move"],
       ["h / l", "Collapse / expand"],
       ["Enter", "Open"],
-      ["⌥Enter / ⌘Enter", "Open in new tab"],
+      ["⌥Enter / ⌘Enter", "File: new tab · directory: new server"],
       ["/", "Filter"],
       ["J / K", "Scroll preview"],
     ],
@@ -194,9 +197,9 @@ const HELP_SECTIONS = [
 
 const COMMANDS = [
   { label: "Switch to Explorer", hint: "g e", run: () => switchComponent("explorer") },
-  { label: "Switch to History", hint: "g h", run: () => switchComponent("history") },
-  { label: "Switch to Compare", hint: "g c", run: () => switchComponent("compare") },
-  { label: "Switch to Status", hint: "g s", run: () => switchComponent("status") },
+  { label: "Switch to History", hint: "g h", git: true, run: () => switchComponent("history") },
+  { label: "Switch to Compare", hint: "g c", git: true, run: () => switchComponent("compare") },
+  { label: "Switch to Status", hint: "g s", git: true, run: () => switchComponent("status") },
   { label: "Switch to Search", hint: "g f", run: () => switchComponent("search") },
   { label: "Open file tree", hint: "t", run: () => openTreePicker() },
   { label: "Save current file", hint: "Cmd+S", run: () => saveCurrentFile() },
@@ -263,6 +266,23 @@ async function loadRepoInfo() {
   renderRepoLink();
   renderVersion();
   updateTitle();
+  applyCapabilities();
+}
+
+function hasGit() {
+  return state.repoInfo?.git !== false;
+}
+
+function availableComponents() {
+  return COMPONENTS.filter(component => hasGit() || !GIT_COMPONENTS.has(component));
+}
+
+function applyCapabilities() {
+  document.querySelectorAll("[data-component]").forEach(button => {
+    button.hidden = !hasGit() && GIT_COMPONENTS.has(button.dataset.component);
+  });
+  repoBranch.hidden = !hasGit() || !state.repoInfo?.branch;
+  if (!hasGit() && GIT_COMPONENTS.has(state.component)) switchComponent("explorer");
 }
 
 function renderVersion() {
@@ -360,7 +380,7 @@ function updateFocusChrome() {
 }
 
 async function switchComponent(component) {
-  if (!COMPONENTS.includes(component)) return;
+  if (!availableComponents().includes(component)) return;
   stopStatusPolling();
   stopHistoryPolling();
   state.component = component;
@@ -396,10 +416,39 @@ function listHtml(items, selected, row) {
 }
 
 async function ensureFiles() {
-  if (state.files.length) return;
-  const data = await api("/api/files");
-  state.files = data.files || [];
-  state.fileEntries = data.entries || state.files.map(path => ({ path, mtime: 0, opened: 0, changed: false }));
+  if (state.fileIndexReady || state.fileIndexLoading) return;
+  state.fileIndexLoading = true;
+  try {
+    const offset = state.fileEntries.length;
+    const data = await api(`/api/files?${new URLSearchParams({ offset: String(offset), limit: "2000" })}`);
+    const entries = data.entries || (data.files || []).map(path => ({
+      path, mtime: 0, opened: 0, changed: false,
+    }));
+    state.fileEntries.push(...entries);
+    state.files.push(...entries.map(entry => entry.path));
+    state.fileIndexReady = Boolean(data.ready) && state.fileEntries.length >= Number(data.total || 0);
+    if (data.truncated) notify("Workspace file index reached its 200,000 file limit");
+  } finally {
+    state.fileIndexLoading = false;
+  }
+  if (!state.fileIndexReady) setTimeout(loadMoreFiles, 200);
+}
+
+async function loadMoreFiles() {
+  if (state.fileIndexReady || state.fileIndexLoading) return;
+  try {
+    await ensureFiles();
+    if (state.popup === "quick" && state.quickMode === "files") {
+      state.quickFiles = quickFileItems();
+      state.popupItems = state.quickFiles;
+      filterPopup();
+    } else if (state.popup === "tree") {
+      state.treeRoot = buildTree(state.fileEntries);
+      filterPopup();
+    }
+  } catch (_) {
+    setTimeout(loadMoreFiles, 500);
+  }
 }
 
 async function renderExplorer() {
@@ -2539,10 +2588,32 @@ function openFileInNewTab(path) {
   window.open(`/editor?path=${encodeURIComponent(path)}`, "_blank");
 }
 
-function openTreeSelectionInNewTab() {
+async function openTreeSelectionInNewTab() {
   const node = state.popupFiltered[state.popupIndex]?.node;
-  if (!node || node.type !== "file") return;
-  openFileInNewTab(node.path);
+  if (!node) return;
+  if (node.type === "file") {
+    openFileInNewTab(node.path);
+    return;
+  }
+
+  const childTab = window.open("", "_blank");
+  if (!childTab) {
+    notify("Browser blocked the new tab");
+    return;
+  }
+  childTab.document.title = `Starting gargo · ${node.path}`;
+  childTab.document.body.textContent = `Starting gargo server for ${node.path}…`;
+  try {
+    const data = await api("/api/server/open", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: node.path }),
+    });
+    childTab.location.replace(data.url);
+  } catch (error) {
+    childTab.close();
+    notify(`Cannot start server for ${node.path}: ${error.message}`);
+  }
 }
 
 async function openSelectedDiffFileInEditor() {
@@ -2815,6 +2886,22 @@ async function choosePopup(index = state.popupIndex) {
 // (⌘P / ⌘⇧P / ⌘@) land directly in the right mode.
 async function openQuickPicker(initial = "") {
   await ensureFiles();
+  state.quickFiles = quickFileItems();
+  state.quickCommands = COMMANDS
+    .filter(command => hasGit() || !command.git)
+    .sort((a, b) => a.label.localeCompare(b.label)).map(command => ({
+      label: command.label, hint: command.hint, run: command.run,
+    }));
+  state.quickSymbols = [];
+  state.quickSymbolsLoaded = false;
+  state.quickMode = "files";
+  showPopup("quick", "Files", [], state.fileIndexReady
+    ? "Search files · > commands · @ symbols"
+    : "Indexing workspace · partial results · > commands · @ symbols");
+  if (initial) { popupInput.value = initial; filterPopup(); }
+}
+
+function quickFileItems() {
   // Empty-query order: changed files first, then by recency — the more recent of
   // the file's mtime and the last time it was opened in gargo (CLI or web editor).
   const recency = entry => Math.max(Number(entry.mtime || 0), Number(entry.opened || 0));
@@ -2823,19 +2910,11 @@ async function openQuickPicker(initial = "") {
     || recency(b) - recency(a)
     || a.path.localeCompare(b.path)
   );
-  state.quickFiles = entries.map(entry => ({
+  return entries.map(entry => ({
     label: entry.path,
     hint: entry.changed ? "changed" : "",
     run: () => openFile(entry.path),
   }));
-  state.quickCommands = [...COMMANDS].sort((a, b) => a.label.localeCompare(b.label)).map(command => ({
-    label: command.label, hint: command.hint, run: command.run,
-  }));
-  state.quickSymbols = [];
-  state.quickSymbolsLoaded = false;
-  state.quickMode = "files";
-  showPopup("quick", "Files", [], "Search files · > commands · @ symbols");
-  if (initial) { popupInput.value = initial; filterPopup(); }
 }
 
 function resolveQuickMode(raw) {
@@ -2874,7 +2953,12 @@ async function openTreePicker() {
     const parts = state.currentFile.split("/");
     for (let i = 1; i < parts.length; i++) state.treeExpanded.add(parts.slice(0, i).join("/"));
   }
-  showPopup("tree", "Explorer", treePopupItems(""), "Filter tree");
+  showPopup(
+    "tree",
+    "Explorer",
+    treePopupItems(""),
+    "Enter open · Alt/Cmd+Enter file tab or directory server",
+  );
   if (state.currentFile) {
     const index = state.popupFiltered.findIndex(item => item.node?.path === state.currentFile);
     if (index >= 0) {
@@ -2934,7 +3018,12 @@ function visibleTreeNodes(node, output = []) {
 
 function treePopupItems(query) {
   if (!state.treeRoot) return [];
-  const nodes = query ? allTreeNodes(state.treeRoot) : visibleTreeNodes(state.treeRoot);
+  // Git repos keep the existing project-wide tree search. A non-git workspace
+  // can be very large, so `/` filters only the rows currently visible through
+  // the expansion state instead of searching every collapsed descendant.
+  const nodes = query && hasGit()
+    ? allTreeNodes(state.treeRoot)
+    : visibleTreeNodes(state.treeRoot);
   return nodes.map(node => {
     const expanded = node.type === "dir" && state.treeExpanded.has(node.path);
     const indent = query ? 0 : node.depth;
@@ -3039,8 +3128,7 @@ function resolvePrompt(value) {
 }
 
 // POST a JSON body to one of the /api/fs/* mutation endpoints, then refresh the
-// file listing and rebuild the tree so the change shows immediately. `ensureFiles`
-// caches on `state.files`, so clear it to force a refetch.
+// file listing and rebuild the tree so the change shows immediately.
 async function fsMutate(endpoint, body) {
   await api(endpoint, {
     method: "POST",
@@ -3048,6 +3136,8 @@ async function fsMutate(endpoint, body) {
     body: JSON.stringify(body),
   });
   state.files = [];
+  state.fileEntries = [];
+  state.fileIndexReady = false;
   await ensureFiles();
   state.treeRoot = buildTree(state.fileEntries);
   if (state.popup === "tree") filterPopup();
@@ -3255,6 +3345,13 @@ async function runGlobalSearch() {
   try {
     const data = await api(`/api/search?${new URLSearchParams({ q: query, max: "500" })}`);
     if (token !== state.searchToken || state.component !== "search") return;
+    if (data.indexing) {
+      if (results) results.innerHTML = `<div class="loading">Indexing workspace…</div>`;
+      setTimeout(() => {
+        if (token === state.searchToken && state.component === "search") runGlobalSearch();
+      }, 500);
+      return;
+    }
     state.searchHits = data.hits || [];
     state.searchCollapsed = new Set();
     state.searchRows = buildSearchRows();
@@ -3413,7 +3510,7 @@ function highlightExcerpt(excerpt, col, qlen) {
 }
 
 popupInput.addEventListener("input", filterPopup);
-popupInput.addEventListener("keydown", event => {
+popupInput.addEventListener("keydown", async event => {
   if (state.popup === "prompt") {
     if (event.key === "Enter") { event.preventDefault(); resolvePrompt(popupInput.value.trim() || null); }
     else if (event.key === "Escape") { event.preventDefault(); resolvePrompt(null); }
@@ -3447,14 +3544,14 @@ popupInput.addEventListener("keydown", event => {
     }
   } else if (event.key === "Enter" && state.popup === "tree" && (event.altKey || event.metaKey)) {
     event.preventDefault();
-    openTreeSelectionInNewTab();
+    await openTreeSelectionInNewTab();
   } else if (event.key === "Enter") {
     event.preventDefault();
     choosePopup();
   }
 });
 
-popup.addEventListener("keydown", event => {
+popup.addEventListener("keydown", async event => {
   if (state.popup === "menu") { handleMenuKey(event); return; }
   if (state.popup === "confirm") {
     if (event.key === "Enter") { event.preventDefault(); resolvePrompt(true); }
@@ -3495,7 +3592,7 @@ popup.addEventListener("keydown", event => {
     movePopupSelection(-1);
   } else if (event.key === "Enter" && (event.altKey || event.metaKey)) {
     event.preventDefault();
-    openTreeSelectionInNewTab();
+    await openTreeSelectionInNewTab();
   } else if (event.key === "l" || event.key === "ArrowRight" || event.key === "Enter") {
     event.preventDefault();
     choosePopup();
@@ -3911,7 +4008,7 @@ window.matchMedia("(max-width: 800px)").addEventListener("change", () => {
 
 async function boot() {
   try {
-    loadRepoInfo();
+    await loadRepoInfo();
     checkForUpdate();
     setInterval(heartbeat, 4000);
     const last = await api("/api/last-file").catch(() => ({ path: null }));
@@ -3928,7 +4025,7 @@ async function boot() {
       : location.pathname.includes("/commits") || location.pathname.includes("/commit/") ? "history"
       : "explorer";
     const requested = location.hash.slice(1) || pathComponent;
-    await switchComponent(COMPONENTS.includes(requested) ? requested : "explorer");
+    await switchComponent(availableComponents().includes(requested) ? requested : "explorer");
     const fileParam = new URLSearchParams(location.search).get("path");
     if (fileParam) {
       await openFile(fileParam)

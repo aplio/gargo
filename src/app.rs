@@ -5281,6 +5281,41 @@ mod tests {
     }
 
     #[test]
+    fn insert_typing_over_shift_selection_replaces_it() {
+        let mut app = test_app_with_text("hello world");
+        app.editor.mode = mode::Mode::Insert;
+        app.editor.active_buffer_mut().cursors[0] = 0;
+
+        // Shift+Right twice to select "he".
+        app.dispatch(Action::Core(CoreAction::ExtendRight));
+        app.dispatch(Action::Core(CoreAction::ExtendRight));
+        assert!(app.editor.active_buffer().has_selection());
+
+        // Typing a char replaces the selection rather than appending.
+        app.dispatch(Action::Core(CoreAction::InsertChar('X')));
+
+        assert!(!app.editor.active_buffer().has_selection());
+        assert_eq!(app.editor.active_buffer().rope.to_string(), "Xllo world");
+    }
+
+    #[test]
+    fn insert_text_over_shift_selection_replaces_it() {
+        let mut app = test_app_with_text("hello world");
+        app.editor.mode = mode::Mode::Insert;
+        app.editor.active_buffer_mut().cursors[0] = 0;
+
+        app.dispatch(Action::Core(CoreAction::ExtendRight));
+        app.dispatch(Action::Core(CoreAction::ExtendRight));
+        assert!(app.editor.active_buffer().has_selection());
+
+        // IME / pasted text (e.g. Japanese) also replaces the selection.
+        app.dispatch(Action::Core(CoreAction::InsertText("日本".to_string())));
+
+        assert!(!app.editor.active_buffer().has_selection());
+        assert_eq!(app.editor.active_buffer().rope.to_string(), "日本llo world");
+    }
+
+    #[test]
     fn normal_e_from_word_start_selects_full_word_and_lands_on_word_end() {
         let mut app = test_app_with_text("hello world");
         app.editor.mode = mode::Mode::Normal;

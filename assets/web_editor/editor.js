@@ -1933,13 +1933,27 @@ function isPreviewPaneFocused() {
   return count > 0 && state.pane === count - 1;
 }
 
+// Compare target sentinel: the live working tree (HEAD plus uncommitted, dirty,
+// and untracked changes). Sent verbatim as the `compare` query param; the server
+// backs it with `compare_worktree_diff_text` instead of a tree-to-tree diff.
+const WORKTREE_REF = "WORKTREE";
+const WORKTREE_LABEL = "HEAD (working tree)";
+
+// Friendly display name for a compare ref: the worktree sentinel reads as a
+// label, every other ref shows verbatim.
+function refLabel(ref) {
+  return ref === WORKTREE_REF ? WORKTREE_LABEL : ref;
+}
+
 async function ensureRefs() {
   if (state.refs.length) return;
   const data = await api("/api/branches");
   state.refs = data.branches || [];
   state.refInfo = data.info || {};
   state.compareBase ||= data.default || data.current || state.refs[0] || "HEAD";
-  state.compareTarget ||= data.current || state.refs[1] || "HEAD";
+  // Default the compare side to the working tree so the screen opens on the
+  // user's uncommitted changes against the base branch.
+  state.compareTarget ||= data.worktree || WORKTREE_REF;
 }
 
 // Compact "time ago" for branch tips: seconds is a unix timestamp (author
@@ -1972,9 +1986,9 @@ async function renderCompare() {
         title: "Source · ref pair", name: "ref pair and changed files",
         body: `<div class="ref-form" id="ref-form">
           <label class="ref-label">Base</label>
-          <button type="button" class="ref-button" id="ref-base" aria-label="Base ref">${escapeHtml(state.compareBase) || "—"}</button>
+          <button type="button" class="ref-button" id="ref-base" aria-label="Base ref">${escapeHtml(refLabel(state.compareBase)) || "—"}</button>
           <label class="ref-label">Compare</label>
-          <button type="button" class="ref-button" id="ref-target" aria-label="Compare ref">${escapeHtml(state.compareTarget) || "—"}</button>
+          <button type="button" class="ref-button" id="ref-target" aria-label="Compare ref">${escapeHtml(refLabel(state.compareTarget)) || "—"}</button>
         </div>
         ${fileList(state.compareFiles, state.compareFile, { viewed: true })}`,
       },
@@ -2008,12 +2022,26 @@ async function openRefPicker(which) {
         + (meta ? `<span class="secondary">${meta}</span>` : "") + `</div>`,
     };
   });
+  // The working-tree option only makes sense on the compare side; offer it at
+  // the top so the default (uncommitted changes vs base) is one keystroke away.
+  if (which === "target") {
+    const isCurrent = current === WORKTREE_REF;
+    items.unshift({
+      label: WORKTREE_LABEL,
+      search: `${WORKTREE_LABEL} head working tree worktree uncommitted dirty untracked`,
+      cls: "ref-row",
+      run: () => applyRef(which, WORKTREE_REF),
+      html: `<div class="stack"><div class="primary">${escapeHtml(WORKTREE_LABEL)}${isCurrent ? ` <span class="hint">current</span>` : ""}</div>`
+        + `<span class="secondary">includes uncommitted, dirty &amp; untracked changes</span></div>`,
+    });
+  }
   showPopup("ref", which === "base" ? "Select base ref" : "Select compare ref",
     items, "Filter branches, tags, refs…");
   // Default the input to the side's existing ref (selected, so typing replaces
   // it) — Enter without edits keeps the old value, matching the picker's intent.
+  // The worktree sentinel has no typeable ref name, so start empty (full list).
   if (current) {
-    popupInput.value = current;
+    popupInput.value = current === WORKTREE_REF ? "" : current;
     popupInput.select();
     filterPopup();
   }
@@ -2028,7 +2056,11 @@ async function applyRef(which, ref) {
     if (ref === state.compareTarget) state.compareTarget = state.compareBase;
     state.compareBase = ref;
   } else {
-    if (ref === state.compareBase) state.compareBase = state.compareTarget;
+    // Swap to avoid diffing a ref against itself — but never move the worktree
+    // sentinel into the base slot (it isn't a resolvable ref on that side).
+    if (ref === state.compareBase && state.compareTarget !== WORKTREE_REF) {
+      state.compareBase = state.compareTarget;
+    }
     state.compareTarget = ref;
   }
   state.compareFiles = [];

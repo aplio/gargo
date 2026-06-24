@@ -179,12 +179,22 @@ impl App {
             }
             CoreAction::DeleteForward => {
                 self.queue_insert_edit_jump_line();
-                self.editor.active_buffer_mut().delete_forward();
+                let buf = self.editor.active_buffer_mut();
+                // An active selection (e.g. shift+cursor in Insert mode) is
+                // deleted whole rather than just the char under the cursor.
+                if buf.delete_active_selection().is_none() {
+                    buf.delete_forward();
+                }
                 self.editor.mark_highlights_dirty();
             }
             CoreAction::DeleteBackward => {
                 self.queue_insert_edit_jump_line();
-                self.editor.active_buffer_mut().delete_backward();
+                let buf = self.editor.active_buffer_mut();
+                // An active selection (e.g. shift+cursor in Insert mode) is
+                // deleted whole rather than just the char before the cursor.
+                if buf.delete_active_selection().is_none() {
+                    buf.delete_backward();
+                }
                 self.editor.mark_highlights_dirty();
             }
             CoreAction::KillLine => {

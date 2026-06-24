@@ -2662,8 +2662,18 @@ async function toggleCompareViewed() {
       }),
     });
     file.viewed = Boolean(data.viewed);
-    await renderCompare();
-    setFocus("pane", 0);
+    // Update the checkbox in place. A full renderCompare() would rebuild the
+    // pane and reset the file-list scrollTop, jumping the list back to the top.
+    const box = app.querySelector(
+      `.pane[data-pane="0"] li[data-index="${state.compareFile}"] .viewed-box`);
+    if (box) {
+      box.classList.toggle("checked", file.viewed);
+      box.title = file.viewed ? "Viewed" : "Not viewed";
+      box.textContent = file.viewed ? "[x]" : "[ ]";
+    } else {
+      await renderCompare();
+      setFocus("pane", 0);
+    }
   } catch (error) {
     notify(`Viewed toggle failed: ${error.message}`);
   }

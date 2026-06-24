@@ -2401,11 +2401,15 @@ async function moveSelectionTo(index) {
     state.historyFile = Math.max(0, Math.min(index, (state.historyData?.files || []).length - 1));
     await renderHistory();
   } else if (state.component === "compare" && state.pane === 0) {
+    // The file set is already in state, so move the selection in place rather
+    // than rebuilding the whole view. A full renderCompare() reset scrollTop to
+    // 0 and then snapped it back via scrollIntoView, which jumped the list on
+    // every click; toggling the selected row leaves the scroll position alone.
     state.compareFile = Math.max(0, Math.min(index, state.compareFiles.length - 1));
-    await renderCompare();
-    // renderCompare() rebuilds the pane, resetting scrollTop — keep the newly
-    // selected file row visible (e.g. when clicked while scrolled down).
-    app.querySelector('.pane[data-pane="0"] .list li.selected')?.scrollIntoView({ block: "nearest" });
+    const pane0 = app.querySelector('.pane[data-pane="0"]');
+    pane0?.querySelector("li.selected")?.classList.remove("selected");
+    pane0?.querySelector(`li[data-index="${state.compareFile}"]`)?.classList.add("selected");
+    await loadCurrentDiffPreview();
   } else if (state.component === "status" && state.pane === 0) {
     // j/k between files: the file set is already in state (and a 1.5s poller
     // keeps it fresh), so don't re-fetch /api/status or rebuild the whole view.

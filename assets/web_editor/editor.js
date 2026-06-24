@@ -61,6 +61,7 @@ const state = {
   historyPollTimer: null,
   refs: [],
   refInfo: {},
+  refUsedAt: null,      // ref -> last-picked unix seconds (hydrated from localStorage)
   commit: null,
   compareBase: "",
   compareTarget: "",
@@ -1945,6 +1946,34 @@ function refLabel(ref) {
   return ref === WORKTREE_REF ? WORKTREE_LABEL : ref;
 }
 
+// Last-picked timestamps (unix seconds) per ref, persisted so the ref picker can
+// rank recently-used branches first. Lazily hydrated from localStorage.
+function loadRefUsed() {
+  if (state.refUsedAt) return state.refUsedAt;
+  let map = {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem("gargo:refUsed") || "null");
+    if (parsed && typeof parsed === "object") map = parsed;
+  } catch (_) { /* unavailable or malformed — start empty */ }
+  state.refUsedAt = map;
+  return map;
+}
+
+function recordRefUsed(ref) {
+  if (!ref || ref === WORKTREE_REF) return;
+  const map = loadRefUsed();
+  map[ref] = Math.floor(Date.now() / 1000);
+  try { localStorage.setItem("gargo:refUsed", JSON.stringify(map)); } catch (_) {}
+}
+
+// Recency score for ordering ref suggestions: the more recent of when the branch
+// was last picked here and when it last received a commit (its tip's time).
+function refRecencyKey(ref) {
+  const used = Number(loadRefUsed()[ref] || 0);
+  const tip = Number(state.refInfo?.[ref]?.time || 0);
+  return Math.max(used, tip);
+}
+
 async function ensureRefs() {
   if (state.refs.length) return;
   const data = await api("/api/branches");
@@ -2004,37 +2033,57 @@ async function renderCompare() {
 // Fuzzy picker for the Compare base/compare refs (replaces the raw text inputs).
 // Lists known branches/tags/refs; a non-matching query offers a "use verbatim"
 // row so arbitrary commit refs still work.
+// One picker row for a branch/tag ref, carrying its tip metadata.
+function buildRefItem(which, ref, current) {
+  const tip = state.refInfo[ref];
+  const meta = tip && (tip.hash || tip.message || tip.time)
+    ? `${escapeHtml(tip.hash || "")}${tip.message ? ` · ${escapeHtml(String(tip.message).split("\n")[0])}` : ""}${tip.time ? ` · ${escapeHtml(relativeTime(tip.time))}` : ""}`
+    : "";
+  return {
+    // The current side's ref is also searchable by the word "current" so
+    // typing "current" + Enter re-picks it (matches the inline badge below).
+    label: ref, search: ref === current ? `${ref} current` : ref, cls: "ref-row",
+    run: () => applyRef(which, ref),
+    html: `<div class="stack"><div class="primary">${escapeHtml(ref)}${ref === current ? ` <span class="hint">current</span>` : ""}</div>`
+      + (meta ? `<span class="secondary">${meta}</span>` : "") + `</div>`,
+  };
+}
+
+// The working-tree pseudo-ref row (compare side only).
+function buildWorktreeItem(which, current) {
+  const isCurrent = current === WORKTREE_REF;
+  return {
+    label: WORKTREE_LABEL,
+    search: `${WORKTREE_LABEL} head working tree worktree uncommitted dirty untracked`,
+    cls: "ref-row",
+    run: () => applyRef(which, WORKTREE_REF),
+    html: `<div class="stack"><div class="primary">${escapeHtml(WORKTREE_LABEL)}${isCurrent ? ` <span class="hint">current</span>` : ""}</div>`
+      + `<span class="secondary">includes uncommitted, dirty &amp; untracked changes</span></div>`,
+  };
+}
+
 async function openRefPicker(which) {
   await ensureRefs();
   state.refPickerWhich = which;
   const current = which === "base" ? state.compareBase : state.compareTarget;
-  const items = state.refs.map(ref => {
-    const tip = state.refInfo[ref];
-    const meta = tip && (tip.hash || tip.message || tip.time)
-      ? `${escapeHtml(tip.hash || "")}${tip.message ? ` · ${escapeHtml(String(tip.message).split("\n")[0])}` : ""}${tip.time ? ` · ${escapeHtml(relativeTime(tip.time))}` : ""}`
-      : "";
-    return {
-      // The current side's ref is also searchable by the word "current" so
-      // typing "current" + Enter re-picks it (matches the inline badge below).
-      label: ref, search: ref === current ? `${ref} current` : ref, cls: "ref-row",
-      run: () => applyRef(which, ref),
-      html: `<div class="stack"><div class="primary">${escapeHtml(ref)}${ref === current ? ` <span class="hint">current</span>` : ""}</div>`
-        + (meta ? `<span class="secondary">${meta}</span>` : "") + `</div>`,
-    };
-  });
+  const items = state.refs.map(ref => buildRefItem(which, ref, current));
   // The working-tree option only makes sense on the compare side; offer it at
   // the top so the default (uncommitted changes vs base) is one keystroke away.
-  if (which === "target") {
-    const isCurrent = current === WORKTREE_REF;
-    items.unshift({
-      label: WORKTREE_LABEL,
-      search: `${WORKTREE_LABEL} head working tree worktree uncommitted dirty untracked`,
-      cls: "ref-row",
-      run: () => applyRef(which, WORKTREE_REF),
-      html: `<div class="stack"><div class="primary">${escapeHtml(WORKTREE_LABEL)}${isCurrent ? ` <span class="hint">current</span>` : ""}</div>`
-        + `<span class="secondary">includes uncommitted, dirty &amp; untracked changes</span></div>`,
-    });
-  }
+  const worktree = which === "target" ? buildWorktreeItem(which, current) : null;
+  if (worktree) items.unshift(worktree);
+
+  // Suggestion list shown while the input is empty or still holds the initial
+  // value: the working-tree row (compare side) plus the three most recent
+  // branches by max(last-used, last-commit). Typing anything switches to the
+  // full fuzzy list below. Must be set before showPopup() (which calls
+  // filterPopup() with an empty query).
+  const ranked = [...state.refs]
+    .sort((a, b) => refRecencyKey(b) - refRecencyKey(a))
+    .slice(0, 3)
+    .map(ref => buildRefItem(which, ref, current));
+  state.refSuggest = worktree ? [worktree, ...ranked] : ranked;
+  state.refPickerInitial = current === WORKTREE_REF ? "" : (current || "");
+
   showPopup("ref", which === "base" ? "Select base ref" : "Select compare ref",
     items, "Filter branches, tags, refs…");
   // Default the input to the side's existing ref (selected, so typing replaces
@@ -2050,6 +2099,8 @@ async function openRefPicker(which) {
 async function applyRef(which, ref) {
   ref = String(ref || "").trim();
   if (!ref) return;
+  // Remember when this ref was picked so the suggestion list can rank it.
+  recordRefUsed(ref);
   // Picking a ref equal to the other one would diff a ref against itself; swap
   // instead so the old value of the picked side moves to the other side.
   if (which === "base") {
@@ -2887,16 +2938,31 @@ function filterPopup() {
     popupTitle.textContent = resolved.title;
     if (resolved.mode === "symbols" && !state.quickSymbolsLoaded) loadQuickSymbols();
   }
-  state.popupFiltered = query
-    ? state.popupItems
-      .map(item => ({ ...item, score: fuzzyScore(item.search || item.label, query) }))
-      .filter(item => item.score >= 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 300)
-    : state.popupItems.slice(0, 300);
+  // Ref picker, untouched input (empty or still the initial value): show the
+  // short recency-ranked suggestion list instead of the full ref list. Any real
+  // edit falls through to the normal fuzzy/empty handling below.
+  const refSuggest = state.popup === "ref"
+    && (query === "" || query === (state.refPickerInitial || ""));
+  if (refSuggest) {
+    state.popupFiltered = (state.refSuggest || []).slice(0, 300);
+    // Keep the initial value highlighted when it is among the suggestions, so
+    // Enter without edits still re-picks it; otherwise fall to the top suggestion.
+    const init = state.refPickerInitial || "";
+    const idx = state.popupFiltered.findIndex(it =>
+      it.label === init || (init === "" && it.label === WORKTREE_LABEL));
+    state.popupIndex = idx >= 0 ? idx : 0;
+  } else {
+    state.popupFiltered = query
+      ? state.popupItems
+        .map(item => ({ ...item, score: fuzzyScore(item.search || item.label, query) }))
+        .filter(item => item.score >= 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 300)
+      : state.popupItems.slice(0, 300);
+  }
   // Ref picker: a query that doesn't exactly name a known ref still resolves —
   // offer it verbatim so arbitrary commit/tag refs can be entered.
-  if (state.popup === "ref" && query && query.toLowerCase() !== "current"
+  if (!refSuggest && state.popup === "ref" && query && query.toLowerCase() !== "current"
       && !state.popupFiltered.some(item => item.label === query)) {
     const which = state.refPickerWhich;
     state.popupFiltered.unshift({

@@ -8,7 +8,7 @@ use std::process::Stdio;
 use crossterm::style::Color;
 
 use crate::core::editor::Editor;
-use crate::input::action::{Action, AppAction, WorkspaceAction};
+use crate::input::action::{Action, AppAction, ProjectAction, WorkspaceAction};
 
 use super::git_backend;
 use super::registry::{CommandEffect, CommandEntry, CommandRegistry, copy_to_clipboard};
@@ -540,7 +540,9 @@ fn git_output_in(project_root: Option<&Path>, args: &[&str]) -> Result<String, S
 /// Run `git push` in `project_root` (or the current directory when `None`),
 /// returning a one-line status message. git writes its progress and the
 /// "Everything up-to-date" notice to stderr, so both streams are combined.
-fn git_push_in(project_root: Option<&Path>) -> Result<String, String> {
+///
+/// This blocks on the network, so callers should run it off the UI thread.
+pub fn git_push_in(project_root: Option<&Path>) -> Result<String, String> {
     let mut cmd = ProcessCommand::new("git");
     cmd.arg("push");
     if let Some(root) = project_root {
@@ -794,17 +796,10 @@ pub fn register(registry: &mut CommandRegistry) {
         id: "git.push".into(),
         label: "Git Push".into(),
         category: Some("Git".into()),
-        action: Box::new(|ctx| {
-            let repo_root = ctx
-                .editor()
-                .active_buffer()
-                .file_path
-                .as_ref()
-                .and_then(|path| repo_root_for_path(path).ok());
-            match git_push_in(repo_root.as_deref()) {
-                Ok(message) => CommandEffect::Message(message),
-                Err(err) => CommandEffect::Message(err),
-            }
+        // Runs `git push` in the background so the network round-trip never
+        // blocks the editor; the result is reported in the status bar.
+        action: Box::new(|_ctx| {
+            CommandEffect::Action(Action::App(AppAction::Project(ProjectAction::GitPush)))
         }),
     });
 

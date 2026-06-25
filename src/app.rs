@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use std::rc::Rc;
@@ -213,6 +214,12 @@ pub struct App {
     /// the left button goes down inside a buffer pane; consumed by
     /// `Action::BufferDrag` events until the button is released.
     drag_anchor: Option<(usize, usize)>,
+    /// Background `git push` plumbing (lazygit-style, non-blocking): the worker
+    /// thread sends its final status-bar message over `git_push_tx`, drained in
+    /// `poll_git_push`. `git_push_in_flight` guards against overlapping pushes.
+    git_push_tx: mpsc::Sender<String>,
+    git_push_rx: mpsc::Receiver<String>,
+    git_push_in_flight: bool,
 }
 
 impl App {
@@ -251,6 +258,7 @@ impl App {
 
         let command_history = Rc::new(CommandHistory::new(&project_root));
         let recent_projects = RecentProjectsStore::new();
+        let (git_push_tx, git_push_rx) = mpsc::channel();
 
         let mut app = Self {
             editor,
@@ -298,6 +306,9 @@ impl App {
             last_term_rows: 40,
             expand_chain: None,
             drag_anchor: None,
+            git_push_tx,
+            git_push_rx,
+            git_push_in_flight: false,
         };
         app.start_lazy_file_index_prefetch_if_possible();
         app.start_git_index_prefetch_if_possible();
@@ -886,6 +897,43 @@ impl App {
 
         if should_refresh_git_index {
             self.queue_git_index_refresh_if_idle();
+        }
+    }
+
+    /// Kick off a non-blocking `git push` on a worker thread (lazygit-style).
+    /// The result is reported in the status bar via `poll_git_push`.
+    fn spawn_git_push(&mut self) {
+        if self.git_push_in_flight {
+            self.editor.message = Some("git push: already in progress".to_string());
+            return;
+        }
+        let repo_root = self.active_buffer_repo_root();
+        let tx = self.git_push_tx.clone();
+        if std::thread::Builder::new()
+            .name("gargo-git-push".to_string())
+            .spawn(move || {
+                let result = crate::command::git::git_push_in(Some(&repo_root));
+                let message = match result {
+                    Ok(message) => message,
+                    Err(err) => err,
+                };
+                let _ = tx.send(message);
+            })
+            .is_err()
+        {
+            self.editor.message = Some("git push: failed to start".to_string());
+            return;
+        }
+        self.git_push_in_flight = true;
+        self.editor.message = Some("git push: pushing...".to_string());
+    }
+
+    /// Drain finished background `git push` results and surface them in the
+    /// status bar.
+    fn poll_git_push(&mut self) {
+        while let Ok(message) = self.git_push_rx.try_recv() {
+            self.git_push_in_flight = false;
+            self.editor.message = Some(message);
         }
     }
 
@@ -1987,6 +2035,7 @@ impl App {
 
             self.emit_plugin_event(PluginEvent::Tick);
             self.poll_plugins();
+            self.poll_git_push();
             self.poll_git_runtime();
             self.poll_git_index_runtime();
             self.poll_git_view_diff_runtime();

@@ -1114,6 +1114,9 @@ impl App {
                     }
                 }
             }
+            AppAction::Project(ProjectAction::GitPush) => {
+                self.spawn_git_push();
+            }
             AppAction::Buffer(BufferAction::OpenProjectFileAt {
                 rel_path,
                 line,

@@ -219,6 +219,17 @@ impl Plugin for GargoServerPlugin {
         &self.commands
     }
 
+    fn hidden_command_ids(&self) -> Vec<String> {
+        // "Stop gargo server" only makes sense while the server is running.
+        // "Start gargo server" stays visible even when running — invoking it
+        // then re-opens the server URL (see `on_command`).
+        if self.is_running {
+            Vec::new()
+        } else {
+            vec!["server.stop_gargo".to_string()]
+        }
+    }
+
     fn on_command(&mut self, command_id: &str, _ctx: &PluginContext) -> Vec<PluginOutput> {
         let Some(handle) = &self.handle else {
             return vec![PluginOutput::Message(

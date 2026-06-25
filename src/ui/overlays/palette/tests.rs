@@ -1219,7 +1219,13 @@ fn command_history_sorts_by_last_used() {
 
     // Test: Empty query WITH history should sort by last-used
     let config = Config::default();
-    let candidates = Palette::filter_commands(&registry, "", Some(&history), &config);
+    let candidates = Palette::filter_commands(
+        &registry,
+        "",
+        Some(&history),
+        &config,
+        &std::collections::HashSet::new(),
+    );
 
     // Most recent first: Open, Quit, Save, then alphabetically: Unused
     assert_eq!(candidates.len(), 4);
@@ -1259,7 +1265,13 @@ fn command_history_alphabetical_without_history() {
 
     // Test: Empty query WITHOUT history should sort alphabetically
     let config = Config::default();
-    let candidates = Palette::filter_commands(&registry, "", None, &config);
+    let candidates = Palette::filter_commands(
+        &registry,
+        "",
+        None,
+        &config,
+        &std::collections::HashSet::new(),
+    );
 
     assert_eq!(candidates.len(), 3);
     assert_eq!(candidates[0].label, "Aaa First");
@@ -1307,7 +1319,13 @@ fn command_history_fuzzy_search_overrides_history() {
 
     // Test: Query "save" should match by fuzzy score, not history
     let config = Config::default();
-    let candidates = Palette::filter_commands(&registry, "save", Some(&history), &config);
+    let candidates = Palette::filter_commands(
+        &registry,
+        "save",
+        Some(&history),
+        &config,
+        &std::collections::HashSet::new(),
+    );
 
     // Only "Save File" should match
     assert_eq!(candidates.len(), 1);
@@ -1332,7 +1350,13 @@ fn command_history_graceful_degradation() {
 
     // Test with None history (should not crash, just use alphabetical)
     let config = Config::default();
-    let candidates = Palette::filter_commands(&registry, "", None, &config);
+    let candidates = Palette::filter_commands(
+        &registry,
+        "",
+        None,
+        &config,
+        &std::collections::HashSet::new(),
+    );
     assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].label, "Test Command");
 }
@@ -1347,7 +1371,13 @@ fn command_labels_for_config_toggles_are_dynamic() {
         show_line_number: true,
         ..Config::default()
     };
-    let candidates = Palette::filter_commands(&registry, "", None, &config);
+    let candidates = Palette::filter_commands(
+        &registry,
+        "",
+        None,
+        &config,
+        &std::collections::HashSet::new(),
+    );
     let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(labels.contains(&"Show Debug"));
     assert!(labels.contains(&"Hide Line Number"));
@@ -1357,7 +1387,13 @@ fn command_labels_for_config_toggles_are_dynamic() {
         show_line_number: false,
         ..Config::default()
     };
-    let candidates = Palette::filter_commands(&registry, "", None, &config);
+    let candidates = Palette::filter_commands(
+        &registry,
+        "",
+        None,
+        &config,
+        &std::collections::HashSet::new(),
+    );
     let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
     assert!(labels.contains(&"Hide Debug"));
     assert!(labels.contains(&"Show Line Number"));

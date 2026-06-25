@@ -287,6 +287,7 @@ impl App {
                     symbols,
                     doc_lines,
                 );
+                palette.set_hidden_command_ids(self.plugin_host.hidden_command_ids());
                 palette.update_candidates(
                     &self.registry,
                     &self.editor.language_registry,

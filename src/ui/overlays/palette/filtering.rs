@@ -10,8 +10,13 @@ impl Palette {
         if self.input.text.starts_with('>') {
             self.mode = PaletteMode::Command;
             let query = self.input.text[1..].trim_start();
-            self.candidates =
-                Self::filter_commands(registry, query, self.command_history.as_deref(), config);
+            self.candidates = Self::filter_commands(
+                registry,
+                query,
+                self.command_history.as_deref(),
+                config,
+                &self.hidden_command_ids,
+            );
         } else if self.input.text.starts_with('@') {
             self.mode = PaletteMode::SymbolPicker;
             let query = self.input.text[1..].to_string();
@@ -41,12 +46,16 @@ impl Palette {
         query: &str,
         history: Option<&CommandHistory>,
         config: &Config,
+        hidden_command_ids: &HashSet<String>,
     ) -> Vec<ScoredCandidate> {
         let mut scored: Vec<ScoredCandidate> = registry
             .commands()
             .iter()
             .enumerate()
             .filter_map(|(i, entry)| {
+                if hidden_command_ids.contains(&entry.id) {
+                    return None;
+                }
                 let display_label = command_display_label(entry, config);
                 if query.is_empty() {
                     return Some(ScoredCandidate {

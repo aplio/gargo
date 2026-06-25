@@ -102,6 +102,30 @@ struct GitCommitBufferState {
     commit_editmsg_path: PathBuf,
 }
 
+/// Result of finalizing a git commit message buffer on close: the status-bar
+/// message to show, plus whether a commit actually landed (so the caller can
+/// refresh git state only on success).
+struct GitCommitOutcome {
+    message: String,
+    committed: bool,
+}
+
+impl GitCommitOutcome {
+    fn committed(message: String) -> Self {
+        Self {
+            message,
+            committed: true,
+        }
+    }
+
+    fn aborted(message: String) -> Self {
+        Self {
+            message,
+            committed: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CountBehavior {
     Repeat,
@@ -1133,20 +1157,31 @@ impl App {
     ) -> Result<ClosedBufferInfo, String> {
         let closing_doc_id = self.editor.active_buffer().id;
         let closing_path = self.editor.active_buffer().file_path.clone();
-        let commit_message = self.finalize_git_commit_buffer_on_close(closing_doc_id);
-        let force_close = force || commit_message.is_some();
+        let commit_outcome = self.finalize_git_commit_buffer_on_close(closing_doc_id);
+        let force_close = force || commit_outcome.is_some();
         if !force_close {
             self.editor.close_active_buffer()?;
         } else {
             self.editor.force_close_active_buffer();
         }
-        if let Some(message) = commit_message {
-            self.editor.message = Some(message);
+        let committed = commit_outcome
+            .as_ref()
+            .is_some_and(|outcome| outcome.committed);
+        if let Some(outcome) = commit_outcome {
+            self.editor.message = Some(outcome.message);
         }
         let replacement_id = self.editor.active_buffer().id;
         self.compositor
             .replace_window_buffer_refs(closing_doc_id, replacement_id);
         self.compositor.set_focused_buffer(replacement_id);
+        // A successful commit changes HEAD and the index, so refresh the git
+        // view, status gutters, and active-doc diff state to reflect the new
+        // state immediately rather than waiting for the next poll.
+        if committed {
+            self.queue_git_index_refresh();
+            self.queue_git_status_refresh(true);
+            self.queue_active_doc_git_refresh(true);
+        }
         Ok(ClosedBufferInfo {
             doc_id: closing_doc_id,
             path: closing_path,
@@ -1163,7 +1198,7 @@ impl App {
             .retain(|buffer_id, _| self.editor.buffer_by_id(*buffer_id).is_some());
     }
 
-    fn finalize_git_commit_buffer_on_close(&mut self, doc_id: usize) -> Option<String> {
+    fn finalize_git_commit_buffer_on_close(&mut self, doc_id: usize) -> Option<GitCommitOutcome> {
         let state = self.git_commit_buffers.remove(&doc_id)?;
         let raw_message = self
             .editor
@@ -1178,19 +1213,24 @@ impl App {
             Ok(message) => message,
             Err(err) => {
                 let _ = std::fs::remove_file(&state.commit_editmsg_path);
-                return Some(format!("Commit aborted: {}", err));
+                return Some(GitCommitOutcome::aborted(format!(
+                    "Commit aborted: {}",
+                    err
+                )));
             }
         };
 
         if cleaned.trim().is_empty() {
             let _ = std::fs::remove_file(&state.commit_editmsg_path);
-            return Some("Commit aborted: empty commit message".to_string());
+            return Some(GitCommitOutcome::aborted(
+                "Commit aborted: empty commit message".to_string(),
+            ));
         }
 
         let payload = format!("{}\n", cleaned);
         if let Err(err) = std::fs::write(&state.commit_editmsg_path, payload) {
             let _ = std::fs::remove_file(&state.commit_editmsg_path);
-            return Some(format!("Commit failed: {}", err));
+            return Some(GitCommitOutcome::aborted(format!("Commit failed: {}", err)));
         }
 
         let result = crate::command::git::git_commit_with_message_file_in(
@@ -1199,8 +1239,8 @@ impl App {
         );
         let _ = std::fs::remove_file(&state.commit_editmsg_path);
         match result {
-            Ok(summary) => Some(summary),
-            Err(err) => Some(format!("Commit failed: {}", err)),
+            Ok(summary) => Some(GitCommitOutcome::committed(summary)),
+            Err(err) => Some(GitCommitOutcome::aborted(format!("Commit failed: {}", err))),
         }
     }
 

@@ -537,6 +537,36 @@ fn git_output_in(project_root: Option<&Path>, args: &[&str]) -> Result<String, S
         .to_string())
 }
 
+/// Run `git push` in `project_root` (or the current directory when `None`),
+/// returning a one-line status message. git writes its progress and the
+/// "Everything up-to-date" notice to stderr, so both streams are combined.
+fn git_push_in(project_root: Option<&Path>) -> Result<String, String> {
+    let mut cmd = ProcessCommand::new("git");
+    cmd.arg("push");
+    if let Some(root) = project_root {
+        cmd.current_dir(root);
+    }
+    let output = cmd.output().map_err(|e| format!("git error: {}", e))?;
+    let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&output.stderr));
+    let summary = combined
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .unwrap_or("");
+    if output.status.success() {
+        if summary.is_empty() {
+            Ok("git push: done".to_string())
+        } else {
+            Ok(format!("git push: {}", summary))
+        }
+    } else if summary.is_empty() {
+        Err("git push failed".to_string())
+    } else {
+        Err(format!("git push failed: {}", summary))
+    }
+}
+
 fn parse_hunk_range(token: &str) -> Option<(usize, usize)> {
     let token = token.trim();
     let token = token
@@ -756,6 +786,24 @@ pub fn register(registry: &mut CommandRegistry) {
             match open_url(&url) {
                 Ok(()) => CommandEffect::Message(format!("Opened: {}", url)),
                 Err(e) => CommandEffect::Message(format!("Open failed: {}", e)),
+            }
+        }),
+    });
+
+    registry.register(CommandEntry {
+        id: "git.push".into(),
+        label: "Git Push".into(),
+        category: Some("Git".into()),
+        action: Box::new(|ctx| {
+            let repo_root = ctx
+                .editor()
+                .active_buffer()
+                .file_path
+                .as_ref()
+                .and_then(|path| repo_root_for_path(path).ok());
+            match git_push_in(repo_root.as_deref()) {
+                Ok(message) => CommandEffect::Message(message),
+                Err(err) => CommandEffect::Message(err),
             }
         }),
     });

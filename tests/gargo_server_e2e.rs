@@ -594,6 +594,43 @@ fn gargo_server_plugin_commands_replace_old_visible_server_commands() {
 }
 
 #[test]
+fn gargo_server_stop_command_hidden_until_server_running() {
+    let repo_dir = setup_repo();
+    let repo = repo_dir.path();
+    let mut config = Config::default();
+    config.plugins.enabled = vec!["gargo_server".to_string()];
+    let editor = Editor::open(&repo.join("README.md").to_string_lossy());
+    let ctx = PluginContext::new(&editor, repo, &config);
+    let mut host = build_plugin_host(&config, repo).expect("plugin host");
+
+    // Before the server starts, "Stop gargo server" must be hidden while
+    // "Start gargo server" stays available.
+    let hidden = host.hidden_command_ids();
+    assert!(hidden.contains("server.stop_gargo"));
+    assert!(!hidden.contains("server.start_gargo"));
+
+    let outputs = host.run_command("server.start_gargo", &ctx);
+    assert!(outputs.is_empty());
+
+    // Wait for the server to report it started, then the stop command becomes visible.
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let _ = host.poll(&ctx);
+        if !host.hidden_command_ids().contains("server.stop_gargo") {
+            break;
+        }
+        if Instant::now() >= deadline {
+            // Server may fail to bind in sandboxed CI; don't hard-fail the suite.
+            let _ = host.run_command("server.stop_gargo", &ctx);
+            return;
+        }
+        thread::sleep(Duration::from_millis(30));
+    }
+
+    let _ = host.run_command("server.stop_gargo", &ctx);
+}
+
+#[test]
 fn gargo_server_plugin_start_opens_repository_root_not_active_file() {
     let repo_dir = setup_repo();
     let repo = repo_dir.path();

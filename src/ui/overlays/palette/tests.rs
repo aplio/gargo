@@ -1362,6 +1362,63 @@ fn command_history_graceful_degradation() {
 }
 
 #[test]
+fn reload_query_matches_refresh_buffer_via_alias() {
+    let mut registry = CommandRegistry::new();
+    crate::command::registry::register_builtins(&mut registry);
+
+    let config = Config::default();
+    let candidates = Palette::filter_commands(
+        &registry,
+        "reload buffer",
+        None,
+        &config,
+        &std::collections::HashSet::new(),
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.label == "Refresh Buffer from Disk"),
+        "typing 'reload buffer' should reach the refresh command via its alias"
+    );
+}
+
+#[test]
+fn hidden_command_ids_are_excluded_from_candidates() {
+    use crate::command::registry::{CommandEntry, CommandRegistry};
+
+    let mut registry = CommandRegistry::new();
+    registry.register(CommandEntry {
+        id: "server.start_gargo".into(),
+        label: "Start gargo server".into(),
+        category: None,
+        action: Box::new(|_ctx| crate::command::registry::CommandEffect::None),
+    });
+    registry.register(CommandEntry {
+        id: "server.stop_gargo".into(),
+        label: "Stop gargo server".into(),
+        category: None,
+        action: Box::new(|_ctx| crate::command::registry::CommandEffect::None),
+    });
+
+    let config = Config::default();
+    let mut hidden = std::collections::HashSet::new();
+    hidden.insert("server.stop_gargo".to_string());
+
+    let candidates = Palette::filter_commands(&registry, "gargo", None, &config, &hidden);
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate.label == "Start gargo server")
+    );
+    assert!(
+        !candidates
+            .iter()
+            .any(|candidate| candidate.label == "Stop gargo server"),
+        "hidden command should not appear in palette candidates"
+    );
+}
+
+#[test]
 fn command_labels_for_config_toggles_are_dynamic() {
     let mut registry = CommandRegistry::new();
     crate::command::registry::register_builtins(&mut registry);

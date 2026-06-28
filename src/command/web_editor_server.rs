@@ -149,6 +149,10 @@ struct FileEntryResponse {
 pub(crate) struct FilesQuery {
     offset: Option<usize>,
     limit: Option<usize>,
+    /// When set, force a fresh workspace rescan before paging so files created
+    /// outside the editor (by the agent or the terminal) appear. The picker
+    /// sends this on open; subsequent pagination requests omit it.
+    refresh: Option<u8>,
 }
 
 /// Schedule a shared index refresh after an in-editor filesystem change.
@@ -170,7 +174,20 @@ pub(crate) async fn handle_api_files(
     State(state): State<Arc<GargoServerState>>,
     Query(query): Query<FilesQuery>,
 ) -> Response {
-    if query.limit.is_none() {
+    if query.refresh.unwrap_or(0) != 0 {
+        // Trigger a rescan and wait until a generation newer than the one we
+        // started from has been published, so the response reflects files
+        // created since the last scan. Bounded so a huge repo can't hang the
+        // request — the picker keeps showing its cached list until this returns.
+        let before = state.workspace_index.generation();
+        state.workspace_index.request_refresh();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while (state.workspace_index.generation() == before || !state.workspace_index.is_ready())
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    } else if query.limit.is_none() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while !state.workspace_index.is_ready() && std::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

@@ -745,6 +745,25 @@ impl App {
         self.queue_file_index_refresh();
     }
 
+    /// Re-index every time a file/command/symbol/search picker opens so files
+    /// created since the last open — by the agent, the terminal, or the editor
+    /// itself — show up. The picker renders the cached `file_list` immediately;
+    /// `poll_file_index_runtime` swaps in the fresh list and refreshes the open
+    /// palette once the background scan completes. The runtime coalesces
+    /// overlapping refreshes, so re-queueing while one is in flight is cheap.
+    ///
+    /// Unlike [`Self::ensure_file_index_started_if_needed`] (used by the
+    /// high-frequency markdown link hover, which only needs the index to
+    /// exist), this always rescans — callers are explicit user gestures.
+    ///
+    /// Re-queueing while a scan is already in flight is intentional: the
+    /// runtime coalesces requests and reruns after the current pass, so the
+    /// rescan that lands is guaranteed to have started after this call and
+    /// therefore sees the just-created file.
+    fn refresh_file_index_for_picker(&mut self) {
+        self.queue_file_index_refresh();
+    }
+
     fn refresh_file_index_consumers(&mut self) {
         if let Some(palette) = self.compositor.palette_mut() {
             palette.set_file_entries(self.file_list.clone());

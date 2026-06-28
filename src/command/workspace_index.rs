@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::command::gargo_server::FileEntry;
@@ -33,6 +33,10 @@ pub struct WorkspaceIndex {
     snapshot: Mutex<WorkspaceIndexSnapshot>,
     refreshing: AtomicBool,
     rerun_requested: AtomicBool,
+    /// Bumped once per completed scan. Lets callers (e.g. the Cmd+P picker's
+    /// on-open refresh) request a rescan and then wait until a *fresh* snapshot
+    /// — one that sees just-created files — has actually been published.
+    generation: AtomicU64,
 }
 
 impl WorkspaceIndex {
@@ -43,6 +47,7 @@ impl WorkspaceIndex {
             snapshot: Mutex::new(WorkspaceIndexSnapshot::default()),
             refreshing: AtomicBool::new(false),
             rerun_requested: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
         });
         index.request_refresh();
         index
@@ -58,6 +63,11 @@ impl WorkspaceIndex {
 
     pub fn is_ready(&self) -> bool {
         self.snapshot.lock().unwrap().ready
+    }
+
+    /// Number of scans that have completed. Monotonically increasing.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     pub fn is_search_ready(&self) -> bool {
@@ -143,6 +153,10 @@ impl WorkspaceIndex {
             snapshot.ready = true;
             snapshot.truncated = truncated;
         }
+        // Publish the new generation as soon as the file list is ready — the
+        // Cmd+P picker only needs entries, not the (slower) search index — so an
+        // on-open refresh unblocks the moment fresh files are visible.
+        self.generation.fetch_add(1, Ordering::Release);
 
         let search_ready =
             crate::command::global_search_index::refresh_repo_with_files(&self.root, files).is_ok();

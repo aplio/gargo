@@ -42,6 +42,7 @@ const state = {
   fileEntries: [],
   fileIndexReady: false,
   fileIndexLoading: false,
+  fileRefreshing: false,
   currentFile: "",
   fileContent: "",
   fileBaseContent: "",
@@ -453,6 +454,47 @@ async function loadMoreFiles() {
     }
   } catch (_) {
     setTimeout(loadMoreFiles, 500);
+  }
+}
+
+// Re-index in the background so files created since the last open — by the
+// agent, the terminal, or another tab — show up in the picker. `refresh=1`
+// makes the backend rescan the workspace before responding. We page the fresh
+// list into a temp array and swap atomically, so the picker keeps showing the
+// current list (no flicker / empty flash) until the new one is fully loaded.
+async function refreshFiles() {
+  if (state.fileRefreshing) return;
+  state.fileRefreshing = true;
+  try {
+    const fresh = [];
+    let offset = 0;
+    for (let page = 0; page < 200; page++) {
+      const params = { offset: String(offset), limit: "2000" };
+      if (page === 0) params.refresh = "1";
+      const data = await api(`/api/files?${new URLSearchParams(params)}`);
+      const entries = data.entries || (data.files || []).map(path => ({
+        path, mtime: 0, opened: 0, changed: false,
+      }));
+      fresh.push(...entries);
+      const done = Boolean(data.ready) && fresh.length >= Number(data.total || 0);
+      if (done || entries.length === 0) break;
+      offset = fresh.length;
+    }
+    state.fileEntries = fresh;
+    state.files = fresh.map(entry => entry.path);
+    state.fileIndexReady = true;
+    if (state.popup === "quick" && state.quickMode === "files") {
+      state.quickFiles = quickFileItems();
+      state.popupItems = state.quickFiles;
+      filterPopup();
+    } else if (state.popup === "tree") {
+      state.treeRoot = buildTree(state.fileEntries);
+      filterPopup();
+    }
+  } catch (_) {
+    // Keep the existing list on failure — a stale picker beats an empty one.
+  } finally {
+    state.fileRefreshing = false;
   }
 }
 
@@ -3040,6 +3082,10 @@ async function openQuickPicker(initial = "") {
     ? "Search files · > commands · @ symbols"
     : "Indexing workspace · partial results · > commands · @ symbols");
   if (initial) { popupInput.value = initial; filterPopup(); }
+  // Already showing the cached list; kick off a background rescan (no await) so
+  // files created since the last open appear without blocking the picker. Skip
+  // while the first full load is still in flight — that already fetches fresh.
+  if (state.fileIndexReady) refreshFiles();
 }
 
 function quickFileItems() {
@@ -3109,6 +3155,10 @@ async function openTreePicker() {
       updateTreePreview();
     }
   }
+  // Already showing the cached tree; rescan in the background (no await) so files
+  // created since the last open appear. refreshFiles() rebuilds the tree when it
+  // lands. Skip while the first full load is still in flight (it fetches fresh).
+  if (state.fileIndexReady) refreshFiles();
 }
 
 function buildTree(entries) {

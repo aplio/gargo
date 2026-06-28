@@ -275,7 +275,7 @@ impl App {
             }
             AppAction::Workspace(WorkspaceAction::OpenCommandPalette) => {
                 debug_log!(&self.config, "palette: opened (command)");
-                self.ensure_file_index_started_if_needed();
+                self.refresh_file_index_for_picker();
                 self.queue_git_status_refresh(true);
                 let symbols = self.extract_symbol_entries();
                 let doc_lines = self.extract_active_doc_lines();
@@ -293,13 +293,13 @@ impl App {
                     &self.config,
                 );
                 self.compositor.push_palette(palette);
-                if self.file_index_loading {
+                if self.file_index_loading && self.file_list.is_empty() {
                     self.editor.message = Some("Indexing project files...".to_string());
                 }
             }
             AppAction::Workspace(WorkspaceAction::OpenFilePicker) => {
                 debug_log!(&self.config, "palette: opened (file picker)");
-                self.ensure_file_index_started_if_needed();
+                self.refresh_file_index_for_picker();
                 self.queue_git_status_refresh(true);
                 let symbols = self.extract_symbol_entries();
                 let doc_lines = self.extract_active_doc_lines();
@@ -318,7 +318,7 @@ impl App {
                     &self.config,
                 );
                 self.compositor.push_palette(palette);
-                if self.file_index_loading {
+                if self.file_index_loading && self.file_list.is_empty() {
                     self.editor.message = Some("Indexing project files...".to_string());
                 }
             }
@@ -355,7 +355,7 @@ impl App {
             }
             AppAction::Workspace(WorkspaceAction::OpenSymbolPicker) => {
                 debug_log!(&self.config, "palette: opened (symbol picker)");
-                self.ensure_file_index_started_if_needed();
+                self.refresh_file_index_for_picker();
                 self.queue_git_status_refresh(true);
                 let symbols = self.extract_symbol_entries();
                 let has_symbols = !symbols.is_empty();
@@ -377,7 +377,7 @@ impl App {
                 self.compositor.push_palette(palette);
                 if !has_symbols {
                     self.editor.message = Some("No symbols found in active document".to_string());
-                } else if self.file_index_loading {
+                } else if self.file_index_loading && self.file_list.is_empty() {
                     self.editor.message = Some("Indexing project files...".to_string());
                 }
             }
@@ -397,7 +397,7 @@ impl App {
             }
             AppAction::Workspace(WorkspaceAction::OpenGlobalSearch) => {
                 debug_log!(&self.config, "palette: opened (global search)");
-                self.ensure_file_index_started_if_needed();
+                self.refresh_file_index_for_picker();
                 self.queue_git_status_refresh(true);
                 let unsaved_buffers = self
                     .editor
@@ -419,7 +419,7 @@ impl App {
                     unsaved_buffers,
                 );
                 self.compositor.push_palette(palette);
-                if self.file_index_loading {
+                if self.file_index_loading && self.file_list.is_empty() {
                     self.editor.message = Some("Indexing project files...".to_string());
                 }
             }

@@ -153,8 +153,8 @@ const HELP_SECTIONS = [
       ["l / Tab", "Focus next pane"],
       ["h / Esc", "Focus previous pane / component"],
       ["Ctrl-d / Ctrl-u", "Scroll preview"],
-      ["o", "Open selected file in editor"],
-      ["O", "Open menu: GitHub · copy path · copy content"],
+      ["o", "Open selected file in a new tab"],
+      ["O", "Open menu: open · open in new tab · GitHub · copy path · copy content"],
       ["v", "Toggle viewed"],
     ],
   },
@@ -180,9 +180,9 @@ const HELP_SECTIONS = [
       ["j / k", "Prev / next row (k at top → query box)"],
       ["h / l (← / →)", "Collapse / expand the file group"],
       ["J / K · Ctrl-f/b · Ctrl-d/u", "Scroll preview"],
-      ["o / Enter", "Open file at the matched line"],
-      ["e", "Open file in a new browser tab"],
-      ["O", "Open menu: GitHub · copy path · copy content"],
+      ["Enter", "Open file at the matched line"],
+      ["o / e", "Open file at the matched line in a new browser tab"],
+      ["O", "Open menu: open · open in new tab · GitHub · copy path · copy content"],
     ],
   },
   {
@@ -2789,9 +2789,15 @@ async function toggleCompareViewed() {
 }
 
 // Open a file in a fresh browser tab. boot() reads the `?path=` query param
-// and loads that file, so the new tab lands directly on it.
-function openFileInNewTab(path) {
-  window.open(`/editor?path=${encodeURIComponent(path)}`, "_blank");
+// (plus optional `?line=`/`?col=`) and loads that file, so the new tab lands
+// directly on it with the cursor placed when a line is given.
+function openFileInNewTab(path, line = null, col = 0) {
+  const params = new URLSearchParams({ path });
+  if (line !== null) {
+    params.set("line", String(line));
+    params.set("col", String(col));
+  }
+  window.open(`/editor?${params}`, "_blank");
 }
 
 async function openTreeSelectionInNewTab() {
@@ -2822,7 +2828,7 @@ async function openTreeSelectionInNewTab() {
   }
 }
 
-async function openSelectedDiffFileInEditor() {
+function openSelectedDiffFileInEditor() {
   let file = null;
   if (state.component === "status" && state.pane === 0) {
     file = state.statusFiles[state.statusFile];
@@ -2832,11 +2838,7 @@ async function openSelectedDiffFileInEditor() {
     file = state.historyData?.files?.[state.historyFile];
   }
   if (!file) return;
-  try {
-    await openFile(file.path);
-  } catch (error) {
-    notify(`Cannot open ${file.path}: ${error.message}`);
-  }
+  openFileInNewTab(file.path);
 }
 
 // The file `O` (open menu) acts on: the selected file in status/compare lists,
@@ -2904,6 +2906,8 @@ function openOpenMenu() {
   if (!path) { notify("No file to act on"); return; }
   const info = state.repoInfo || {};
   const actions = [];
+  actions.push({ key: "o", label: "Open in editor", run: () => openFile(path).catch(error => notify(`Cannot open ${path}: ${error.message}`)) });
+  actions.push({ key: "e", label: "Open in editor (new tab)", run: () => openFileInNewTab(path) });
   if (info.remote_url) {
     const def = info.default_branch || "main";
     actions.push({ key: "g", label: `Open on GitHub (${def})`, run: () => window.open(githubBlobUrl(info.remote_url, def, path), "_blank") });
@@ -4140,11 +4144,11 @@ window.addEventListener("keydown", async event => {
       if (down) { event.preventDefault(); await moveSelection(1); return; }
       if (event.key === "h" || event.key === "ArrowLeft") { event.preventDefault(); await searchCollapse(); return; }
       if (event.key === "l" || event.key === "ArrowRight") { event.preventDefault(); await searchExpand(); return; }
-      if (event.key === "o" || event.key === "Enter") { event.preventDefault(); openSearchHit(); return; }
-      if (event.key === "e") {
+      if (event.key === "Enter") { event.preventDefault(); openSearchHit(); return; }
+      if (event.key === "o" || event.key === "e") {
         event.preventDefault();
         const hit = searchRowTarget(state.searchRows[state.searchSelected]);
-        if (hit) openFileInNewTab(hit.path);
+        if (hit) openFileInNewTab(hit.path, hit.line, hit.col);
         return;
       }
     }
@@ -4161,7 +4165,7 @@ window.addEventListener("keydown", async event => {
   }
   if (state.component === "history" && event.key === "o") {
     event.preventDefault();
-    await openSelectedDiffFileInEditor();
+    openSelectedDiffFileInEditor();
     return;
   }
   if (state.component === "compare" && (event.key === "B" || event.key === "C")) {
@@ -4176,7 +4180,7 @@ window.addEventListener("keydown", async event => {
   }
   if (state.component === "compare" && state.pane === 0 && event.key === "o") {
     event.preventDefault();
-    await openSelectedDiffFileInEditor();
+    openSelectedDiffFileInEditor();
     return;
   }
   if (state.component === "status" && state.pane === 0 && event.key === "v") {
@@ -4186,7 +4190,7 @@ window.addEventListener("keydown", async event => {
   }
   if (state.component === "status" && state.pane === 0 && event.key === "o") {
     event.preventDefault();
-    await openSelectedDiffFileInEditor();
+    openSelectedDiffFileInEditor();
     return;
   }
   if (state.component === "status" && state.pane === 0 && event.key === "u") {
@@ -4281,9 +4285,13 @@ async function boot() {
       : "explorer";
     const requested = location.hash.slice(1) || pathComponent;
     await switchComponent(availableComponents().includes(requested) ? requested : "explorer");
-    const fileParam = new URLSearchParams(location.search).get("path");
+    const query = new URLSearchParams(location.search);
+    const fileParam = query.get("path");
     if (fileParam) {
-      await openFile(fileParam)
+      const lineParam = query.get("line");
+      const line = lineParam === null ? null : Number(lineParam);
+      const col = Number(query.get("col") || 0);
+      await openFile(fileParam, line, col)
         .catch(error => notify(`Cannot open ${fileParam}: ${error.message}`));
     }
   } catch (error) {

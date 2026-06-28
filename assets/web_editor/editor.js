@@ -1868,7 +1868,7 @@ async function renderHistory() {
   await renderDiffView({
     kind: "history",
     title: "History",
-    hint: `<span><span class="key">j/k</span> select · <span class="key">J/K</span> changed files · <span class="key">l/Tab</span> right · <span class="key">h/Esc</span> left</span>`,
+    hint: `<span><span class="key">j/k</span> select · <span class="key">J/K</span> changed files · <span class="key">l/Tab</span> right · <span class="key">h/Esc</span> left · <span class="key">o</span> edit · <span class="key">O</span> menu</span>`,
     panes: [
       {
         title: "Commit log", name: "commit log",
@@ -2719,6 +2719,8 @@ async function openSelectedDiffFileInEditor() {
     file = state.statusFiles[state.statusFile];
   } else if (state.component === "compare" && state.pane === 0) {
     file = state.compareFiles[state.compareFile];
+  } else if (state.component === "history") {
+    file = state.historyData?.files?.[state.historyFile];
   }
   if (!file) return;
   try {
@@ -2733,6 +2735,7 @@ async function openSelectedDiffFileInEditor() {
 function openMenuTarget() {
   if (state.component === "status" && state.pane === 0) return state.statusFiles[state.statusFile]?.path || "";
   if (state.component === "compare" && state.pane === 0) return state.compareFiles[state.compareFile]?.path || "";
+  if (state.component === "history") return state.historyData?.files?.[state.historyFile]?.path || "";
   if (state.component === "search") return searchRowTarget(state.searchRows[state.searchSelected])?.path || "";
   if (state.component === "explorer") return state.currentFile || "";
   return "";
@@ -4019,6 +4022,11 @@ window.addEventListener("keydown", async event => {
   if (state.component === "history" && event.shiftKey && event.key === "K") {
     event.preventDefault();
     await moveHistoryFile(-1);
+    return;
+  }
+  if (state.component === "history" && event.key === "o") {
+    event.preventDefault();
+    await openSelectedDiffFileInEditor();
     return;
   }
   if (state.component === "compare" && (event.key === "B" || event.key === "C")) {

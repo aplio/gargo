@@ -60,6 +60,9 @@ pub struct PluginConfig {
 #[serde(default)]
 pub struct PluginGargoServerConfig {
     pub auto_open_browser: bool,
+    /// Host/IP the server binds to. Defaults to `127.0.0.1` (localhost only);
+    /// set to `0.0.0.0` to accept connections from other machines.
+    pub host: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -199,6 +202,7 @@ impl Default for PluginGargoServerConfig {
     fn default() -> Self {
         Self {
             auto_open_browser: true,
+            host: "127.0.0.1".to_string(),
         }
     }
 }

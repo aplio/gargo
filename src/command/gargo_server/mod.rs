@@ -39,6 +39,8 @@ pub enum GargoServerCommand {
         repo_root: PathBuf,
         /// Explicit port to bind; `None` requests an OS-assigned ephemeral port.
         port: Option<u16>,
+        /// Host/IP to bind; `None` defaults to `127.0.0.1` (localhost only).
+        host: Option<String>,
     },
     Stop,
     OpenRoute {
@@ -110,13 +112,25 @@ struct GargoServerWorker {
     port: Option<u16>,
 }
 
+/// Map a bind host to a host usable in a browser-facing URL. Wildcard bind
+/// addresses aren't connectable, so report a loopback address instead.
+fn url_host_for_bind(bind_host: &str) -> String {
+    match bind_host {
+        "0.0.0.0" => "127.0.0.1".to_string(),
+        "::" | "[::]" => "[::1]".to_string(),
+        other => other.to_string(),
+    }
+}
+
 impl GargoServerWorker {
     fn run(mut self) {
         loop {
             match self.command_rx.recv() {
-                Ok(GargoServerCommand::Start { repo_root, port }) => {
-                    self.handle_start(repo_root, port)
-                }
+                Ok(GargoServerCommand::Start {
+                    repo_root,
+                    port,
+                    host,
+                }) => self.handle_start(repo_root, port, host),
                 Ok(GargoServerCommand::Stop) => self.handle_stop(),
                 Ok(GargoServerCommand::OpenRoute { route }) => self.handle_open_route(route),
                 Ok(GargoServerCommand::SetActivePath { rel_path }) => {
@@ -135,7 +149,7 @@ impl GargoServerWorker {
         }
     }
 
-    fn handle_start(&mut self, repo_root: PathBuf, port: Option<u16>) {
+    fn handle_start(&mut self, repo_root: PathBuf, port: Option<u16>, host: Option<String>) {
         if self.server_shutdown_tx.is_some() {
             let _ = self.event_tx.send(GargoServerEvent::Error(
                 "Server already running".to_string(),
@@ -143,7 +157,9 @@ impl GargoServerWorker {
             return;
         }
 
-        let bind_addr = format!("127.0.0.1:{}", port.unwrap_or(0));
+        let bind_host = host.unwrap_or_else(|| "127.0.0.1".to_string());
+        let url_host = url_host_for_bind(&bind_host);
+        let bind_addr = format!("{}:{}", bind_host, port.unwrap_or(0));
         let listener = match self
             .tokio_runtime
             .block_on(tokio::net::TcpListener::bind(&bind_addr))
@@ -175,7 +191,7 @@ impl GargoServerWorker {
         let url_ctx = self
             .tokio_runtime
             .block_on(gargo_preview_server::resolve_repo_url_context(&repo_root));
-        let root_url = format!("http://127.0.0.1:{port}/");
+        let root_url = format!("http://{url_host}:{port}/");
 
         let bridge_tx = bridge_preview_events(self.event_tx.clone());
         let preview_state = Arc::new(Mutex::new(PreviewServerState {

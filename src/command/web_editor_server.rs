@@ -998,6 +998,7 @@ pub(crate) async fn handle_api_server_open(
                 .send(GargoServerCommand::Start {
                     repo_root: root_for_start,
                     port: None,
+                    host: None,
                 })
                 .map_err(|e| format!("failed to start child server: {e}"))?;
             match handle

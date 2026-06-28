@@ -247,6 +247,7 @@ impl Plugin for GargoServerPlugin {
                 handle.command_tx.send(GargoServerCommand::Start {
                     repo_root: self.project_root.clone(),
                     port: None,
+                    host: None,
                 })
             }
             "server.stop_gargo" | "server.stop_github" => {

@@ -693,10 +693,14 @@ async function saveCurrentFile() {
 
 async function renderCodeSurface(container, options) {
   container.innerHTML = `<div class="code-surface">
-    <div class="code-toolbar"><span class="path">${escapeHtml(options.path || "Preview")}</span>
+    <div class="code-toolbar"><span class="path${options.path ? " clickable" : ""}"${options.path ? ` title="Click to copy path"` : ""}>${escapeHtml(options.path || "Preview")}</span>
       <span class="grow"></span><span class="dirty"></span>
       ${options.editable ? `<span class="editor-mode"></span><span>i/Enter edit · Esc app focus · Cmd+S save</span>` : `<span>read only</span>`}
     </div><div class="code-body"></div></div>`;
+  if (options.path) {
+    container.querySelector(".code-toolbar .path")
+      ?.addEventListener("click", () => copyText(options.path));
+  }
   const body = container.querySelector(".code-body");
   if (options.diffHtml !== undefined) {
     body.innerHTML = `<div class="diff-preview">${options.diffHtml || `<div class="empty">No diff</div>`}</div>`;

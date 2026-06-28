@@ -206,6 +206,10 @@ const COMMANDS = [
   { label: "Save current file", hint: "Cmd+S", run: () => saveCurrentFile() },
   { label: "Refresh current component", hint: "r", run: () => refreshComponent() },
   { label: "Search project", hint: "Cmd+Shift+F", run: () => switchComponent("search") },
+  { label: "Copy relative path", run: () => copyTargetPath("rel") },
+  { label: "Copy absolute path", run: () => copyTargetPath("abs") },
+  { label: "Copy GitHub URL (default branch)", git: true, run: () => copyTargetPath("github-default") },
+  { label: "Copy GitHub URL (current branch)", git: true, run: () => copyTargetPath("github-branch") },
   { label: "Show keybindings", hint: "?", run: () => toggleHelp() },
 ];
 
@@ -2745,6 +2749,22 @@ function githubBlobUrl(remote, branch, path) {
   return `${remote}/blob/${encodeURIComponent(branch)}/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
+// Copy a path/URL for the file the editor would open with `o`. Shared by the
+// `O` menu and the ⌘⇧P command palette. `kind`: rel | abs | github-default |
+// github-branch.
+function copyTargetPath(kind) {
+  const path = openMenuTarget();
+  if (!path) { notify("No file to act on"); return; }
+  const info = state.repoInfo || {};
+  if (kind === "rel") return copyText(path);
+  if (kind === "abs") return copyText(info.root ? `${info.root.replace(/\/$/, "")}/${path}` : path);
+  if (!info.remote_url) { notify("No GitHub remote configured"); return; }
+  const branch = kind === "github-branch"
+    ? (info.branch || info.default_branch || "main")
+    : (info.default_branch || "main");
+  return copyText(githubBlobUrl(info.remote_url, branch, path));
+}
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -2782,12 +2802,14 @@ function openOpenMenu() {
   if (info.remote_url) {
     const def = info.default_branch || "main";
     actions.push({ key: "g", label: `Open on GitHub (${def})`, run: () => window.open(githubBlobUrl(info.remote_url, def, path), "_blank") });
+    actions.push({ key: "c", label: `Copy GitHub URL (${def})`, run: () => copyTargetPath("github-default") });
     if (info.branch && info.branch !== def) {
       actions.push({ key: "G", label: `Open on GitHub (${info.branch})`, run: () => window.open(githubBlobUrl(info.remote_url, info.branch, path), "_blank") });
+      actions.push({ key: "C", label: `Copy GitHub URL (${info.branch})`, run: () => copyTargetPath("github-branch") });
     }
   }
-  actions.push({ key: "r", label: "Copy relative path", run: () => copyText(path) });
-  actions.push({ key: "a", label: "Copy absolute path", run: () => copyText(info.root ? `${info.root.replace(/\/$/, "")}/${path}` : path) });
+  actions.push({ key: "r", label: "Copy relative path", run: () => copyTargetPath("rel") });
+  actions.push({ key: "a", label: "Copy absolute path", run: () => copyTargetPath("abs") });
   actions.push({ key: "y", label: "Copy whole content", run: () => copyFileContent(path) });
   showMenuPopup(`Open · ${path}`, actions);
 }

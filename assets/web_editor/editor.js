@@ -581,6 +581,11 @@ async function renderPreviewSurface(container) {
       event.preventDefault();
       navigateEditorLink(href);
     });
+    // Selecting/clicking text in the preview moves focus into this iframe, so
+    // keystrokes land here instead of the parent window. Run the same global
+    // shortcut handler on the real iframe event so e.g. Cmd+P and `p` keep
+    // working (and preventDefault suppresses the browser default).
+    doc.addEventListener("keydown", onGlobalKeyDown);
   });
   try {
     const data = await api("/api/preview", {
@@ -3935,7 +3940,7 @@ document.addEventListener("mousedown", event => {
   leaveEditorInsertMode();
 });
 
-window.addEventListener("keydown", async event => {
+async function onGlobalKeyDown(event) {
   const isText = event.target.matches("textarea, input");
   if (state.help) {
     if (event.key === "Escape" || event.key === "?") {
@@ -4229,7 +4234,8 @@ window.addEventListener("keydown", async event => {
     event.preventDefault();
     scrollPreview(event.key === "d" ? 1 : -1);
   }
-});
+}
+window.addEventListener("keydown", onGlobalKeyDown);
 
 // Commit dialog wiring: backdrop click cancels, the buttons commit/cancel, and
 // the message + amend toggle keep the submit button's enabled state in sync.

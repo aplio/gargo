@@ -1645,7 +1645,66 @@ function onReplaceKeyDown(e) {
 // Intercept keys on the textarea. Add-cursor chords (⌥⌘ + arrows) work whether or
 // not multi-cursor is active yet; everything else only matters once it is. Runs
 // before the window handler (which it stops for Escape so the editor isn't exited).
+// Indent (Tab) / outdent (Shift+Tab) in insert mode. A plain Tab at a caret
+// inserts one tab through the native pipeline (keeps the input event + undo);
+// with a selection — or Shift+Tab — every covered line is indented/outdented.
+function editorIndent(outdent) {
+  const input = app.querySelector(".editor-input");
+  if (!input || input.readOnly) return;
+  const value = input.value;
+  const selStart = input.selectionStart;
+  const selEnd = input.selectionEnd;
+  if (!outdent && selStart === selEnd) {
+    document.execCommand("insertText", false, "\t");
+    return;
+  }
+  // Expand to whole lines, then indent/outdent each and keep the selection over
+  // the same text so a repeated Tab keeps compounding on the block.
+  const blockStart = value.lastIndexOf("\n", selStart - 1) + 1;
+  const nextNl = value.indexOf("\n", selEnd);
+  const blockEnd = nextNl === -1 ? value.length : nextNl;
+  const lines = value.slice(blockStart, blockEnd).split("\n");
+  let firstDelta = 0;
+  let totalDelta = 0;
+  const rewritten = lines.map((line, i) => {
+    let delta;
+    let out;
+    if (outdent) {
+      let cut = 0;
+      if (line.startsWith("\t")) cut = 1;
+      else while (cut < line.length && cut < EDITOR_TAB && line[cut] === " ") cut++;
+      out = line.slice(cut);
+      delta = -cut;
+    } else {
+      out = line.length ? "\t" + line : line; // don't indent blank lines
+      delta = out.length - line.length;
+    }
+    if (i === 0) firstDelta = delta;
+    totalDelta += delta;
+    return out;
+  });
+  input.value = value.slice(0, blockStart) + rewritten.join("\n") + value.slice(blockEnd);
+  input.setSelectionRange(
+    Math.max(blockStart, selStart + firstDelta),
+    selEnd + totalDelta,
+  );
+  repaintEditorAfterEdit();
+  editorHistoryPush(false);
+}
+
 function onEditorKeyDown(event) {
+  // Tab indents instead of moving focus off the textarea. In app focus Tab means
+  // "next pane"; in insert mode we want a literal tab (or a block indent).
+  if (event.key === "Tab" && !event.metaKey && !event.ctrlKey && !event.altKey
+      && !event.target.readOnly) {
+    event.preventDefault();
+    if (state.multiRanges.length >= 2) {
+      if (!event.shiftKey) applyMultiEdit((sel, r) => ({ from: r.start, to: r.end, text: "\t" }));
+    } else {
+      editorIndent(event.shiftKey);
+    }
+    return;
+  }
   // Multi-cursor add actions — seed from the native caret on first use.
   if ((event.metaKey || event.ctrlKey) && event.altKey
       && (event.key === "ArrowDown" || event.key === "ArrowUp")) {

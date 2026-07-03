@@ -21,7 +21,9 @@ fn git_push_command_dispatches_background_push_action() {
     match (registry.commands()[idx].action)(&ctx) {
         CommandEffect::Action(Action::App(AppAction::Project(ProjectAction::GitPush))) => {}
         CommandEffect::Action(other) => panic!("expected GitPush action, got {:?}", other),
-        CommandEffect::Message(message) => panic!("expected GitPush action, got message {message:?}"),
+        CommandEffect::Message(message) => {
+            panic!("expected GitPush action, got message {message:?}")
+        }
         CommandEffect::None => panic!("expected GitPush action, got no effect"),
     }
 }

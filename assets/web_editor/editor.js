@@ -42,6 +42,7 @@ const state = {
   fileEntries: [],
   fileIndexReady: false,
   fileIndexLoading: false,
+  fileRefreshing: false,
   currentFile: "",
   fileContent: "",
   fileBaseContent: "",
@@ -206,6 +207,10 @@ const COMMANDS = [
   { label: "Save current file", hint: "Cmd+S", run: () => saveCurrentFile() },
   { label: "Refresh current component", hint: "r", run: () => refreshComponent() },
   { label: "Search project", hint: "Cmd+Shift+F", run: () => switchComponent("search") },
+  { label: "Copy relative path", run: () => copyTargetPath("rel") },
+  { label: "Copy absolute path", run: () => copyTargetPath("abs") },
+  { label: "Copy GitHub URL (default branch)", git: true, run: () => copyTargetPath("github-default") },
+  { label: "Copy GitHub URL (current branch)", git: true, run: () => copyTargetPath("github-branch") },
   { label: "Show keybindings", hint: "?", run: () => toggleHelp() },
 ];
 
@@ -452,6 +457,47 @@ async function loadMoreFiles() {
   }
 }
 
+// Re-index in the background so files created since the last open — by the
+// agent, the terminal, or another tab — show up in the picker. `refresh=1`
+// makes the backend rescan the workspace before responding. We page the fresh
+// list into a temp array and swap atomically, so the picker keeps showing the
+// current list (no flicker / empty flash) until the new one is fully loaded.
+async function refreshFiles() {
+  if (state.fileRefreshing) return;
+  state.fileRefreshing = true;
+  try {
+    const fresh = [];
+    let offset = 0;
+    for (let page = 0; page < 200; page++) {
+      const params = { offset: String(offset), limit: "2000" };
+      if (page === 0) params.refresh = "1";
+      const data = await api(`/api/files?${new URLSearchParams(params)}`);
+      const entries = data.entries || (data.files || []).map(path => ({
+        path, mtime: 0, opened: 0, changed: false,
+      }));
+      fresh.push(...entries);
+      const done = Boolean(data.ready) && fresh.length >= Number(data.total || 0);
+      if (done || entries.length === 0) break;
+      offset = fresh.length;
+    }
+    state.fileEntries = fresh;
+    state.files = fresh.map(entry => entry.path);
+    state.fileIndexReady = true;
+    if (state.popup === "quick" && state.quickMode === "files") {
+      state.quickFiles = quickFileItems();
+      state.popupItems = state.quickFiles;
+      filterPopup();
+    } else if (state.popup === "tree") {
+      state.treeRoot = buildTree(state.fileEntries);
+      filterPopup();
+    }
+  } catch (_) {
+    // Keep the existing list on failure — a stale picker beats an empty one.
+  } finally {
+    state.fileRefreshing = false;
+  }
+}
+
 async function renderExplorer() {
   app.innerHTML = `<section class="component">
     ${componentBar("Explorer", `<span><span class="key">t</span> tree · <span class="key">⌘P</span> files · <span class="key">⌘⇧P</span> commands · <span class="key">⌘@</span> symbols · <span class="key">⌘F</span> find · <span class="key">⌘⇧F</span> search · <span class="key">p</span> preview · <span class="key">?</span> help</span>`)}
@@ -689,10 +735,14 @@ async function saveCurrentFile() {
 
 async function renderCodeSurface(container, options) {
   container.innerHTML = `<div class="code-surface">
-    <div class="code-toolbar"><span class="path">${escapeHtml(options.path || "Preview")}</span>
+    <div class="code-toolbar"><span class="path${options.path ? " clickable" : ""}"${options.path ? ` title="Click to copy path"` : ""}>${escapeHtml(options.path || "Preview")}</span>
       <span class="grow"></span><span class="dirty"></span>
       ${options.editable ? `<span class="editor-mode"></span><span>i/Enter edit · Esc app focus · Cmd+S save</span>` : `<span>read only</span>`}
     </div><div class="code-body"></div></div>`;
+  if (options.path) {
+    container.querySelector(".code-toolbar .path")
+      ?.addEventListener("click", () => copyText(options.path));
+  }
   const body = container.querySelector(".code-body");
   if (options.diffHtml !== undefined) {
     body.innerHTML = `<div class="diff-preview">${options.diffHtml || `<div class="empty">No diff</div>`}</div>`;
@@ -1868,7 +1918,7 @@ async function renderHistory() {
   await renderDiffView({
     kind: "history",
     title: "History",
-    hint: `<span><span class="key">j/k</span> select · <span class="key">J/K</span> changed files · <span class="key">l/Tab</span> right · <span class="key">h/Esc</span> left</span>`,
+    hint: `<span><span class="key">j/k</span> select · <span class="key">J/K</span> changed files · <span class="key">l/Tab</span> right · <span class="key">h/Esc</span> left · <span class="key">o</span> edit · <span class="key">O</span> menu</span>`,
     panes: [
       {
         title: "Commit log", name: "commit log",
@@ -2719,6 +2769,8 @@ async function openSelectedDiffFileInEditor() {
     file = state.statusFiles[state.statusFile];
   } else if (state.component === "compare" && state.pane === 0) {
     file = state.compareFiles[state.compareFile];
+  } else if (state.component === "history") {
+    file = state.historyData?.files?.[state.historyFile];
   }
   if (!file) return;
   try {
@@ -2733,6 +2785,7 @@ async function openSelectedDiffFileInEditor() {
 function openMenuTarget() {
   if (state.component === "status" && state.pane === 0) return state.statusFiles[state.statusFile]?.path || "";
   if (state.component === "compare" && state.pane === 0) return state.compareFiles[state.compareFile]?.path || "";
+  if (state.component === "history") return state.historyData?.files?.[state.historyFile]?.path || "";
   if (state.component === "search") return searchRowTarget(state.searchRows[state.searchSelected])?.path || "";
   if (state.component === "explorer") return state.currentFile || "";
   return "";
@@ -2740,6 +2793,22 @@ function openMenuTarget() {
 
 function githubBlobUrl(remote, branch, path) {
   return `${remote}/blob/${encodeURIComponent(branch)}/${path.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+// Copy a path/URL for the file the editor would open with `o`. Shared by the
+// `O` menu and the ⌘⇧P command palette. `kind`: rel | abs | github-default |
+// github-branch.
+function copyTargetPath(kind) {
+  const path = openMenuTarget();
+  if (!path) { notify("No file to act on"); return; }
+  const info = state.repoInfo || {};
+  if (kind === "rel") return copyText(path);
+  if (kind === "abs") return copyText(info.root ? `${info.root.replace(/\/$/, "")}/${path}` : path);
+  if (!info.remote_url) { notify("No GitHub remote configured"); return; }
+  const branch = kind === "github-branch"
+    ? (info.branch || info.default_branch || "main")
+    : (info.default_branch || "main");
+  return copyText(githubBlobUrl(info.remote_url, branch, path));
 }
 
 async function copyText(text) {
@@ -2779,12 +2848,14 @@ function openOpenMenu() {
   if (info.remote_url) {
     const def = info.default_branch || "main";
     actions.push({ key: "g", label: `Open on GitHub (${def})`, run: () => window.open(githubBlobUrl(info.remote_url, def, path), "_blank") });
+    actions.push({ key: "c", label: `Copy GitHub URL (${def})`, run: () => copyTargetPath("github-default") });
     if (info.branch && info.branch !== def) {
       actions.push({ key: "G", label: `Open on GitHub (${info.branch})`, run: () => window.open(githubBlobUrl(info.remote_url, info.branch, path), "_blank") });
+      actions.push({ key: "C", label: `Copy GitHub URL (${info.branch})`, run: () => copyTargetPath("github-branch") });
     }
   }
-  actions.push({ key: "r", label: "Copy relative path", run: () => copyText(path) });
-  actions.push({ key: "a", label: "Copy absolute path", run: () => copyText(info.root ? `${info.root.replace(/\/$/, "")}/${path}` : path) });
+  actions.push({ key: "r", label: "Copy relative path", run: () => copyTargetPath("rel") });
+  actions.push({ key: "a", label: "Copy absolute path", run: () => copyTargetPath("abs") });
   actions.push({ key: "y", label: "Copy whole content", run: () => copyFileContent(path) });
   showMenuPopup(`Open · ${path}`, actions);
 }
@@ -3011,6 +3082,10 @@ async function openQuickPicker(initial = "") {
     ? "Search files · > commands · @ symbols"
     : "Indexing workspace · partial results · > commands · @ symbols");
   if (initial) { popupInput.value = initial; filterPopup(); }
+  // Already showing the cached list; kick off a background rescan (no await) so
+  // files created since the last open appear without blocking the picker. Skip
+  // while the first full load is still in flight — that already fetches fresh.
+  if (state.fileIndexReady) refreshFiles();
 }
 
 function quickFileItems() {
@@ -3080,6 +3155,10 @@ async function openTreePicker() {
       updateTreePreview();
     }
   }
+  // Already showing the cached tree; rescan in the background (no await) so files
+  // created since the last open appear. refreshFiles() rebuilds the tree when it
+  // lands. Skip while the first full load is still in flight (it fetches fresh).
+  if (state.fileIndexReady) refreshFiles();
 }
 
 function buildTree(entries) {
@@ -4019,6 +4098,11 @@ window.addEventListener("keydown", async event => {
   if (state.component === "history" && event.shiftKey && event.key === "K") {
     event.preventDefault();
     await moveHistoryFile(-1);
+    return;
+  }
+  if (state.component === "history" && event.key === "o") {
+    event.preventDefault();
+    await openSelectedDiffFileInEditor();
     return;
   }
   if (state.component === "compare" && (event.key === "B" || event.key === "C")) {

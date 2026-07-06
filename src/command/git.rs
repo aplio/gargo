@@ -229,6 +229,43 @@ pub fn git_branch_compare_files_in(
     })
 }
 
+/// 0-based line (in the HEAD version) of the first changed line in `path`'s
+/// `base...HEAD` diff, so "edit this file" can land on the change.
+pub fn branch_compare_first_changed_line(
+    project_root: &Path,
+    base_branch: &str,
+    path: &str,
+) -> Option<usize> {
+    use crate::diff_render::LineKind;
+
+    let diff = git_backend::compare_diff_text(project_root, base_branch, "HEAD", Some(path))?;
+    let file = crate::diff_render::parse_unified_diff(&diff)
+        .into_iter()
+        .next()?;
+    for hunk in &file.hunks {
+        // 1-based line the next change would land on in the new file.
+        let mut next_new = hunk.new_start.max(1);
+        for line in &hunk.lines {
+            match line.kind {
+                LineKind::Context => {
+                    if let Some(n) = line.new_no {
+                        next_new = n + 1;
+                    }
+                }
+                LineKind::Add => {
+                    let n = line.new_no.unwrap_or(next_new);
+                    return Some(n.saturating_sub(1));
+                }
+                LineKind::Remove => {
+                    return Some(next_new.saturating_sub(1));
+                }
+                LineKind::NoNewline => {}
+            }
+        }
+    }
+    None
+}
+
 /// The `compare_ref` under which viewed records for a `base...HEAD` compare
 /// are stored. Uses the current branch name so records are shared with the
 /// web compare page, which stores branch names rather than `HEAD`.
@@ -1130,6 +1167,12 @@ mod tests {
         assert_eq!(compare.files.len(), 1);
         assert_eq!(compare.files[0].path, "a.txt");
         let hash = compare.content_hashes.get("a.txt").expect("hash").clone();
+
+        // The added "two" is line 2 of the new file → 0-based line 1.
+        assert_eq!(
+            branch_compare_first_changed_line(root, "base", "a.txt"),
+            Some(1)
+        );
 
         let store_dir = tempfile::tempdir().expect("store dir");
         let store = crate::command::diff_viewed::ViewedStore::open_in_dir(store_dir.path());

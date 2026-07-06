@@ -742,9 +742,48 @@ impl App {
                 self.compositor.open_explorer(explorer);
                 self.last_used_sidebar = Some(LastUsedSidebar::BranchCompare);
                 self.editor.message = Some(
-                    "Compare: Enter=diff buffer  e=edit file  v=viewed  p=preview  Shift+J/K=scroll"
+                    "Compare: Enter/e=edit file  o=diff buffer  v=viewed  p=preview  Shift+J/K=scroll"
                         .to_string(),
                 );
+            }
+            AppAction::Workspace(WorkspaceAction::OpenBranchCompareFile { base, path }) => {
+                self.flush_insert_transaction_if_active();
+                let repo_root = self
+                    .compositor
+                    .explorer_mut()
+                    .filter(|explorer| explorer.is_branch_compare())
+                    .map(|explorer| explorer.current_dir().to_path_buf())
+                    .unwrap_or_else(|| self.active_buffer_repo_root());
+                let full_path = repo_root.join(&path);
+                // A file deleted on HEAD has nothing to edit; fall back to
+                // its patch buffer.
+                if !full_path.exists() {
+                    if let Some(explorer) = self.compositor.close_explorer() {
+                        self.stash_closed_explorer(explorer);
+                    }
+                    match self.open_branch_compare_file_diff_view(&repo_root, &base, &path) {
+                        Ok(()) => {
+                            self.editor.message =
+                                Some(format!("{} is deleted; showing its diff", path));
+                        }
+                        Err(err) => {
+                            self.editor.message =
+                                Some(format!("Failed to open file diff: {}", err));
+                        }
+                    }
+                    return false;
+                }
+                let line = crate::command::git::branch_compare_first_changed_line(
+                    &repo_root, &base, &path,
+                )
+                .unwrap_or(0);
+                // Stash the sidebar so Ctrl+0 brings the compare list back.
+                if let Some(explorer) = self.compositor.close_explorer() {
+                    self.stash_closed_explorer(explorer);
+                }
+                self.open_file_at_char_location(&full_path, line, 0);
+                self.editor.message =
+                    Some(format!("Editing {} (Ctrl+0 back to compare list)", path));
             }
             AppAction::Workspace(WorkspaceAction::OpenBranchCompareFileDiff { base, path }) => {
                 self.flush_insert_transaction_if_active();

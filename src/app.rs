@@ -473,9 +473,10 @@ impl App {
             .then(|| self.git_view_index_snapshot())
     }
 
-    fn git_branch_picker_entries(&self) -> Vec<GitBranchPickerEntry> {
-        self.git_index_snapshot
-            .branches
+    fn branch_picker_entries_from(
+        branches: &[crate::command::git_index_runtime::GitIndexBranchEntry],
+    ) -> Vec<GitBranchPickerEntry> {
+        branches
             .iter()
             .map(|entry| GitBranchPickerEntry {
                 branch_name: entry.name.clone(),
@@ -489,12 +490,19 @@ impl App {
             .collect()
     }
 
+    fn git_branch_picker_entries(&self) -> Vec<GitBranchPickerEntry> {
+        Self::branch_picker_entries_from(&self.git_index_snapshot.branches)
+    }
+
     fn git_branch_picker_entries_for_root(&self, repo_root: &Path) -> Vec<GitBranchPickerEntry> {
-        if self.git_index_matches_root(repo_root) {
-            self.git_branch_picker_entries()
-        } else {
-            Vec::new()
+        if self.git_index_matches_root(repo_root) && !self.git_index_snapshot.branches.is_empty() {
+            return self.git_branch_picker_entries();
         }
+        // The live index hasn't produced branches for this repo yet (e.g.
+        // right after startup): serve the list persisted by the last full
+        // index pass. Possibly stale, but the refresh replaces it in the
+        // open palette as soon as it lands.
+        Self::branch_picker_entries_from(&self.recent_projects.load_branch_cache(repo_root))
     }
 
     /// Move previously used compare bases to the front (most recent first),
@@ -704,6 +712,13 @@ impl App {
                     {
                         snapshot.branches = std::mem::take(&mut self.git_index_snapshot.branches);
                         snapshot.branches_ready = true;
+                    }
+                    // Persist each fully indexed branch list so the next
+                    // session's pickers open instantly from disk.
+                    if branches_ready && !snapshot.branches.is_empty() {
+                        let _ = self
+                            .recent_projects
+                            .save_branch_cache(&project_root, &snapshot.branches);
                     }
                     self.git_index_snapshot = snapshot;
                     self.git_index_snapshot_root = Some(project_root.clone());

@@ -92,6 +92,17 @@ impl RecentProjectsStore {
             [],
         )?;
 
+        // Last fully indexed branch list per repo (JSON), so branch pickers
+        // open instantly after startup while the live index is still warming.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS branch_cache (
+                project_path TEXT PRIMARY KEY,
+                branches     TEXT NOT NULL,
+                updated_at   INTEGER NOT NULL
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -321,6 +332,56 @@ impl RecentProjectsStore {
         Ok(())
     }
 
+    /// Persist the fully indexed branch list for this repo. Best-effort; the
+    /// cache only accelerates picker startup.
+    pub fn save_branch_cache(
+        &self,
+        project_root: &Path,
+        branches: &[crate::command::git_index_runtime::GitIndexBranchEntry],
+    ) -> Result<()> {
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
+        let Ok(payload) = serde_json::to_string(branches) else {
+            return Ok(());
+        };
+        let project = Self::normalize_project_root(project_root)
+            .to_string_lossy()
+            .to_string();
+        conn.execute(
+            "INSERT INTO branch_cache (project_path, branches, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_path)
+             DO UPDATE SET branches = ?2, updated_at = ?3",
+            rusqlite::params![project, payload, Self::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// The last persisted branch list for this repo (possibly stale), or
+    /// empty when never indexed.
+    pub fn load_branch_cache(
+        &self,
+        project_root: &Path,
+    ) -> Vec<crate::command::git_index_runtime::GitIndexBranchEntry> {
+        let Some(conn) = self.conn.as_ref() else {
+            return Vec::new();
+        };
+        let project = Self::normalize_project_root(project_root)
+            .to_string_lossy()
+            .to_string();
+        let payload: Option<String> = conn
+            .query_row(
+                "SELECT branches FROM branch_cache WHERE project_path = ?1",
+                rusqlite::params![project],
+                |row| row.get(0),
+            )
+            .ok();
+        payload
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
+    }
+
     /// Branch-compare bases previously used for this repo, most recent first.
     pub fn get_recent_compare_bases(&self, project_root: &Path) -> Vec<String> {
         let Some(conn) = self.conn.as_ref() else {
@@ -481,6 +542,51 @@ mod tests {
                 .get_recent_compare_bases(&temp_dir.join("other"))
                 .is_empty()
         );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn branch_cache_roundtrip() {
+        use crate::command::git_index_runtime::GitIndexBranchEntry;
+
+        let timestamp = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("gargo_recent_projects_bc_{}", timestamp));
+        let root = temp_dir.join("repo");
+        fs::create_dir_all(&root).unwrap();
+
+        let store = RecentProjectsStore::new_with_data_dir(temp_dir.join("db"));
+        assert!(store.load_branch_cache(&root).is_empty());
+
+        let branches = vec![
+            GitIndexBranchEntry {
+                name: "master".to_string(),
+                is_current: true,
+                preview_lines: vec!["Branch: master".to_string()],
+            },
+            GitIndexBranchEntry {
+                name: "feature".to_string(),
+                is_current: false,
+                preview_lines: Vec::new(),
+            },
+        ];
+        store.save_branch_cache(&root, &branches).unwrap();
+
+        let loaded = store.load_branch_cache(&root);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].name, "master");
+        assert!(loaded[0].is_current);
+        assert_eq!(loaded[0].preview_lines, vec!["Branch: master".to_string()]);
+        assert_eq!(loaded[1].name, "feature");
+
+        // Saving again replaces the cached list.
+        store.save_branch_cache(&root, &branches[1..]).unwrap();
+        let loaded = store.load_branch_cache(&root);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "feature");
 
         fs::remove_dir_all(&temp_dir).ok();
     }

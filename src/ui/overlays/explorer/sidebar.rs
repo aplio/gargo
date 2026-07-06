@@ -829,8 +829,10 @@ impl Explorer {
             match key.code {
                 // Toggle the "viewed" checkbox for the selected file.
                 KeyCode::Char('v') => return self.toggle_selected_viewed(),
-                // Open the actual file for editing (Enter shows its diff).
-                KeyCode::Char('e') => return self.open_selected_file_for_edit(),
+                // `e` = edit the file, same as Enter.
+                KeyCode::Char('e') => return self.enter_selected(),
+                // `o` = open the file's diff as a patch buffer.
+                KeyCode::Char('o') => return self.open_selected_compare_diff(),
                 _ => {}
             }
         }
@@ -1285,12 +1287,13 @@ impl Explorer {
             self.update_preview();
             EventResult::Consumed
         } else if self.mode == ExplorerMode::BranchCompare {
-            // Enter opens the file's branch diff in a buffer; `e` edits the file.
+            // Enter/`e` open the file itself for editing, landing on the
+            // first changed line; `o` opens the diff as a patch buffer.
             let Some(base) = self.branch_compare_base.clone() else {
                 return EventResult::Consumed;
             };
             EventResult::Action(Action::App(AppAction::Workspace(
-                WorkspaceAction::OpenBranchCompareFileDiff {
+                WorkspaceAction::OpenBranchCompareFile {
                     base,
                     path: entry.name.clone(),
                 },
@@ -1324,17 +1327,23 @@ impl Explorer {
         )))
     }
 
-    /// `e` in branch-compare mode: open the working-tree file for editing.
-    fn open_selected_file_for_edit(&mut self) -> EventResult {
+    /// `o` in branch-compare mode: open the selected file's diff as an
+    /// in-editor patch buffer (gd jumps to the source location).
+    fn open_selected_compare_diff(&mut self) -> EventResult {
         let Some(entry) = self.selected_entry() else {
             return EventResult::Consumed;
         };
         if entry.is_dir || entry.is_repo_header {
             return EventResult::Consumed;
         }
-        let path = self.current_dir.join(&entry.name);
-        EventResult::Action(Action::App(AppAction::Buffer(
-            BufferAction::OpenFileFromExplorer(path.to_string_lossy().to_string()),
+        let Some(base) = self.branch_compare_base.clone() else {
+            return EventResult::Consumed;
+        };
+        EventResult::Action(Action::App(AppAction::Workspace(
+            WorkspaceAction::OpenBranchCompareFileDiff {
+                base,
+                path: entry.name.clone(),
+            },
         )))
     }
 
@@ -2416,11 +2425,25 @@ mod tests {
     }
 
     #[test]
-    fn branch_compare_enter_opens_file_diff_and_e_edits_file() {
+    fn branch_compare_enter_edits_file_and_o_opens_diff() {
         let dir = setup("branch_compare_enter");
         let mut explorer = branch_compare_explorer(dir.clone());
 
-        match explorer.handle_key(key(KeyCode::Enter), &KeyState::Normal) {
+        // Enter and `e` both open the file itself.
+        for code in [KeyCode::Enter, KeyCode::Char('e')] {
+            match explorer.handle_key(key(code), &KeyState::Normal) {
+                EventResult::Action(Action::App(AppAction::Workspace(
+                    WorkspaceAction::OpenBranchCompareFile { base, path },
+                ))) => {
+                    assert_eq!(base, "main");
+                    assert_eq!(path, "a.rs");
+                }
+                other => panic!("expected OpenBranchCompareFile, got {:?}", other),
+            }
+        }
+
+        // `o` opens the patch buffer.
+        match explorer.handle_key(key(KeyCode::Char('o')), &KeyState::Normal) {
             EventResult::Action(Action::App(AppAction::Workspace(
                 WorkspaceAction::OpenBranchCompareFileDiff { base, path },
             ))) => {
@@ -2428,15 +2451,6 @@ mod tests {
                 assert_eq!(path, "a.rs");
             }
             other => panic!("expected OpenBranchCompareFileDiff, got {:?}", other),
-        }
-
-        match explorer.handle_key(key(KeyCode::Char('e')), &KeyState::Normal) {
-            EventResult::Action(Action::App(AppAction::Buffer(
-                BufferAction::OpenFileFromExplorer(path),
-            ))) => {
-                assert!(path.ends_with("a.rs"), "unexpected path: {path}");
-            }
-            other => panic!("expected OpenFileFromExplorer, got {:?}", other),
         }
 
         cleanup(&dir);

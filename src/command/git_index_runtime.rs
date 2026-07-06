@@ -7,10 +7,11 @@ use crate::command::git::{self, GitFileEntry};
 
 const CHANNEL_POLL_FALLBACK_MS: u64 = 20;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct GitIndexBranchEntry {
     pub name: String,
     pub is_current: bool,
+    #[serde(default)]
     pub preview_lines: Vec<String>,
 }
 

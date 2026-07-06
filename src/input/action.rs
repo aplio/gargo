@@ -231,6 +231,10 @@ pub enum WorkspaceAction {
         base: String,
         path: String,
     },
+    OpenBranchCompareFile {
+        base: String,
+        path: String,
+    },
     ToggleBranchCompareViewed {
         base: String,
         path: String,

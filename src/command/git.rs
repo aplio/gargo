@@ -162,19 +162,6 @@ fn git_status_files_in_impl(
     git_backend::status_files(&root).ok_or_else(|| "git error: failed to read status".to_string())
 }
 
-fn diff_file_entries(diff: &str) -> Vec<GitFileEntry> {
-    crate::diff_render::parse_unified_diff(diff)
-        .into_iter()
-        .map(|file| GitFileEntry {
-            path: file.path,
-            status_char: file.status.as_str().chars().next().unwrap_or('M'),
-            staged: false,
-            additions: file.additions,
-            deletions: file.deletions,
-        })
-        .collect()
-}
-
 pub fn git_diff(path: &str, staged: bool) -> Result<String, String> {
     git_diff_in_impl(None, path, staged)
 }
@@ -202,9 +189,121 @@ pub fn git_branch_diff_files_in(
     project_root: &Path,
     base_branch: &str,
 ) -> Result<Vec<GitFileEntry>, String> {
+    Ok(git_branch_compare_files_in(project_root, base_branch)?.files)
+}
+
+/// Files changed between a base branch and HEAD, plus each file's diff
+/// content hash used to pin "viewed" records (see
+/// [`crate::command::diff_viewed::ViewedStore`]).
+#[derive(Debug, Clone, Default)]
+pub struct BranchCompareFiles {
+    pub files: Vec<GitFileEntry>,
+    /// path → content hash of the file's current `base...HEAD` diff.
+    pub content_hashes: HashMap<String, String>,
+}
+
+pub fn git_branch_compare_files_in(
+    project_root: &Path,
+    base_branch: &str,
+) -> Result<BranchCompareFiles, String> {
     let diff = git_backend::compare_diff_text(project_root, base_branch, "HEAD", None)
         .ok_or_else(|| "git error: failed to read branch diff".to_string())?;
-    Ok(diff_file_entries(&diff))
+    let mut files = Vec::new();
+    let mut content_hashes = HashMap::new();
+    for file in crate::diff_render::parse_unified_diff(&diff) {
+        content_hashes.insert(
+            file.path.clone(),
+            crate::diff_render::content_hash_of(&file),
+        );
+        files.push(GitFileEntry {
+            path: file.path,
+            status_char: file.status.as_str().chars().next().unwrap_or('M'),
+            staged: false,
+            additions: file.additions,
+            deletions: file.deletions,
+        });
+    }
+    Ok(BranchCompareFiles {
+        files,
+        content_hashes,
+    })
+}
+
+/// The `compare_ref` under which viewed records for a `base...HEAD` compare
+/// are stored. Uses the current branch name so records are shared with the
+/// web compare page, which stores branch names rather than `HEAD`.
+fn branch_compare_viewed_ref(project_root: &Path) -> String {
+    git_backend::current_branch(project_root).unwrap_or_else(|| "HEAD".to_string())
+}
+
+/// Paths from `content_hashes` whose stored viewed record still matches the
+/// file's current diff content.
+pub fn branch_compare_viewed_paths(
+    store: &crate::command::diff_viewed::ViewedStore,
+    project_root: &Path,
+    base_branch: &str,
+    content_hashes: &HashMap<String, String>,
+) -> std::collections::HashSet<String> {
+    let compare_ref = branch_compare_viewed_ref(project_root);
+    let viewed = store.viewed_map(
+        &project_root.to_string_lossy(),
+        crate::command::diff_viewed::PAGE_COMPARE,
+        base_branch,
+        &compare_ref,
+    );
+    content_hashes
+        .iter()
+        .filter(|(path, hash)| viewed.get(&(String::new(), (*path).clone())) == Some(*hash))
+        .map(|(path, _)| path.clone())
+        .collect()
+}
+
+/// Persist (or clear) the viewed record for one branch-compare file. Returns
+/// the resulting viewed state; marking viewed re-reads the file's diff to pin
+/// the record to its current content hash.
+pub fn set_branch_compare_viewed(
+    store: &crate::command::diff_viewed::ViewedStore,
+    project_root: &Path,
+    base_branch: &str,
+    path: &str,
+    viewed: bool,
+) -> Result<bool, String> {
+    let repo_key = project_root.to_string_lossy().to_string();
+    let compare_ref = branch_compare_viewed_ref(project_root);
+    if !viewed {
+        store
+            .unset(
+                &repo_key,
+                crate::command::diff_viewed::PAGE_COMPARE,
+                base_branch,
+                &compare_ref,
+                "",
+                path,
+            )
+            .map_err(|e| format!("failed to clear viewed state: {}", e))?;
+        return Ok(false);
+    }
+    let diff = git_backend::compare_diff_text(project_root, base_branch, "HEAD", Some(path))
+        .ok_or_else(|| "git error: failed to read branch diff".to_string())?;
+    let Some(file) = crate::diff_render::parse_unified_diff(&diff)
+        .into_iter()
+        .next()
+    else {
+        return Ok(false);
+    };
+    let hash = crate::diff_render::content_hash_of(&file);
+    store
+        .set(
+            &repo_key,
+            crate::command::diff_viewed::PAGE_COMPARE,
+            base_branch,
+            &compare_ref,
+            "",
+            path,
+            &hash,
+        )
+        .map_err(|e| format!("failed to save viewed state: {}", e))?;
+    Ok(true)
 }
 
 pub fn git_local_branches_in(project_root: &Path) -> Result<Vec<(String, bool)>, String> {
@@ -1014,6 +1113,54 @@ mod tests {
 
         assert_eq!(changed_facts, expected_changed);
         assert_eq!(staged_facts, expected_staged);
+    }
+
+    #[test]
+    fn branch_compare_viewed_roundtrip() {
+        let repo = setup_repo();
+        let root = repo.path();
+        fs::write(root.join("a.txt"), "one\n").expect("write a");
+        run_git(root, &["add", "a.txt"]);
+        run_git(root, &["commit", "-m", "init"]);
+        run_git(root, &["branch", "base"]);
+        fs::write(root.join("a.txt"), "one\ntwo\n").expect("write a");
+        run_git(root, &["commit", "-am", "change"]);
+
+        let compare = git_branch_compare_files_in(root, "base").expect("compare files");
+        assert_eq!(compare.files.len(), 1);
+        assert_eq!(compare.files[0].path, "a.txt");
+        let hash = compare.content_hashes.get("a.txt").expect("hash").clone();
+
+        let store_dir = tempfile::tempdir().expect("store dir");
+        let store = crate::command::diff_viewed::ViewedStore::open_in_dir(store_dir.path());
+
+        // Nothing viewed initially.
+        assert!(
+            branch_compare_viewed_paths(&store, root, "base", &compare.content_hashes).is_empty()
+        );
+
+        // Marking viewed pins the record to the current content hash.
+        assert!(set_branch_compare_viewed(&store, root, "base", "a.txt", true).expect("set"));
+        assert!(
+            branch_compare_viewed_paths(&store, root, "base", &compare.content_hashes)
+                .contains("a.txt")
+        );
+
+        // A content change invalidates the record.
+        fs::write(root.join("a.txt"), "one\ntwo\nthree\n").expect("write a");
+        run_git(root, &["commit", "-am", "more"]);
+        let refreshed = git_branch_compare_files_in(root, "base").expect("compare files");
+        assert_ne!(refreshed.content_hashes.get("a.txt"), Some(&hash));
+        assert!(
+            branch_compare_viewed_paths(&store, root, "base", &refreshed.content_hashes).is_empty()
+        );
+
+        // Unset clears the record.
+        assert!(set_branch_compare_viewed(&store, root, "base", "a.txt", true).expect("set"));
+        assert!(!set_branch_compare_viewed(&store, root, "base", "a.txt", false).expect("unset"));
+        assert!(
+            branch_compare_viewed_paths(&store, root, "base", &refreshed.content_hashes).is_empty()
+        );
     }
 
     #[test]

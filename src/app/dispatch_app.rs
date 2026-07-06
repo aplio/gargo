@@ -693,23 +693,93 @@ impl App {
                 self.compositor.apply(UiAction::ClosePalette);
                 let repo_root = self.active_buffer_repo_root();
 
-                let files =
-                    match crate::command::git::git_branch_diff_files_in(&repo_root, &base_branch) {
-                        Ok(files) => files,
-                        Err(err) => {
-                            self.editor.message = Some(format!("Branch compare failed: {}", err));
-                            return false;
-                        }
-                    };
+                let compare = match crate::command::git::git_branch_compare_files_in(
+                    &repo_root,
+                    &base_branch,
+                ) {
+                    Ok(compare) => compare,
+                    Err(err) => {
+                        self.editor.message = Some(format!("Branch compare failed: {}", err));
+                        return false;
+                    }
+                };
+                let viewed = crate::command::git::branch_compare_viewed_paths(
+                    self.diff_viewed_store(),
+                    &repo_root,
+                    &base_branch,
+                    &compare.content_hashes,
+                );
 
                 // Close any open Explorer first, stashing it.
                 if let Some(explorer) = self.compositor.close_explorer() {
                     self.stash_closed_explorer(explorer);
                 }
 
-                let explorer = Explorer::new_branch_compare(repo_root, base_branch, files);
+                let mut explorer =
+                    Explorer::new_branch_compare(repo_root, base_branch, compare.files);
+                explorer.set_branch_compare_viewed(viewed);
+                // Start with the diff preview visible, like the web compare page.
+                explorer.set_preview_mode(true);
                 self.compositor.open_explorer(explorer);
                 self.last_used_sidebar = Some(LastUsedSidebar::BranchCompare);
+                self.editor.message = Some(
+                    "Compare: Enter=diff buffer  e=edit file  v=viewed  p=preview  Shift+J/K=scroll"
+                        .to_string(),
+                );
+            }
+            AppAction::Workspace(WorkspaceAction::OpenBranchCompareFileDiff { base, path }) => {
+                self.flush_insert_transaction_if_active();
+                let repo_root = self
+                    .compositor
+                    .explorer_mut()
+                    .filter(|explorer| explorer.is_branch_compare())
+                    .map(|explorer| explorer.current_dir().to_path_buf())
+                    .unwrap_or_else(|| self.active_buffer_repo_root());
+                // Stash the sidebar so Ctrl+0 restores it; the diff buffer
+                // then receives normal editing/scrolling keys.
+                if let Some(explorer) = self.compositor.close_explorer() {
+                    self.stash_closed_explorer(explorer);
+                }
+                match self.open_branch_compare_file_diff_view(&repo_root, &base, &path) {
+                    Ok(()) => {
+                        self.editor.message = Some(format!(
+                            "Diff {}…HEAD: {} (Ctrl+0 back to list)",
+                            base, path
+                        ));
+                    }
+                    Err(err) => {
+                        self.editor.message = Some(format!("Failed to open file diff: {}", err));
+                    }
+                }
+            }
+            AppAction::Workspace(WorkspaceAction::ToggleBranchCompareViewed {
+                base,
+                path,
+                viewed,
+            }) => {
+                let repo_root = self
+                    .compositor
+                    .explorer_mut()
+                    .filter(|explorer| explorer.is_branch_compare())
+                    .map(|explorer| explorer.current_dir().to_path_buf())
+                    .unwrap_or_else(|| self.active_buffer_repo_root());
+                let result = crate::command::git::set_branch_compare_viewed(
+                    self.diff_viewed_store(),
+                    &repo_root,
+                    &base,
+                    &path,
+                    viewed,
+                );
+                match result {
+                    Ok(actual) => {
+                        if let Some(explorer) = self.compositor.explorer_mut() {
+                            explorer.set_branch_compare_viewed_path(&path, actual);
+                        }
+                    }
+                    Err(err) => {
+                        self.editor.message = Some(format!("Viewed toggle failed: {}", err));
+                    }
+                }
             }
             AppAction::Workspace(WorkspaceAction::OpenBranchCompareView(branch)) => {
                 self.compositor.apply(UiAction::ClosePalette);

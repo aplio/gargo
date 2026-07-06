@@ -227,6 +227,15 @@ pub enum WorkspaceAction {
     OpenBranchCompareView(String),
     OpenBranchCompareSidebarPicker,
     OpenBranchCompareSidebar(String),
+    OpenBranchCompareFileDiff {
+        base: String,
+        path: String,
+    },
+    ToggleBranchCompareViewed {
+        base: String,
+        path: String,
+        viewed: bool,
+    },
     OpenCommitDiffView(String),
     ShowLastUsedSidebar,
     OpenSearchResultsBuffer {

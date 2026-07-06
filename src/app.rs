@@ -197,6 +197,9 @@ pub struct App {
     update_check_runtime: Option<UpdateCheckRuntimeHandle>,
     command_history: Rc<CommandHistory>,
     recent_projects: RecentProjectsStore,
+    /// Lazily-opened store of branch-compare "viewed" checkboxes, shared with
+    /// the web compare page (`~/.local/share/gargo/diff_viewed.db`).
+    diff_viewed_store: Option<crate::command::diff_viewed::ViewedStore>,
     plugin_host: PluginHost,
     pending_count: Option<usize>,
     pending_edit_jump_locations: Vec<JumpLocation>,
@@ -292,6 +295,7 @@ impl App {
             update_check_runtime: None,
             command_history,
             recent_projects,
+            diff_viewed_store: None,
             plugin_host: PluginHost::new(Vec::new()),
             pending_count: None,
             pending_edit_jump_locations: Vec::new(),
@@ -682,13 +686,28 @@ impl App {
                     project_root,
                     base_branch,
                     files,
+                    content_hashes,
                 } => {
-                    if let Some(explorer) = self.compositor.explorer_mut()
-                        && explorer.is_branch_compare()
-                        && explorer.branch_compare_base() == Some(base_branch.as_str())
-                        && explorer.current_dir() == project_root.as_path()
-                    {
-                        explorer.apply_branch_diff_files(files);
+                    let matches = self
+                        .compositor
+                        .explorer_mut()
+                        .map(|explorer| {
+                            explorer.is_branch_compare()
+                                && explorer.branch_compare_base() == Some(base_branch.as_str())
+                                && explorer.current_dir() == project_root.as_path()
+                        })
+                        .unwrap_or(false);
+                    if matches {
+                        let viewed = crate::command::git::branch_compare_viewed_paths(
+                            self.diff_viewed_store(),
+                            &project_root,
+                            &base_branch,
+                            &content_hashes,
+                        );
+                        if let Some(explorer) = self.compositor.explorer_mut() {
+                            explorer.apply_branch_diff_files(files);
+                            explorer.set_branch_compare_viewed(viewed);
+                        }
                     }
                 }
             }
@@ -2507,6 +2526,39 @@ impl App {
         }
         let palette = Palette::new_git_branch_compare_sidebar_picker(entries);
         self.compositor.push_palette(palette);
+        Ok(())
+    }
+
+    /// The shared viewed-checkbox store, opened on first use.
+    pub(crate) fn diff_viewed_store(&mut self) -> &crate::command::diff_viewed::ViewedStore {
+        self.diff_viewed_store
+            .get_or_insert_with(crate::command::diff_viewed::ViewedStore::open)
+    }
+
+    pub(crate) fn open_branch_compare_file_diff_view(
+        &mut self,
+        repo_root: &Path,
+        base: &str,
+        path: &str,
+    ) -> Result<(), String> {
+        let view = crate::command::in_editor_diff::build_branch_compare_file_diff_view(
+            repo_root, base, path,
+        )?;
+        let previous_buffer_id = self.editor.active_buffer().id;
+        if self.editor.active_buffer().file_path.is_some() {
+            self.editor.new_buffer();
+        }
+        self.materialize_scratch_from_home_if_needed();
+        self.apply_in_editor_diff_view_to_active_buffer(view);
+        if self.editor.active_buffer().id != previous_buffer_id {
+            self.emit_plugin_event(PluginEvent::BufferActivated {
+                doc_id: self.editor.active_buffer().id,
+            });
+        } else {
+            self.emit_plugin_event(PluginEvent::BufferChanged {
+                doc_id: self.editor.active_buffer().id,
+            });
+        }
         Ok(())
     }
 

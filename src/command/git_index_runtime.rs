@@ -53,6 +53,8 @@ pub enum GitIndexRuntimeEvent {
         project_root: PathBuf,
         base_branch: String,
         files: Vec<GitFileEntry>,
+        /// path → diff content hash, for resolving "viewed" records.
+        content_hashes: std::collections::HashMap<String, String>,
     },
 }
 
@@ -248,12 +250,13 @@ impl GitIndexRuntimeWorker {
     fn process_branch_diffs(&mut self) {
         let pending = std::mem::take(&mut self.pending_branch_diffs);
         for (project_root, base_branch) in pending {
-            let files =
-                git::git_branch_diff_files_in(&project_root, &base_branch).unwrap_or_default();
+            let compare =
+                git::git_branch_compare_files_in(&project_root, &base_branch).unwrap_or_default();
             let _ = self.event_tx.send(GitIndexRuntimeEvent::BranchDiffReady {
                 project_root,
                 base_branch,
-                files,
+                files: compare.files,
+                content_hashes: compare.content_hashes,
             });
         }
     }

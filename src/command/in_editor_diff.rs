@@ -232,6 +232,48 @@ pub fn build_branch_compare_diff_view(
     Ok(InEditorDiffView { text, line_targets })
 }
 
+/// Single-file variant of [`build_branch_compare_diff_view`]: the
+/// `base...HEAD` diff scoped to one path.
+pub fn build_branch_compare_file_diff_view(
+    project_root: &Path,
+    other_branch: &str,
+    path: &str,
+) -> Result<InEditorDiffView, String> {
+    let current_branch =
+        git_backend::current_branch(project_root).unwrap_or_else(|| "HEAD".to_string());
+    let diff = git_backend::compare_diff_text(project_root, other_branch, "HEAD", Some(path))
+        .ok_or_else(|| "failed to read branch diff".to_string())?;
+
+    let mut lines = Vec::new();
+    let mut line_targets = HashMap::new();
+
+    lines.push(BRANCH_COMPARE_DIFF_TITLE.to_string());
+    lines.push(format!("Comparing: {} → {}", other_branch, current_branch));
+    lines.push(format!("File: {}", path));
+    lines.push("gd on a diff line opens that file location.".to_string());
+    lines.push(String::new());
+
+    if diff.trim().is_empty() {
+        lines.push("(no differences)".to_string());
+    } else {
+        let mut parser = DiffParseState::default();
+        for raw_line in diff.lines() {
+            let line_idx = lines.len();
+            lines.push(raw_line.to_string());
+            if let Some(target) = parser.consume_line(raw_line, project_root) {
+                line_targets.insert(line_idx, target);
+            }
+        }
+    }
+
+    let mut text = lines.join("\n");
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+
+    Ok(InEditorDiffView { text, line_targets })
+}
+
 pub fn build_commit_diff_view(project_root: &Path, hash: &str) -> Result<InEditorDiffView, String> {
     use crate::command::git;
 

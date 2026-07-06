@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,6 +24,9 @@ use crate::ui::views::text_view::render_highlighted_line_windowed;
 
 const PREVIEW_MAX_LINES: usize = 500;
 const PREVIEW_HSCROLL_STEP: usize = 8;
+
+/// Preview-pane content: display lines plus per-line highlight spans.
+type PreviewContent = (Vec<String>, HashMap<usize, Vec<HighlightSpan>>);
 
 struct DirEntry {
     name: String,
@@ -69,6 +72,10 @@ pub struct Explorer {
     // Populated only when mode == BranchCompare.
     branch_compare_base: Option<String>,
     branch_compare_files: Vec<GitFileEntry>,
+    // Paths whose "viewed" checkbox is ticked (BranchCompare mode only).
+    branch_compare_viewed: HashSet<String>,
+    // path → highlighted diff preview; cleared when the file list refreshes.
+    branch_compare_diff_cache: HashMap<String, PreviewContent>,
     // preview
     preview_mode: bool,
     preview_lines: Vec<String>,
@@ -124,6 +131,8 @@ impl Explorer {
             git_status_map: git_status_map.clone(),
             branch_compare_base: None,
             branch_compare_files: Vec::new(),
+            branch_compare_viewed: HashSet::new(),
+            branch_compare_diff_cache: HashMap::new(),
             preview_mode: false,
             preview_lines: Vec::new(),
             preview_spans: HashMap::new(),
@@ -166,6 +175,8 @@ impl Explorer {
             git_status_map: HashMap::new(),
             branch_compare_base: Some(base_branch),
             branch_compare_files: files,
+            branch_compare_viewed: HashSet::new(),
+            branch_compare_diff_cache: HashMap::new(),
             preview_mode: false,
             preview_lines: Vec::new(),
             preview_spans: HashMap::new(),
@@ -197,9 +208,27 @@ impl Explorer {
         }
         let selected_name = self.selected_name().map(|s| s.to_string());
         self.branch_compare_files = files;
+        self.branch_compare_diff_cache.clear();
         self.read_directory();
         if let Some(name) = selected_name {
             self.select_by_name(&name);
+        }
+        // Diff content may have changed; force the preview to reload.
+        self.preview_path = None;
+        self.update_preview();
+    }
+
+    /// Replace the set of paths marked "viewed" (BranchCompare mode only).
+    pub fn set_branch_compare_viewed(&mut self, viewed: HashSet<String>) {
+        self.branch_compare_viewed = viewed;
+    }
+
+    /// Update one path's "viewed" marker (BranchCompare mode only).
+    pub fn set_branch_compare_viewed_path(&mut self, path: &str, viewed: bool) {
+        if viewed {
+            self.branch_compare_viewed.insert(path.to_string());
+        } else {
+            self.branch_compare_viewed.remove(path);
         }
     }
 
@@ -301,6 +330,18 @@ impl Explorer {
         self.preview_spans.clear();
         self.preview_image = None;
 
+        // Branch-compare mode previews the file's diff against the base
+        // branch instead of the file contents.
+        if self.mode == ExplorerMode::BranchCompare && !entry.is_dir {
+            let name = entry.name.clone();
+            let (lines, spans) = self.branch_compare_diff_preview(&name);
+            self.preview_lines = lines;
+            self.preview_spans = spans;
+            self.preview_kind = PreviewKind::File;
+            self.preview_path = Some(path);
+            return;
+        }
+
         if entry.is_dir {
             self.preview_lines = build_dir_listing(&path);
             self.preview_kind = PreviewKind::Dir;
@@ -313,6 +354,41 @@ impl Explorer {
             self.preview_kind = PreviewKind::File;
         }
         self.preview_path = Some(path);
+    }
+
+    /// The `base...HEAD` diff for one file, as highlighted preview lines.
+    fn branch_compare_diff_preview(&mut self, path: &str) -> PreviewContent {
+        if let Some(cached) = self.branch_compare_diff_cache.get(path) {
+            return cached.clone();
+        }
+        let Some(base) = self.branch_compare_base.clone() else {
+            return (vec!["<no base branch>".to_string()], HashMap::new());
+        };
+        let diff = crate::command::git_backend::compare_diff_text(
+            &self.project_root,
+            &base,
+            "HEAD",
+            Some(path),
+        )
+        .unwrap_or_default();
+        let lines: Vec<String> = if diff.trim().is_empty() {
+            vec!["(no differences)".to_string()]
+        } else {
+            diff.lines()
+                .take(PREVIEW_MAX_LINES)
+                .map(str::to_string)
+                .collect()
+        };
+        let lang_registry = LanguageRegistry::new();
+        let spans = if let Some(lang_def) = lang_registry.detect_by_extension("preview.diff") {
+            highlight_text(&lines.join("\n"), lang_def)
+        } else {
+            HashMap::new()
+        };
+        let result = (lines, spans);
+        self.branch_compare_diff_cache
+            .insert(path.to_string(), result.clone());
+        result
     }
 
     pub fn render_preview(
@@ -337,6 +413,11 @@ impl Explorer {
 
         // Title row.
         let title = match (&self.preview_kind, self.preview_path.as_ref()) {
+            (PreviewKind::File, Some(p)) if self.mode == ExplorerMode::BranchCompare => {
+                let rel = p.strip_prefix(&self.project_root).unwrap_or(p);
+                let base = self.branch_compare_base.as_deref().unwrap_or("?");
+                format!("DIFF {}…HEAD: {}", base, rel.to_string_lossy())
+            }
             (PreviewKind::File, Some(p)) => {
                 let rel = p.strip_prefix(&self.project_root).unwrap_or(p);
                 format!("PREVIEW: {}", rel.to_string_lossy())
@@ -701,6 +782,16 @@ impl Explorer {
                 }
                 _ => EventResult::Ignored,
             };
+        }
+
+        if self.mode == ExplorerMode::BranchCompare {
+            match key.code {
+                // Toggle the "viewed" checkbox for the selected file.
+                KeyCode::Char('v') => return self.toggle_selected_viewed(),
+                // Open the actual file for editing (Enter shows its diff).
+                KeyCode::Char('e') => return self.open_selected_file_for_edit(),
+                _ => {}
+            }
         }
 
         match key.code {
@@ -1152,6 +1243,17 @@ impl Explorer {
             self.read_directory();
             self.update_preview();
             EventResult::Consumed
+        } else if self.mode == ExplorerMode::BranchCompare {
+            // Enter opens the file's branch diff in a buffer; `e` edits the file.
+            let Some(base) = self.branch_compare_base.clone() else {
+                return EventResult::Consumed;
+            };
+            EventResult::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::OpenBranchCompareFileDiff {
+                    base,
+                    path: entry.name.clone(),
+                },
+            )))
         } else {
             let path = self.current_dir.join(&entry.name);
             let path_str = path.to_string_lossy().to_string();
@@ -1159,6 +1261,40 @@ impl Explorer {
                 BufferAction::OpenFileFromExplorer(path_str),
             )))
         }
+    }
+
+    /// `v` in branch-compare mode: request a viewed toggle for the selected
+    /// file. Persistence happens in the app dispatcher, which then updates
+    /// this sidebar's marker via `set_branch_compare_viewed_path`.
+    fn toggle_selected_viewed(&mut self) -> EventResult {
+        let Some(entry) = self.selected_entry() else {
+            return EventResult::Consumed;
+        };
+        if entry.is_dir || entry.is_repo_header {
+            return EventResult::Consumed;
+        }
+        let Some(base) = self.branch_compare_base.clone() else {
+            return EventResult::Consumed;
+        };
+        let path = entry.name.clone();
+        let viewed = !self.branch_compare_viewed.contains(&path);
+        EventResult::Action(Action::App(AppAction::Workspace(
+            WorkspaceAction::ToggleBranchCompareViewed { base, path, viewed },
+        )))
+    }
+
+    /// `e` in branch-compare mode: open the working-tree file for editing.
+    fn open_selected_file_for_edit(&mut self) -> EventResult {
+        let Some(entry) = self.selected_entry() else {
+            return EventResult::Consumed;
+        };
+        if entry.is_dir || entry.is_repo_header {
+            return EventResult::Consumed;
+        }
+        let path = self.current_dir.join(&entry.name);
+        EventResult::Action(Action::App(AppAction::Buffer(
+            BufferAction::OpenFileFromExplorer(path.to_string_lossy().to_string()),
+        )))
     }
 
     fn selected_entry(&self) -> Option<&DirEntry> {
@@ -1351,7 +1487,10 @@ impl Explorer {
                         format!("{}{}{}", prefix, entry.name, suffix)
                     };
 
-                    let style = if entry.is_repo_header {
+                    let viewed = self.mode == ExplorerMode::BranchCompare
+                        && self.branch_compare_viewed.contains(&entry.name);
+
+                    let mut style = if entry.is_repo_header {
                         if is_selected {
                             CellStyle {
                                 bold: true,
@@ -1378,10 +1517,16 @@ impl Explorer {
                             ..CellStyle::default()
                         }
                     };
+                    if viewed {
+                        style.dim = true;
+                    }
                     let (truncated, used) = truncate_to_width(&display, width);
                     surface.put_str(x, screen_row, truncated, &style);
                     if used < width {
                         surface.fill_region(x + used, screen_row, width - used, ' ', &style);
+                    }
+                    if viewed && width >= 2 {
+                        surface.put_str(x + width - 1, screen_row, "✓", &style);
                     }
                 }
                 RenderRow::Stats {
@@ -2154,6 +2299,121 @@ mod tests {
         ];
         explorer.apply_branch_diff_files(refreshed);
         assert_eq!(explorer.selected_name(), Some("b.rs"));
+
+        cleanup(&dir);
+    }
+
+    fn branch_compare_explorer(dir: PathBuf) -> Explorer {
+        let files = vec![GitFileEntry {
+            path: "a.rs".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 1,
+            deletions: 0,
+        }];
+        Explorer::new_branch_compare(dir, "main".to_string(), files)
+    }
+
+    #[test]
+    fn branch_compare_enter_opens_file_diff_and_e_edits_file() {
+        let dir = setup("branch_compare_enter");
+        let mut explorer = branch_compare_explorer(dir.clone());
+
+        match explorer.handle_key(key(KeyCode::Enter), &KeyState::Normal) {
+            EventResult::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::OpenBranchCompareFileDiff { base, path },
+            ))) => {
+                assert_eq!(base, "main");
+                assert_eq!(path, "a.rs");
+            }
+            other => panic!("expected OpenBranchCompareFileDiff, got {:?}", other),
+        }
+
+        match explorer.handle_key(key(KeyCode::Char('e')), &KeyState::Normal) {
+            EventResult::Action(Action::App(AppAction::Buffer(
+                BufferAction::OpenFileFromExplorer(path),
+            ))) => {
+                assert!(path.ends_with("a.rs"), "unexpected path: {path}");
+            }
+            other => panic!("expected OpenFileFromExplorer, got {:?}", other),
+        }
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_v_toggles_viewed_state() {
+        let dir = setup("branch_compare_viewed");
+        let mut explorer = branch_compare_explorer(dir.clone());
+
+        // Unviewed file: `v` requests marking it viewed.
+        match explorer.handle_key(key(KeyCode::Char('v')), &KeyState::Normal) {
+            EventResult::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::ToggleBranchCompareViewed { base, path, viewed },
+            ))) => {
+                assert_eq!(base, "main");
+                assert_eq!(path, "a.rs");
+                assert!(viewed);
+            }
+            other => panic!("expected ToggleBranchCompareViewed, got {:?}", other),
+        }
+
+        // After the dispatcher confirms, the marker flips and `v` requests unviewing.
+        explorer.set_branch_compare_viewed_path("a.rs", true);
+        match explorer.handle_key(key(KeyCode::Char('v')), &KeyState::Normal) {
+            EventResult::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::ToggleBranchCompareViewed { viewed, .. },
+            ))) => assert!(!viewed),
+            other => panic!("expected ToggleBranchCompareViewed, got {:?}", other),
+        }
+
+        explorer.set_branch_compare_viewed_path("a.rs", false);
+        assert!(!explorer.branch_compare_viewed.contains("a.rs"));
+
+        cleanup(&dir);
+    }
+
+    fn run_git_in(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    #[test]
+    fn branch_compare_preview_shows_file_diff() {
+        let dir = setup("branch_compare_preview");
+        run_git_in(&dir, &["init"]);
+        run_git_in(&dir, &["config", "user.name", "gargo-test"]);
+        run_git_in(&dir, &["config", "user.email", "gargo-test@example.com"]);
+        fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
+        run_git_in(&dir, &["add", "-A"]);
+        run_git_in(&dir, &["commit", "-m", "init"]);
+        run_git_in(&dir, &["branch", "base"]);
+        fs::write(dir.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+        run_git_in(&dir, &["commit", "-am", "change"]);
+
+        let files = vec![GitFileEntry {
+            path: "a.rs".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 1,
+            deletions: 0,
+        }];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
+        explorer.select_by_name("a.rs");
+        explorer.set_preview_mode(true);
+
+        assert!(
+            explorer
+                .preview_lines
+                .iter()
+                .any(|line| line == "+fn b() {}"),
+            "expected diff preview to contain the added line, got: {:?}",
+            explorer.preview_lines,
+        );
 
         cleanup(&dir);
     }

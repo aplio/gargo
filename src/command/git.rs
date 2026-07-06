@@ -183,8 +183,8 @@ fn git_diff_in_impl(
         .ok_or_else(|| "git error: failed to read diff".to_string())
 }
 
-/// List of files that differ between `base_branch` and HEAD, parsed
-/// from `git diff --name-status <base>...HEAD`.
+/// List of files that differ between `base_branch` and the live working
+/// tree (committed + staged + unstaged + untracked).
 pub fn git_branch_diff_files_in(
     project_root: &Path,
     base_branch: &str,
@@ -192,13 +192,13 @@ pub fn git_branch_diff_files_in(
     Ok(git_branch_compare_files_in(project_root, base_branch)?.files)
 }
 
-/// Files changed between a base branch and HEAD, plus each file's diff
-/// content hash used to pin "viewed" records (see
+/// Files changed between a base branch and the working tree, plus each
+/// file's diff content hash used to pin "viewed" records (see
 /// [`crate::command::diff_viewed::ViewedStore`]).
 #[derive(Debug, Clone, Default)]
 pub struct BranchCompareFiles {
     pub files: Vec<GitFileEntry>,
-    /// path → content hash of the file's current `base...HEAD` diff.
+    /// path → content hash of the file's current compare diff.
     pub content_hashes: HashMap<String, String>,
 }
 
@@ -206,7 +206,7 @@ pub fn git_branch_compare_files_in(
     project_root: &Path,
     base_branch: &str,
 ) -> Result<BranchCompareFiles, String> {
-    let diff = git_backend::compare_diff_text(project_root, base_branch, "HEAD", None)
+    let diff = git_backend::compare_worktree_diff_text(project_root, base_branch, None)
         .ok_or_else(|| "git error: failed to read branch diff".to_string())?;
     let mut files = Vec::new();
     let mut content_hashes = HashMap::new();
@@ -229,8 +229,8 @@ pub fn git_branch_compare_files_in(
     })
 }
 
-/// 0-based line (in the HEAD version) of the first changed line in `path`'s
-/// `base...HEAD` diff, so "edit this file" can land on the change.
+/// 0-based line (in the working-tree version) of the first changed line in
+/// `path`'s compare diff, so "edit this file" can land on the change.
 pub fn branch_compare_first_changed_line(
     project_root: &Path,
     base_branch: &str,
@@ -238,7 +238,7 @@ pub fn branch_compare_first_changed_line(
 ) -> Option<usize> {
     use crate::diff_render::LineKind;
 
-    let diff = git_backend::compare_diff_text(project_root, base_branch, "HEAD", Some(path))?;
+    let diff = git_backend::compare_worktree_diff_text(project_root, base_branch, Some(path))?;
     let file = crate::diff_render::parse_unified_diff(&diff)
         .into_iter()
         .next()?;
@@ -266,11 +266,11 @@ pub fn branch_compare_first_changed_line(
     None
 }
 
-/// The `compare_ref` under which viewed records for a `base...HEAD` compare
-/// are stored. Uses the current branch name so records are shared with the
-/// web compare page, which stores branch names rather than `HEAD`.
-fn branch_compare_viewed_ref(project_root: &Path) -> String {
-    git_backend::current_branch(project_root).unwrap_or_else(|| "HEAD".to_string())
+/// The `compare_ref` under which viewed records for a branch compare are
+/// stored. The CLI compares base vs the live working tree, exactly like the
+/// web compare page's default target, so both share the `WORKTREE` records.
+fn branch_compare_viewed_ref(_project_root: &Path) -> String {
+    crate::command::diff_viewed::WORKTREE_REF.to_string()
 }
 
 /// Paths from `content_hashes` whose stored viewed record still matches the
@@ -320,7 +320,7 @@ pub fn set_branch_compare_viewed(
             .map_err(|e| format!("failed to clear viewed state: {}", e))?;
         return Ok(false);
     }
-    let diff = git_backend::compare_diff_text(project_root, base_branch, "HEAD", Some(path))
+    let diff = git_backend::compare_worktree_diff_text(project_root, base_branch, Some(path))
         .ok_or_else(|| "git error: failed to read branch diff".to_string())?;
     let Some(file) = crate::diff_render::parse_unified_diff(&diff)
         .into_iter()
@@ -1150,6 +1150,34 @@ mod tests {
 
         assert_eq!(changed_facts, expected_changed);
         assert_eq!(staged_facts, expected_staged);
+    }
+
+    #[test]
+    fn branch_compare_includes_uncommitted_changes() {
+        let repo = setup_repo();
+        let root = repo.path();
+        fs::write(root.join("a.txt"), "one\n").expect("write a");
+        run_git(root, &["add", "a.txt"]);
+        run_git(root, &["commit", "-m", "init"]);
+        run_git(root, &["branch", "base"]);
+
+        // Base and HEAD are identical; only the worktree differs.
+        fs::write(root.join("a.txt"), "one\ntwo\n").expect("edit a");
+        fs::write(root.join("new.txt"), "fresh\n").expect("write new");
+
+        let compare = git_branch_compare_files_in(root, "base").expect("compare files");
+        let paths: Vec<&str> = compare.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(paths.contains(&"a.txt"), "dirty file missing: {paths:?}");
+        assert!(
+            paths.contains(&"new.txt"),
+            "untracked file missing: {paths:?}"
+        );
+
+        // The uncommitted "two" is line 2 of the working file → 0-based 1.
+        assert_eq!(
+            branch_compare_first_changed_line(root, "base", "a.txt"),
+            Some(1)
+        );
     }
 
     #[test]

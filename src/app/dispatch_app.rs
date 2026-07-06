@@ -801,7 +801,7 @@ impl App {
                 match self.open_branch_compare_file_diff_view(&repo_root, &base, &path) {
                     Ok(()) => {
                         self.editor.message = Some(format!(
-                            "Diff {}…HEAD: {} (Ctrl+0 back to list)",
+                            "Diff {}…worktree: {} (Ctrl+0 back to list)",
                             base, path
                         ));
                     }

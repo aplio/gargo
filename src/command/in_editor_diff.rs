@@ -197,7 +197,7 @@ pub fn build_branch_compare_diff_view(
 ) -> Result<InEditorDiffView, String> {
     let current_branch =
         git_backend::current_branch(project_root).unwrap_or_else(|| "HEAD".to_string());
-    let diff = git_backend::compare_diff_text(project_root, other_branch, "HEAD", None)
+    let diff = git_backend::compare_worktree_diff_text(project_root, other_branch, None)
         .ok_or_else(|| "failed to read branch diff".to_string())?;
 
     let file_count = count_diff_files(&diff);
@@ -206,7 +206,10 @@ pub fn build_branch_compare_diff_view(
     let mut line_targets = HashMap::new();
 
     lines.push(BRANCH_COMPARE_DIFF_TITLE.to_string());
-    lines.push(format!("Comparing: {} → {}", other_branch, current_branch));
+    lines.push(format!(
+        "Comparing: {} → worktree ({})",
+        other_branch, current_branch
+    ));
     lines.push(format!("Changed files: {}", file_count));
     lines.push("gd on a diff line opens that file location.".to_string());
     lines.push(String::new());
@@ -233,7 +236,7 @@ pub fn build_branch_compare_diff_view(
 }
 
 /// Single-file variant of [`build_branch_compare_diff_view`]: the
-/// `base...HEAD` diff scoped to one path.
+/// base-vs-worktree diff scoped to one path.
 pub fn build_branch_compare_file_diff_view(
     project_root: &Path,
     other_branch: &str,
@@ -241,14 +244,17 @@ pub fn build_branch_compare_file_diff_view(
 ) -> Result<InEditorDiffView, String> {
     let current_branch =
         git_backend::current_branch(project_root).unwrap_or_else(|| "HEAD".to_string());
-    let diff = git_backend::compare_diff_text(project_root, other_branch, "HEAD", Some(path))
+    let diff = git_backend::compare_worktree_diff_text(project_root, other_branch, Some(path))
         .ok_or_else(|| "failed to read branch diff".to_string())?;
 
     let mut lines = Vec::new();
     let mut line_targets = HashMap::new();
 
     lines.push(BRANCH_COMPARE_DIFF_TITLE.to_string());
-    lines.push(format!("Comparing: {} → {}", other_branch, current_branch));
+    lines.push(format!(
+        "Comparing: {} → worktree ({})",
+        other_branch, current_branch
+    ));
     lines.push(format!("File: {}", path));
     lines.push("gd on a diff line opens that file location.".to_string());
     lines.push(String::new());

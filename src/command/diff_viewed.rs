@@ -22,6 +22,11 @@ use rusqlite::{Connection, Result};
 pub const PAGE_STATUS: &str = "status";
 /// `page` value for the compare-branches page (`/compare`).
 pub const PAGE_COMPARE: &str = "compare";
+/// Sentinel `compare_ref` for comparing a base branch against the live
+/// working tree (committed + staged + unstaged + untracked). Shared by the
+/// web compare page and the CLI compare sidebar so their viewed records
+/// interoperate.
+pub const WORKTREE_REF: &str = "WORKTREE";
 
 /// SQLite-backed store of viewed-file records.
 ///

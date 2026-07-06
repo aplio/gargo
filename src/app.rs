@@ -789,8 +789,8 @@ impl App {
     }
 
     /// If the branch-compare sidebar is open, refresh its file list in the
-    /// background. Called after operations that move HEAD (e.g. commits),
-    /// which change the `base...HEAD` diff.
+    /// background. Called when HEAD or the working tree changes (commits,
+    /// saves, stages, ...), since the compare diffs base vs the worktree.
     fn queue_open_branch_compare_refresh(&mut self) {
         let target = self
             .compositor
@@ -1011,6 +1011,9 @@ impl App {
 
         if should_refresh_git_index {
             self.queue_git_index_refresh_if_idle();
+            // The compare sidebar diffs against the live working tree, so
+            // status changes (saves, stages, ...) also change its contents.
+            self.queue_open_branch_compare_refresh();
         }
     }
 

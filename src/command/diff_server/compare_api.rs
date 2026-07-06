@@ -17,7 +17,7 @@ use crate::diff_render::{DiffFile, content_hash_of, parse_unified_diff};
 /// uncommitted, dirty, and untracked changes) rather than a resolvable ref.
 /// The editor offers it as the default compare target and renders it as
 /// "HEAD (working tree)". It passes `parse_branch_name` as a plain identifier.
-pub(crate) const WORKTREE_REF: &str = "WORKTREE";
+pub(crate) use crate::command::diff_viewed::WORKTREE_REF;
 
 /// Whether `compare` selects the live working tree instead of a committed ref.
 fn is_worktree(compare: &str) -> bool {

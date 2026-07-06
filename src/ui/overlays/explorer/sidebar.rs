@@ -379,7 +379,7 @@ impl Explorer {
         self.preview_path = Some(path);
     }
 
-    /// The `base...HEAD` diff for one file, as normally syntax-highlighted
+    /// The base-vs-worktree diff for one file, as normally syntax-highlighted
     /// code lines with add/remove gutter markers.
     fn branch_compare_diff_preview(&mut self, path: &str) -> DiffPreview {
         if let Some(cached) = self.branch_compare_diff_cache.get(path) {
@@ -388,10 +388,9 @@ impl Explorer {
         let Some(base) = self.branch_compare_base.clone() else {
             return diff_preview_placeholder("<no base branch>");
         };
-        let diff = crate::command::git_backend::compare_diff_text(
+        let diff = crate::command::git_backend::compare_worktree_diff_text(
             &self.project_root,
             &base,
-            "HEAD",
             Some(path),
         )
         .unwrap_or_default();
@@ -426,7 +425,7 @@ impl Explorer {
             (PreviewKind::File, Some(p)) if self.mode == ExplorerMode::BranchCompare => {
                 let rel = p.strip_prefix(&self.project_root).unwrap_or(p);
                 let base = self.branch_compare_base.as_deref().unwrap_or("?");
-                format!("DIFF {}…HEAD: {}", base, rel.to_string_lossy())
+                format!("DIFF {}…worktree: {}", base, rel.to_string_lossy())
             }
             (PreviewKind::File, Some(p)) => {
                 let rel = p.strip_prefix(&self.project_root).unwrap_or(p);

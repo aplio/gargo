@@ -1,102 +1,78 @@
 # Gargo
 
-Gargo is a terminal text editor written in Rust.
+Gargo is a modal (Vim-like) terminal text editor written in Rust, with Tree-sitter syntax highlighting, git integration, and an optional browser-based editor served over HTTP.
 
-## Requirements
-
-- Rust stable toolchain
-- A terminal with true color support
-
-## Quick start
-
-Run with an empty scratch buffer:
-
-```bash
-cargo run
-```
-
-Open a file or directory:
-
-```bash
-cargo run -- path/to/file_or_directory
-```
-
-Run optimized build:
-
-```bash
-cargo run --release -- path/to/file
-```
-
-## Installation
-
-Quick install:
+## Install
 
 ```bash
 curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | sh
 ```
 
-Install a specific version:
+Options (set as environment variables before `sh`):
+
+- `GARGO_VERSION=v0.1.13` — install a specific version
+- `GARGO_BIN_DIR=$HOME/.bin` — install to a custom directory
+- `GARGO_SKIP_VERIFY=1` — skip checksum verification
+
+Prebuilt binaries are published on [GitHub Releases](https://github.com/aplio/gargo/releases) for macOS and Linux (x86_64 / aarch64); manual install is just placing `gargo` on your `PATH`.
+
+To build from source, see [Development](#development).
+
+## Usage
 
 ```bash
-curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | GARGO_VERSION=v0.1.13 sh
+gargo                 # empty scratch buffer
+gargo path/to/file    # open a file
+gargo path/to/dir     # start in a directory
+gargo --check         # check for a newer release
+gargo --update        # self-update to the latest release
 ```
 
-Install to a custom directory:
+Configuration is read from `~/.config/gargo/config.toml` (respects `XDG_CONFIG_HOME`).
 
-```bash
-curl -fsSL https://github.com/aplio/gargo/raw/refs/heads/master/install.sh | GARGO_BIN_DIR=$HOME/.bin sh
-```
+### Basic keys
 
-Checksum verification is enabled when a release includes `checksums.txt`. Set `GARGO_SKIP_VERIFY=1` to skip verification.
-
-- Legacy/manual install still works by downloading a release tarball from [GitHub Releases](https://github.com/aplio/gargo/releases) and placing `gargo` on your `PATH`.
-
-Supported assets:
-- `gargo-v<version>-x86_64-apple-darwin.tar.gz`
-- `gargo-v<version>-aarch64-apple-darwin.tar.gz`
-- `gargo-v<version>-x86_64-unknown-linux-gnu.tar.gz`
-- `gargo-v<version>-aarch64-unknown-linux-gnu.tar.gz`
-
-## Source install
-
-```bash
-cargo install --path .
-```
-
-### Web editor (browser)
-
-`gargo --server` includes a browser-based editor whose modal core runs in-tab as
-WebAssembly. The wasm bundle is **embedded into the binary at build time**, so
-release binaries (and `gargo --update`) ship it automatically — no extra setup
-for end users.
-
-When building from source, generate the bundle before `cargo build` so it gets
-embedded (it lives in `assets/web_editor/pkg/`, which is gitignored):
-
-```bash
-cargo build --lib --target wasm32-unknown-unknown --release
-wasm-bindgen target/wasm32-unknown-unknown/release/gargo.wasm \
-  --out-dir assets/web_editor/pkg --out-name gargo_wasm --target web
-```
-
-This needs the `wasm32-unknown-unknown` target (`rustup target add
-wasm32-unknown-unknown`) and `wasm-bindgen-cli` at the exact version of the
-`wasm-bindgen` crate in `Cargo.lock`. If the bundle is missing, `cargo build`
-still succeeds and the editor's asset routes report "wasm not built".
-
-## Basic keys
-
-- `i`: enter insert mode
-- `Esc`: return to normal mode
+- `i` / `Esc`: enter insert mode / back to normal mode
 - `Ctrl+S`: save current buffer
 - `Ctrl+Q`: close current buffer, or quit when it is the last one
-- `SPC f`: open file picker
-- `SPC p`: open command palette
-- `SPC g`: open flat changed-files sidebar with status badges
-- `SPC G`: open Git view
-- Mouse: left-drag an editor split border to resize pane widths/heights
+- `SPC f`: file picker
+- `SPC p`: command palette
+- `SPC /`: global search
+- `SPC e`: file explorer sidebar
+- `SPC g` / `SPC G`: changed-files sidebar / Git view
+- `SPC w` + `v` / `s` / `q`: split window vertically / horizontally / close
+- Mouse: left-drag a split border to resize panes
 
-## More docs
+### Web editor
 
-- `docs/README.md` for architecture
-- `docs/CONTRIBUTING.md` for development workflow
+```bash
+gargo --server
+```
+
+Starts an HTTP server and opens a browser-based editor whose modal core runs in-tab as WebAssembly. Flags: `--no-open` (don't launch the browser), `--port <PORT>` (default: OS-assigned), `--host <HOST>` (default `127.0.0.1`; use `0.0.0.0` to accept remote connections).
+
+The wasm bundle is embedded into release binaries at build time, so `gargo --server` works out of the box for installed releases.
+
+## Development
+
+Requires the Rust stable toolchain.
+
+```bash
+cargo run -- path/to/file    # run the terminal editor
+cargo test                   # run tests
+```
+
+To use the web editor from a source build, generate the wasm bundle **before** `cargo build` so it gets embedded (it lives in `assets/web_editor/pkg/`, which is gitignored):
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli   # must match the wasm-bindgen version in Cargo.lock
+./scripts/build-web-editor.sh
+```
+
+If the bundle is missing, `cargo build` still succeeds and the editor's asset routes report "wasm not built".
+
+### More docs
+
+- [docs/README.md](docs/README.md) — architecture
+- [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) — development workflow and commit message rules

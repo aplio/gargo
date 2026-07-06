@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::command::git::{GitFileEntry, GitFileStatus, dir_git_status};
+use crate::diff_render::LineKind;
 use crate::input::action::{Action, AppAction, BufferAction, IntegrationAction, WorkspaceAction};
 use crate::input::chord::KeyState;
 use crate::syntax::highlight::{HighlightSpan, highlight_text};
@@ -25,8 +26,17 @@ use crate::ui::views::text_view::render_highlighted_line_windowed;
 const PREVIEW_MAX_LINES: usize = 500;
 const PREVIEW_HSCROLL_STEP: usize = 8;
 
-/// Preview-pane content: display lines plus per-line highlight spans.
-type PreviewContent = (Vec<String>, HashMap<usize, Vec<HighlightSpan>>);
+/// Rendered diff preview for one branch-compare file: the file's lines with
+/// normal syntax highlighting, plus per-line add/remove gutter markers.
+#[derive(Clone, Default)]
+struct DiffPreview {
+    lines: Vec<String>,
+    spans: HashMap<usize, Vec<HighlightSpan>>,
+    /// display line → Add / Remove (context lines are absent).
+    gutter: HashMap<usize, LineKind>,
+    /// hunk headers and placeholder lines, rendered dim without highlight.
+    meta: std::collections::HashSet<usize>,
+}
 
 struct DirEntry {
     name: String,
@@ -75,7 +85,10 @@ pub struct Explorer {
     // Paths whose "viewed" checkbox is ticked (BranchCompare mode only).
     branch_compare_viewed: HashSet<String>,
     // path → highlighted diff preview; cleared when the file list refreshes.
-    branch_compare_diff_cache: HashMap<String, PreviewContent>,
+    branch_compare_diff_cache: HashMap<String, DiffPreview>,
+    // Gutter/meta info for the currently shown diff preview.
+    preview_diff_gutter: HashMap<usize, LineKind>,
+    preview_diff_meta: std::collections::HashSet<usize>,
     // preview
     preview_mode: bool,
     preview_lines: Vec<String>,
@@ -133,6 +146,8 @@ impl Explorer {
             branch_compare_files: Vec::new(),
             branch_compare_viewed: HashSet::new(),
             branch_compare_diff_cache: HashMap::new(),
+            preview_diff_gutter: HashMap::new(),
+            preview_diff_meta: std::collections::HashSet::new(),
             preview_mode: false,
             preview_lines: Vec::new(),
             preview_spans: HashMap::new(),
@@ -177,6 +192,8 @@ impl Explorer {
             branch_compare_files: files,
             branch_compare_viewed: HashSet::new(),
             branch_compare_diff_cache: HashMap::new(),
+            preview_diff_gutter: HashMap::new(),
+            preview_diff_meta: std::collections::HashSet::new(),
             preview_mode: false,
             preview_lines: Vec::new(),
             preview_spans: HashMap::new(),
@@ -259,6 +276,8 @@ impl Explorer {
         self.preview_scroll = 0;
         self.preview_horizontal_scroll = 0;
         self.preview_image = None;
+        self.preview_diff_gutter.clear();
+        self.preview_diff_meta.clear();
     }
 
     pub fn take_pending_image_request(&mut self) -> Option<crate::ui::image::ImageRenderRequest> {
@@ -334,13 +353,17 @@ impl Explorer {
         // branch instead of the file contents.
         if self.mode == ExplorerMode::BranchCompare && !entry.is_dir {
             let name = entry.name.clone();
-            let (lines, spans) = self.branch_compare_diff_preview(&name);
-            self.preview_lines = lines;
-            self.preview_spans = spans;
+            let preview = self.branch_compare_diff_preview(&name);
+            self.preview_lines = preview.lines;
+            self.preview_spans = preview.spans;
+            self.preview_diff_gutter = preview.gutter;
+            self.preview_diff_meta = preview.meta;
             self.preview_kind = PreviewKind::File;
             self.preview_path = Some(path);
             return;
         }
+        self.preview_diff_gutter.clear();
+        self.preview_diff_meta.clear();
 
         if entry.is_dir {
             self.preview_lines = build_dir_listing(&path);
@@ -356,13 +379,14 @@ impl Explorer {
         self.preview_path = Some(path);
     }
 
-    /// The `base...HEAD` diff for one file, as highlighted preview lines.
-    fn branch_compare_diff_preview(&mut self, path: &str) -> PreviewContent {
+    /// The `base...HEAD` diff for one file, as normally syntax-highlighted
+    /// code lines with add/remove gutter markers.
+    fn branch_compare_diff_preview(&mut self, path: &str) -> DiffPreview {
         if let Some(cached) = self.branch_compare_diff_cache.get(path) {
             return cached.clone();
         }
         let Some(base) = self.branch_compare_base.clone() else {
-            return (vec!["<no base branch>".to_string()], HashMap::new());
+            return diff_preview_placeholder("<no base branch>");
         };
         let diff = crate::command::git_backend::compare_diff_text(
             &self.project_root,
@@ -371,24 +395,10 @@ impl Explorer {
             Some(path),
         )
         .unwrap_or_default();
-        let lines: Vec<String> = if diff.trim().is_empty() {
-            vec!["(no differences)".to_string()]
-        } else {
-            diff.lines()
-                .take(PREVIEW_MAX_LINES)
-                .map(str::to_string)
-                .collect()
-        };
-        let lang_registry = LanguageRegistry::new();
-        let spans = if let Some(lang_def) = lang_registry.detect_by_extension("preview.diff") {
-            highlight_text(&lines.join("\n"), lang_def)
-        } else {
-            HashMap::new()
-        };
-        let result = (lines, spans);
+        let preview = build_diff_preview(&diff, path);
         self.branch_compare_diff_cache
-            .insert(path.to_string(), result.clone());
-        result
+            .insert(path.to_string(), preview.clone());
+        preview
     }
 
     pub fn render_preview(
@@ -464,27 +474,57 @@ impl Explorer {
         }
 
         let highlight_enabled = self.preview_kind == PreviewKind::File;
+        // Branch-compare diff previews get a 2-column add/remove gutter.
+        let diff_gutter = self.mode == ExplorerMode::BranchCompare
+            && self.preview_kind == PreviewKind::File
+            && width > 2;
+        let gutter_w = if diff_gutter { 2 } else { 0 };
+        let text_x = x + gutter_w;
+        let text_w = width - gutter_w;
 
         for row in 0..body_h {
             let line_idx = self.preview_scroll + row;
             let screen_row = body_y + row;
             if line_idx < self.preview_lines.len() {
+                if diff_gutter {
+                    let marker_style = match self.preview_diff_gutter.get(&line_idx) {
+                        Some(LineKind::Add) => CellStyle {
+                            fg: Some(crossterm::style::Color::Green),
+                            ..CellStyle::default()
+                        },
+                        Some(LineKind::Remove) => CellStyle {
+                            fg: Some(crossterm::style::Color::Red),
+                            ..CellStyle::default()
+                        },
+                        _ => default_style,
+                    };
+                    let marker = match self.preview_diff_gutter.get(&line_idx) {
+                        Some(LineKind::Add) | Some(LineKind::Remove) => "▎",
+                        _ => " ",
+                    };
+                    surface.put_str(x, screen_row, marker, &marker_style);
+                    surface.put_str(x + 1, screen_row, " ", &default_style);
+                }
                 let line = &self.preview_lines[line_idx];
-                let window = slice_display_window(line, self.preview_horizontal_scroll, width);
-                if highlight_enabled && let Some(spans) = self.preview_spans.get(&line_idx) {
+                let window = slice_display_window(line, self.preview_horizontal_scroll, text_w);
+                let is_meta = diff_gutter && self.preview_diff_meta.contains(&line_idx);
+                if highlight_enabled
+                    && !is_meta
+                    && let Some(spans) = self.preview_spans.get(&line_idx)
+                {
                     render_highlighted_line_windowed(
                         surface,
-                        (screen_row, x),
+                        (screen_row, text_x),
                         window.visible,
                         spans,
                         window.start_byte..window.end_byte,
-                        width,
+                        text_w,
                         theme,
                     );
-                    let pad = width.saturating_sub(window.used_width);
+                    let pad = text_w.saturating_sub(window.used_width);
                     if pad > 0 {
                         surface.fill_region(
-                            x + window.used_width,
+                            text_x + window.used_width,
                             screen_row,
                             pad,
                             ' ',
@@ -492,16 +532,17 @@ impl Explorer {
                         );
                     }
                 } else {
-                    let style = if self.preview_kind == PreviewKind::Dir && line_idx == 0 {
-                        dim_style
-                    } else {
-                        default_style
-                    };
-                    surface.put_str(x, screen_row, window.visible, &style);
-                    let pad = width.saturating_sub(window.used_width);
+                    let style =
+                        if (self.preview_kind == PreviewKind::Dir && line_idx == 0) || is_meta {
+                            dim_style
+                        } else {
+                            default_style
+                        };
+                    surface.put_str(text_x, screen_row, window.visible, &style);
+                    let pad = text_w.saturating_sub(window.used_width);
                     if pad > 0 {
                         surface.fill_region(
-                            x + window.used_width,
+                            text_x + window.used_width,
                             screen_row,
                             pad,
                             ' ',
@@ -1679,6 +1720,66 @@ impl Explorer {
     }
 }
 
+fn diff_preview_placeholder(message: &str) -> DiffPreview {
+    DiffPreview {
+        lines: vec![message.to_string()],
+        meta: std::iter::once(0).collect(),
+        ..DiffPreview::default()
+    }
+}
+
+/// Turn one file's unified diff into preview lines: hunk headers stay as dim
+/// separators, code lines lose their +/- prefix and get normal syntax
+/// highlighting for `path`'s language, with add/remove recorded per line for
+/// the gutter.
+fn build_diff_preview(diff: &str, path: &str) -> DiffPreview {
+    let Some(file) = crate::diff_render::parse_unified_diff(diff)
+        .into_iter()
+        .next()
+    else {
+        return diff_preview_placeholder("(no differences)");
+    };
+    if file.binary {
+        return diff_preview_placeholder("(binary file)");
+    }
+
+    let mut preview = DiffPreview::default();
+    // Text fed to the highlighter: hunk headers are blanked so they don't
+    // derail the syntax tree; indexes stay aligned with `preview.lines`.
+    let mut highlight_lines: Vec<String> = Vec::new();
+    'hunks: for hunk in &file.hunks {
+        if preview.lines.len() >= PREVIEW_MAX_LINES {
+            break;
+        }
+        preview.meta.insert(preview.lines.len());
+        preview.lines.push(hunk.header.clone());
+        highlight_lines.push(String::new());
+        for line in &hunk.lines {
+            if preview.lines.len() >= PREVIEW_MAX_LINES {
+                break 'hunks;
+            }
+            match line.kind {
+                LineKind::NoNewline => continue,
+                LineKind::Add | LineKind::Remove => {
+                    preview.gutter.insert(preview.lines.len(), line.kind);
+                }
+                LineKind::Context => {}
+            }
+            preview.lines.push(line.content.clone());
+            highlight_lines.push(line.content.clone());
+        }
+    }
+    if preview.lines.is_empty() {
+        return diff_preview_placeholder("(no content changes)");
+    }
+
+    let lang_registry = LanguageRegistry::new();
+    if let Some(lang_def) = lang_registry.detect_by_extension(path) {
+        preview.spans = highlight_text(&highlight_lines.join("\n"), lang_def);
+    }
+    preview
+}
+
 fn read_file_preview(path: &Path) -> (Vec<String>, HashMap<usize, Vec<HighlightSpan>>) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -2406,15 +2507,65 @@ mod tests {
         explorer.select_by_name("a.rs");
         explorer.set_preview_mode(true);
 
-        assert!(
-            explorer
-                .preview_lines
-                .iter()
-                .any(|line| line == "+fn b() {}"),
-            "expected diff preview to contain the added line, got: {:?}",
-            explorer.preview_lines,
+        // The added line appears without its '+' prefix, marked in the gutter.
+        let added_idx = explorer
+            .preview_lines
+            .iter()
+            .position(|line| line == "fn b() {}")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected diff preview to contain the added line, got: {:?}",
+                    explorer.preview_lines
+                )
+            });
+        assert_eq!(
+            explorer.preview_diff_gutter.get(&added_idx),
+            Some(&LineKind::Add)
         );
+        // The context line has no gutter mark.
+        let ctx_idx = explorer
+            .preview_lines
+            .iter()
+            .position(|line| line == "fn a() {}")
+            .expect("context line present");
+        assert!(!explorer.preview_diff_gutter.contains_key(&ctx_idx));
+        // The hunk header is a dim meta separator.
+        assert!(explorer.preview_diff_meta.contains(&0));
+        assert!(explorer.preview_lines[0].starts_with("@@"));
 
         cleanup(&dir);
+    }
+
+    #[test]
+    fn build_diff_preview_strips_prefixes_and_marks_gutter() {
+        let diff = "\
+diff --git a/src/x.rs b/src/x.rs
+--- a/src/x.rs
++++ b/src/x.rs
+@@ -1,3 +1,3 @@
+ fn keep() {}
+-fn old() {}
++fn new() {}
+";
+        let preview = build_diff_preview(diff, "src/x.rs");
+
+        assert_eq!(
+            preview.lines,
+            vec![
+                "@@ -1,3 +1,3 @@".to_string(),
+                "fn keep() {}".to_string(),
+                "fn old() {}".to_string(),
+                "fn new() {}".to_string(),
+            ]
+        );
+        assert!(preview.meta.contains(&0));
+        assert!(!preview.gutter.contains_key(&1));
+        assert_eq!(preview.gutter.get(&2), Some(&LineKind::Remove));
+        assert_eq!(preview.gutter.get(&3), Some(&LineKind::Add));
+        // Rust code gets normal syntax highlighting.
+        assert!(
+            preview.spans.values().any(|spans| !spans.is_empty()),
+            "expected syntax highlight spans for .rs content"
+        );
     }
 }

@@ -539,11 +539,26 @@ impl App {
                         });
                         self.compositor.open_explorer(explorer);
                         self.last_used_sidebar = Some(variant);
-                        // Refresh contents in the background; the restored
-                        // view shows cached data until the refresh lands.
                         self.queue_git_status_refresh(true);
-                        if let Some((repo_root, Some(base))) = branch_refresh {
-                            self.queue_branch_diff_refresh(repo_root, base);
+                        // Recompute the branch-compare contents synchronously
+                        // — the same work a fresh SPC d open does — so the
+                        // restored sidebar never shows stale files, viewed
+                        // marks, or diff previews. Selection and scroll are
+                        // still preserved by the stash.
+                        if let Some((repo_root, Some(base))) = branch_refresh
+                            && let Ok(compare) =
+                                crate::command::git::git_branch_compare_files_in(&repo_root, &base)
+                        {
+                            let viewed = crate::command::git::branch_compare_viewed_paths(
+                                self.diff_viewed_store(),
+                                &repo_root,
+                                &base,
+                                &compare.content_hashes,
+                            );
+                            if let Some(explorer) = self.compositor.explorer_mut() {
+                                explorer.set_branch_compare_viewed(viewed);
+                                explorer.apply_branch_diff_files(compare.files);
+                            }
                         }
                         return false;
                     }
@@ -715,6 +730,10 @@ impl App {
                     self.stash_closed_explorer(explorer);
                 }
 
+                let _ = self
+                    .recent_projects
+                    .record_compare_base(&repo_root, &base_branch);
+
                 let mut explorer =
                     Explorer::new_branch_compare(repo_root, base_branch, compare.files);
                 explorer.set_branch_compare_viewed(viewed);
@@ -785,6 +804,10 @@ impl App {
                 self.compositor.apply(UiAction::ClosePalette);
                 match self.open_branch_compare_view(&branch) {
                     Ok(()) => {
+                        let repo_root = self.active_buffer_repo_root();
+                        let _ = self
+                            .recent_projects
+                            .record_compare_base(&repo_root, &branch);
                         self.editor.message =
                             Some(format!("Opened branch compare: {}...HEAD", branch));
                     }

@@ -497,6 +497,27 @@ impl App {
         }
     }
 
+    /// Move previously used compare bases to the front (most recent first),
+    /// so an empty-input compare picker offers them immediately.
+    fn reorder_by_recent_compare_bases(
+        &self,
+        repo_root: &Path,
+        mut entries: Vec<GitBranchPickerEntry>,
+    ) -> Vec<GitBranchPickerEntry> {
+        let recents = self.recent_projects.get_recent_compare_bases(repo_root);
+        if recents.is_empty() {
+            return entries;
+        }
+        let mut ordered = Vec::with_capacity(entries.len());
+        for name in &recents {
+            if let Some(pos) = entries.iter().position(|entry| &entry.branch_name == name) {
+                ordered.push(entries.remove(pos));
+            }
+        }
+        ordered.extend(entries);
+        ordered
+    }
+
     fn queue_git_index_refresh(&mut self) {
         self.git_index_requested_for_root = true;
 
@@ -640,7 +661,15 @@ impl App {
             }
         }
         let active_repo_root = self.active_buffer_repo_root();
-        let branch_entries = self.git_branch_picker_entries_for_root(&active_repo_root);
+        let mut branch_entries = self.git_branch_picker_entries_for_root(&active_repo_root);
+        let is_compare_picker = self
+            .compositor
+            .palette_mut()
+            .is_some_and(|palette| palette.is_git_branch_compare_picker());
+        if is_compare_picker {
+            branch_entries =
+                self.reorder_by_recent_compare_bases(&active_repo_root, branch_entries);
+        }
         if let Some(palette) = self.compositor.palette_mut() {
             palette.set_git_branch_entries(branch_entries);
         }
@@ -659,9 +688,23 @@ impl App {
             match event {
                 GitIndexRuntimeEvent::Ready {
                     project_root,
-                    snapshot,
+                    mut snapshot,
                 } => {
+                    // A refresh sends a quick status-only snapshot first
+                    // (branches empty, `branches_ready: false`) and the full
+                    // branch list later. Keep the previously indexed branches
+                    // in the meantime so pickers open instantly with cached
+                    // data instead of "Indexing git branches...". The loading
+                    // flags below still track the incoming phase, so the full
+                    // snapshot is awaited as before.
                     let branches_ready = snapshot.branches_ready;
+                    if !snapshot.branches_ready
+                        && self.git_index_snapshot.branches_ready
+                        && self.git_index_snapshot_root.as_deref() == Some(project_root.as_path())
+                    {
+                        snapshot.branches = std::mem::take(&mut self.git_index_snapshot.branches);
+                        snapshot.branches_ready = true;
+                    }
                     self.git_index_snapshot = snapshot;
                     self.git_index_snapshot_root = Some(project_root.clone());
                     if branches_ready {
@@ -728,6 +771,24 @@ impl App {
                 project_root: repo_root,
                 base_branch,
             });
+    }
+
+    /// If the branch-compare sidebar is open, refresh its file list in the
+    /// background. Called after operations that move HEAD (e.g. commits),
+    /// which change the `base...HEAD` diff.
+    fn queue_open_branch_compare_refresh(&mut self) {
+        let target = self
+            .compositor
+            .explorer_mut()
+            .filter(|explorer| explorer.is_branch_compare())
+            .and_then(|explorer| {
+                explorer
+                    .branch_compare_base()
+                    .map(|base| (explorer.current_dir().to_path_buf(), base.to_string()))
+            });
+        if let Some((repo_root, base)) = target {
+            self.queue_branch_diff_refresh(repo_root, base);
+        }
     }
 
     fn refresh_git_index_for_current_root(&mut self) {
@@ -1267,6 +1328,7 @@ impl App {
             self.queue_git_index_refresh();
             self.queue_git_status_refresh(true);
             self.queue_active_doc_git_refresh(true);
+            self.queue_open_branch_compare_refresh();
         }
         Ok(ClosedBufferInfo {
             doc_id: closing_doc_id,
@@ -2490,7 +2552,10 @@ impl App {
     fn open_git_branch_compare_picker(&mut self) -> Result<(), String> {
         self.ensure_git_index_started_if_needed();
         let repo_root = self.active_buffer_repo_root();
-        let entries = self.git_branch_picker_entries_for_root(&repo_root);
+        let entries = self.reorder_by_recent_compare_bases(
+            &repo_root,
+            self.git_branch_picker_entries_for_root(&repo_root),
+        );
         if entries.is_empty() {
             if self.git_index_loading_for_root(&repo_root)
                 || (self.git_index_matches_root(&repo_root)
@@ -2511,7 +2576,10 @@ impl App {
     fn open_git_branch_compare_sidebar_picker(&mut self) -> Result<(), String> {
         self.ensure_git_index_started_if_needed();
         let repo_root = self.active_buffer_repo_root();
-        let entries = self.git_branch_picker_entries_for_root(&repo_root);
+        let entries = self.reorder_by_recent_compare_bases(
+            &repo_root,
+            self.git_branch_picker_entries_for_root(&repo_root),
+        );
         if entries.is_empty() {
             if self.git_index_loading_for_root(&repo_root)
                 || (self.git_index_matches_root(&repo_root)

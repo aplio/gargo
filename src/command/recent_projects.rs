@@ -80,6 +80,18 @@ impl RecentProjectsStore {
             [],
         )?;
 
+        // Per-repo last-used branch-compare bases. Feeds the compare pickers'
+        // empty-query recency sort (see `get_recent_compare_bases`).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS compare_bases (
+                project_path TEXT NOT NULL,
+                branch TEXT NOT NULL,
+                last_used_at INTEGER NOT NULL,
+                PRIMARY KEY (project_path, branch)
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -290,6 +302,46 @@ impl RecentProjectsStore {
         }
         map
     }
+
+    /// Record that `branch` was used as a branch-compare base for this repo.
+    pub fn record_compare_base(&self, project_root: &Path, branch: &str) -> Result<()> {
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
+        let project = Self::normalize_project_root(project_root)
+            .to_string_lossy()
+            .to_string();
+        conn.execute(
+            "INSERT INTO compare_bases (project_path, branch, last_used_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_path, branch)
+             DO UPDATE SET last_used_at = ?3",
+            rusqlite::params![project, branch, Self::now_millis()],
+        )?;
+        Ok(())
+    }
+
+    /// Branch-compare bases previously used for this repo, most recent first.
+    pub fn get_recent_compare_bases(&self, project_root: &Path) -> Vec<String> {
+        let Some(conn) = self.conn.as_ref() else {
+            return Vec::new();
+        };
+        let project = Self::normalize_project_root(project_root)
+            .to_string_lossy()
+            .to_string();
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT branch FROM compare_bases
+             WHERE project_path = ?1
+             ORDER BY last_used_at DESC",
+        ) else {
+            return Vec::new();
+        };
+        let rows = stmt.query_map(rusqlite::params![project], |row| row.get::<_, String>(0));
+        match rows {
+            Ok(rows) => rows.flatten().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -389,6 +441,46 @@ mod tests {
 
         let recent = store.get_recent_projects(10);
         assert!(recent.is_empty());
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn compare_bases_ordered_by_recency() {
+        let timestamp = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir =
+            std::env::temp_dir().join(format!("gargo_recent_projects_cmp_{}", timestamp));
+        let root = temp_dir.join("repo");
+        fs::create_dir_all(&root).unwrap();
+
+        let store = RecentProjectsStore::new_with_data_dir(temp_dir.join("db"));
+        assert!(store.get_recent_compare_bases(&root).is_empty());
+
+        store.record_compare_base(&root, "main").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.record_compare_base(&root, "develop").unwrap();
+        assert_eq!(
+            store.get_recent_compare_bases(&root),
+            vec!["develop".to_string(), "main".to_string()]
+        );
+
+        // Re-using a base moves it back to the front.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.record_compare_base(&root, "main").unwrap();
+        assert_eq!(
+            store.get_recent_compare_bases(&root),
+            vec!["main".to_string(), "develop".to_string()]
+        );
+
+        // A different repo sees nothing.
+        assert!(
+            store
+                .get_recent_compare_bases(&temp_dir.join("other"))
+                .is_empty()
+        );
 
         fs::remove_dir_all(&temp_dir).ok();
     }

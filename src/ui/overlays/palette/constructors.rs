@@ -398,10 +398,10 @@ impl Palette {
                 preview_lines: entry.preview_lines,
             })
             .collect();
-        let selected = git_branch_entries
-            .iter()
-            .position(|entry| entry.label.starts_with("* "))
-            .unwrap_or(0);
+        // Entries arrive with recently used compare bases first, so default
+        // to the top entry (comparing the current branch to itself would be
+        // pointless anyway).
+        let selected = 0;
         let candidates = git_branch_entries
             .iter()
             .enumerate()

@@ -135,6 +135,15 @@ impl Palette {
         self.restart_global_search_worker();
     }
 
+    /// Whether this palette picks a branch-compare base (buffer or sidebar
+    /// variant) — these order entries by compare-base recency.
+    pub fn is_git_branch_compare_picker(&self) -> bool {
+        matches!(
+            self.mode,
+            PaletteMode::GitBranchComparePicker | PaletteMode::GitBranchCompareSidebarPicker
+        )
+    }
+
     pub fn set_git_branch_entries(&mut self, entries: Vec<GitBranchPickerEntry>) {
         self.git_branch_entries = entries
             .into_iter()

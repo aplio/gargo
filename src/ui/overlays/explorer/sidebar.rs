@@ -118,6 +118,9 @@ pub struct Explorer {
     // Populated only when mode == BranchCompare.
     branch_compare_base: Option<String>,
     branch_compare_files: Vec<GitFileEntry>,
+    /// True while the branch-compare file list is being computed in the
+    /// background; lets the render distinguish "loading" from "no diff".
+    branch_compare_loading: bool,
     // preview
     preview_mode: bool,
     preview_lines: Vec<String>,
@@ -181,6 +184,7 @@ impl Explorer {
             git_status_map: git_status_map.clone(),
             branch_compare_base: None,
             branch_compare_files: Vec::new(),
+            branch_compare_loading: false,
             preview_mode: false,
             preview_lines: Vec::new(),
             preview_spans: HashMap::new(),
@@ -229,6 +233,7 @@ impl Explorer {
             git_status_map: HashMap::new(),
             branch_compare_base: Some(base_branch),
             branch_compare_files: files,
+            branch_compare_loading: false,
             preview_mode: false,
             preview_lines: Vec::new(),
             preview_spans: HashMap::new(),
@@ -258,18 +263,35 @@ impl Explorer {
         self.branch_compare_base.as_deref()
     }
 
-    /// Replace the branch-compare file list and reread entries. Preserves
-    /// the selected file by path when possible.
+    /// Mark the branch-compare file list as being computed in the
+    /// background (cleared by [`apply_branch_diff_files`]).
+    pub fn set_branch_compare_loading(&mut self, on: bool) {
+        self.branch_compare_loading = on;
+    }
+
+    /// Replace the branch-compare file list and reread entries. A no-op when
+    /// the list is unchanged, so background refreshes don't visibly disturb
+    /// the sidebar. Preserves the selected file (by path) and the scroll
+    /// position when possible.
     pub fn apply_branch_diff_files(&mut self, files: Vec<GitFileEntry>) {
         if !self.is_branch_compare() {
             return;
         }
+        self.branch_compare_loading = false;
+        if files == self.branch_compare_files {
+            return;
+        }
         let selected_name = self.selected_name().map(|s| s.to_string());
+        let scroll_offset = self.scroll_offset;
         self.branch_compare_files = files;
         self.read_directory();
+        // Restore the scroll position; render clamps it to keep the
+        // selection visible.
+        self.scroll_offset = scroll_offset;
         if let Some(name) = selected_name {
             self.select_by_name(&name);
         }
+        self.update_preview();
     }
 
     /// Enable or disable the preview pane. When enabled, the editor area shows
@@ -917,6 +939,14 @@ impl Explorer {
     }
 
     pub fn set_git_status_map(&mut self, git_status_map: &HashMap<String, GitFileStatus>) {
+        if self.mode == ExplorerMode::BranchCompare {
+            // Entry statuses come from the branch diff, not the working-tree
+            // status map; overwriting them here would wipe the sidebar colors
+            // (committed changes aren't in the status map) until the next
+            // branch-diff refresh landed.
+            return;
+        }
+
         self.git_status_map = git_status_map.clone();
 
         if self.mode == ExplorerMode::ChangedOnly {
@@ -1608,6 +1638,18 @@ impl Explorer {
                     }
                 }
             }
+        }
+
+        // Branch compare with an empty list: distinguish a background load
+        // in progress from a genuinely empty diff.
+        if plan.is_empty() && self.mode == ExplorerMode::BranchCompare && content_height > 0 {
+            let msg = if self.branch_compare_loading {
+                "  loading files…"
+            } else {
+                "  (no differences)"
+            };
+            let (truncated, _) = truncate_to_width(msg, width);
+            surface.put_str(x, content_start_row, truncated, &dim_style);
         }
 
         // Bottom prompt
@@ -2391,6 +2433,73 @@ mod tests {
         ];
         explorer.apply_branch_diff_files(refreshed);
         assert_eq!(explorer.selected_name(), Some("b.rs"));
+
+        cleanup(&dir);
+    }
+
+    fn compare_entry(path: &str, status_char: char) -> GitFileEntry {
+        GitFileEntry {
+            path: path.to_string(),
+            status_char,
+            staged: false,
+            additions: 1,
+            deletions: 0,
+        }
+    }
+
+    #[test]
+    fn branch_compare_refresh_with_unchanged_files_is_a_noop() {
+        let dir = setup("branch_compare_noop");
+        let files = vec![compare_entry("a.rs", 'M'), compare_entry("b.rs", 'M')];
+        let mut explorer =
+            Explorer::new_branch_compare(dir.clone(), "main".to_string(), files.clone());
+        let _ = explorer.handle_key(key(KeyCode::Char('j')), &KeyState::Normal);
+        explorer.scroll_offset = 1;
+
+        explorer.apply_branch_diff_files(files);
+
+        // Selection and scroll position are untouched by the no-op refresh.
+        assert_eq!(explorer.selected_name(), Some("b.rs"));
+        assert_eq!(explorer.scroll_offset, 1);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_ignores_working_tree_status_map() {
+        let dir = setup("branch_compare_status_map");
+        let files = vec![compare_entry("a.rs", 'M'), compare_entry("b.rs", 'A')];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "main".to_string(), files);
+        let statuses_before: Vec<_> = explorer.entries.iter().map(|e| e.git_status).collect();
+        assert!(statuses_before.iter().all(|s| s.is_some()));
+
+        // A working-tree status refresh (which won't contain committed
+        // branch changes) must not wipe the branch-diff statuses.
+        explorer.set_git_status_map(&HashMap::new());
+
+        let statuses_after: Vec<_> = explorer.entries.iter().map(|e| e.git_status).collect();
+        assert_eq!(statuses_before, statuses_after);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_renders_loading_then_no_differences_placeholder() {
+        let dir = setup("branch_compare_loading");
+        let mut explorer =
+            Explorer::new_branch_compare(dir.clone(), "main".to_string(), Vec::new());
+        explorer.set_branch_compare_loading(true);
+
+        let mut surface = Surface::new(40, 6);
+        explorer.render(&mut surface, 0, 40, 6);
+        let row: String = (0..40).map(|x| surface.get(x, 1).symbol.as_str()).collect();
+        assert!(row.contains("loading files"), "got row: {row:?}");
+
+        explorer.apply_branch_diff_files(Vec::new());
+        let mut surface = Surface::new(40, 6);
+        explorer.render(&mut surface, 0, 40, 6);
+        let row: String = (0..40).map(|x| surface.get(x, 1).symbol.as_str()).collect();
+        assert!(row.contains("(no differences)"), "got row: {row:?}");
 
         cleanup(&dir);
     }

@@ -17,7 +17,7 @@ use super::registry::{CommandEffect, CommandEntry, CommandRegistry, copy_to_clip
 // Public git helpers for GitView
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitFileEntry {
     pub path: String,
     pub status_char: char,

@@ -693,21 +693,41 @@ impl App {
                 self.compositor.apply(UiAction::ClosePalette);
                 let repo_root = self.active_buffer_repo_root();
 
-                let files =
+                // Compute the branch diff on the git-index runtime so the
+                // sidebar opens instantly even for large diffs; the file list
+                // lands via BranchDiffReady. Only fall back to a synchronous
+                // load when the runtime is unavailable.
+                let sync_files = if self.git_index_runtime.is_some() {
+                    None
+                } else {
                     match crate::command::git::git_branch_diff_files_in(&repo_root, &base_branch) {
-                        Ok(files) => files,
+                        Ok(files) => Some(files),
                         Err(err) => {
                             self.editor.message = Some(format!("Branch compare failed: {}", err));
                             return false;
                         }
-                    };
+                    }
+                };
 
                 // Close any open Explorer first, stashing it.
                 if let Some(explorer) = self.compositor.close_explorer() {
                     self.stash_closed_explorer(explorer);
                 }
 
-                let explorer = Explorer::new_branch_compare(repo_root, base_branch, files);
+                let mut explorer = match sync_files {
+                    Some(files) => Explorer::new_branch_compare(repo_root, base_branch, files),
+                    None => {
+                        let mut explorer = Explorer::new_branch_compare(
+                            repo_root.clone(),
+                            base_branch.clone(),
+                            Vec::new(),
+                        );
+                        explorer.set_branch_compare_loading(true);
+                        self.queue_branch_diff_refresh(repo_root, base_branch);
+                        explorer
+                    }
+                };
+                explorer.set_preview_mode(true);
                 self.compositor.open_explorer(explorer);
                 self.last_used_sidebar = Some(LastUsedSidebar::BranchCompare);
             }

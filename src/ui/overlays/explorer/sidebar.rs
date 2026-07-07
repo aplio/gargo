@@ -1,6 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -24,6 +26,10 @@ use crate::ui::views::text_view::render_highlighted_line_windowed;
 
 const PREVIEW_MAX_LINES: usize = 500;
 const PREVIEW_HSCROLL_STEP: usize = 8;
+/// How many entries above/below the selection get their previews prefetched
+/// so consecutive j/k moves hit the cache instead of waiting on the worker.
+const PREVIEW_PREFETCH_BEHIND: usize = 5;
+const PREVIEW_PREFETCH_AHEAD: usize = 15;
 
 struct DirEntry {
     name: String,
@@ -47,6 +53,49 @@ enum PreviewKind {
     None,
     File,
     Dir,
+}
+
+struct PreviewRequest {
+    path: PathBuf,
+}
+
+struct PreviewResult {
+    path: PathBuf,
+    mtime: Option<SystemTime>,
+    lines: Vec<String>,
+    spans: HashMap<usize, Vec<HighlightSpan>>,
+}
+
+struct CachedPreview {
+    mtime: Option<SystemTime>,
+    lines: Vec<String>,
+    spans: HashMap<usize, Vec<HighlightSpan>>,
+}
+
+/// Background thread that reads and highlights requested files, so selection
+/// moves in the sidebar never block the render loop on file I/O or
+/// tree-sitter parsing.
+fn preview_worker(rx: mpsc::Receiver<PreviewRequest>, tx: mpsc::Sender<PreviewResult>) {
+    let lang_registry = LanguageRegistry::new();
+    while let Ok(req) = rx.recv() {
+        let mtime = file_mtime(&req.path);
+        let (lines, spans) = read_file_preview(&req.path, &lang_registry);
+        if tx
+            .send(PreviewResult {
+                path: req.path,
+                mtime,
+                lines,
+                spans,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 pub struct Explorer {
@@ -80,6 +129,14 @@ pub struct Explorer {
     preview_image: Option<(PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>)>,
     preview_image_cache: HashMap<PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>>,
     pending_image_request: Option<crate::ui::image::ImageRenderRequest>,
+    // Async preview loading: file contents are read and highlighted on a
+    // worker thread (spawned lazily) and cached per path.
+    preview_cache: HashMap<PathBuf, CachedPreview>,
+    preview_requested: HashSet<PathBuf>,
+    preview_pending: Option<PathBuf>,
+    preview_request_tx: Option<mpsc::Sender<PreviewRequest>>,
+    preview_result_rx: Option<mpsc::Receiver<PreviewResult>>,
+    _preview_worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Explorer {
@@ -134,6 +191,12 @@ impl Explorer {
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
+            preview_cache: HashMap::new(),
+            preview_requested: HashSet::new(),
+            preview_pending: None,
+            preview_request_tx: None,
+            preview_result_rx: None,
+            _preview_worker: None,
         };
         explorer.read_directory();
         explorer
@@ -176,6 +239,12 @@ impl Explorer {
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
+            preview_cache: HashMap::new(),
+            preview_requested: HashSet::new(),
+            preview_pending: None,
+            preview_request_tx: None,
+            preview_result_rx: None,
+            _preview_worker: None,
         };
         explorer.read_directory();
         explorer
@@ -230,6 +299,7 @@ impl Explorer {
         self.preview_scroll = 0;
         self.preview_horizontal_scroll = 0;
         self.preview_image = None;
+        self.preview_pending = None;
     }
 
     pub fn take_pending_image_request(&mut self) -> Option<crate::ui::image::ImageRenderRequest> {
@@ -307,12 +377,116 @@ impl Explorer {
         } else if self.try_load_preview_image(&path) {
             // Image preview state set above.
         } else {
-            let (lines, spans) = read_file_preview(&path);
-            self.preview_lines = lines;
-            self.preview_spans = spans;
+            self.load_file_preview(&path);
             self.preview_kind = PreviewKind::File;
         }
         self.preview_path = Some(path);
+    }
+
+    /// Show the preview for `path` without blocking the UI thread: serve
+    /// from the cache when fresh, otherwise queue a background load and keep
+    /// showing the stale cached copy (or a blank pane) until the result is
+    /// applied by `poll_preview_results`.
+    fn load_file_preview(&mut self, path: &Path) {
+        self.drain_preview_results();
+        let mtime = file_mtime(path);
+        if let Some(cached) = self.preview_cache.get(path) {
+            self.preview_lines = cached.lines.clone();
+            self.preview_spans = cached.spans.clone();
+            if cached.mtime == mtime {
+                self.preview_pending = None;
+                self.prefetch_nearby_previews();
+                return;
+            }
+        } else {
+            self.preview_lines.clear();
+            self.preview_spans.clear();
+        }
+        self.preview_pending = Some(path.to_path_buf());
+        self.queue_preview_request(path.to_path_buf());
+        self.prefetch_nearby_previews();
+    }
+
+    fn ensure_preview_worker(&mut self) {
+        if self.preview_request_tx.is_some() {
+            return;
+        }
+        let (req_tx, req_rx) = mpsc::channel::<PreviewRequest>();
+        let (res_tx, res_rx) = mpsc::channel::<PreviewResult>();
+        self._preview_worker = Some(thread::spawn(move || preview_worker(req_rx, res_tx)));
+        self.preview_request_tx = Some(req_tx);
+        self.preview_result_rx = Some(res_rx);
+    }
+
+    fn queue_preview_request(&mut self, path: PathBuf) {
+        if self.preview_requested.contains(&path) {
+            return;
+        }
+        self.ensure_preview_worker();
+        let Some(tx) = self.preview_request_tx.clone() else {
+            return;
+        };
+        if tx.send(PreviewRequest { path: path.clone() }).is_ok() {
+            self.preview_requested.insert(path);
+        }
+    }
+
+    fn drain_preview_results(&mut self) {
+        let Some(rx) = &self.preview_result_rx else {
+            return;
+        };
+        while let Ok(result) = rx.try_recv() {
+            self.preview_requested.remove(&result.path);
+            self.preview_cache.insert(
+                result.path,
+                CachedPreview {
+                    mtime: result.mtime,
+                    lines: result.lines,
+                    spans: result.spans,
+                },
+            );
+        }
+    }
+
+    /// Apply the background result for the file currently previewed, if it
+    /// has arrived. Called once per frame from `render_preview`.
+    fn poll_preview_results(&mut self) {
+        let Some(pending) = self.preview_pending.clone() else {
+            return;
+        };
+        self.drain_preview_results();
+        if self.preview_requested.contains(&pending) {
+            return; // still loading
+        }
+        if let Some(cached) = self.preview_cache.get(&pending) {
+            self.preview_lines = cached.lines.clone();
+            self.preview_spans = cached.spans.clone();
+        }
+        self.preview_pending = None;
+    }
+
+    /// Warm the preview cache for entries around the selection.
+    fn prefetch_nearby_previews(&mut self) {
+        if self.visible_entries.is_empty() {
+            return;
+        }
+        let start = self.selected.saturating_sub(PREVIEW_PREFETCH_BEHIND);
+        let end = (self.selected + PREVIEW_PREFETCH_AHEAD).min(self.visible_entries.len());
+        let mut paths = Vec::new();
+        for visible_idx in start..end {
+            let entry = &self.entries[self.visible_entries[visible_idx]];
+            if entry.is_dir || entry.is_repo_header {
+                continue;
+            }
+            let path = self.current_dir.join(&entry.name);
+            if crate::ui::image::is_image_path(&path) || self.preview_cache.contains_key(&path) {
+                continue;
+            }
+            paths.push(path);
+        }
+        for path in paths {
+            self.queue_preview_request(path);
+        }
     }
 
     pub fn render_preview(
@@ -328,6 +502,7 @@ impl Explorer {
         if width == 0 || height == 0 {
             return;
         }
+        self.poll_preview_results();
 
         let default_style = CellStyle::default();
         let dim_style = CellStyle {
@@ -1534,7 +1709,10 @@ impl Explorer {
     }
 }
 
-fn read_file_preview(path: &Path) -> (Vec<String>, HashMap<usize, Vec<HighlightSpan>>) {
+fn read_file_preview(
+    path: &Path,
+    lang_registry: &LanguageRegistry,
+) -> (Vec<String>, HashMap<usize, Vec<HighlightSpan>>) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return (vec!["<binary or unreadable>".to_string()], HashMap::new()),
@@ -1544,7 +1722,6 @@ fn read_file_preview(path: &Path) -> (Vec<String>, HashMap<usize, Vec<HighlightS
         .take(PREVIEW_MAX_LINES)
         .map(|l| l.to_string())
         .collect();
-    let lang_registry = LanguageRegistry::new();
     let path_str = path.to_string_lossy();
     let spans = if let Some(lang_def) = lang_registry.detect_by_extension(&path_str) {
         let preview_text: String = lines.join("\n");
@@ -1738,6 +1915,66 @@ mod tests {
 
     fn cleanup(dir: &Path) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Poll the async preview pipeline until the pending result lands (or
+    /// time out), mimicking the per-frame `render_preview` polling.
+    fn wait_for_preview(explorer: &mut Explorer) {
+        for _ in 0..100 {
+            explorer.poll_preview_results();
+            if explorer.preview_pending.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("preview result did not arrive in time");
+    }
+
+    #[test]
+    fn preview_loads_file_contents_asynchronously() {
+        let dir = setup("preview_async");
+        let mut explorer = Explorer::new(dir.clone(), &dir, &HashMap::new());
+        explorer.select_by_name("bbb.txt");
+        explorer.set_preview_mode(true);
+
+        assert_eq!(explorer.preview_path, Some(dir.join("bbb.txt")));
+        wait_for_preview(&mut explorer);
+        assert_eq!(explorer.preview_lines, vec!["bbb".to_string()]);
+        assert_eq!(explorer.preview_kind, PreviewKind::File);
+
+        // Moving the selection swaps the pending preview to the new file.
+        explorer.select_by_name("ccc.rs");
+        explorer.update_preview();
+        wait_for_preview(&mut explorer);
+        assert_eq!(explorer.preview_lines, vec!["ccc".to_string()]);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn preview_cache_revalidates_when_file_changes_on_disk() {
+        let dir = setup("preview_stale");
+        let mut explorer = Explorer::new(dir.clone(), &dir, &HashMap::new());
+        explorer.select_by_name("bbb.txt");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+        assert_eq!(explorer.preview_lines, vec!["bbb".to_string()]);
+
+        // Rewrite the file with a different mtime, then revisit it.
+        fs::write(dir.join("bbb.txt"), "updated").unwrap();
+        let stale_mtime = SystemTime::now() - std::time::Duration::from_secs(60);
+        let file = fs::File::open(dir.join("bbb.txt")).unwrap();
+        file.set_modified(stale_mtime).unwrap();
+
+        explorer.select_by_name("ccc.rs");
+        explorer.update_preview();
+        wait_for_preview(&mut explorer);
+        explorer.select_by_name("bbb.txt");
+        explorer.update_preview();
+        wait_for_preview(&mut explorer);
+        assert_eq!(explorer.preview_lines, vec!["updated".to_string()]);
+
+        cleanup(&dir);
     }
 
     #[test]

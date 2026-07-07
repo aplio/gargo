@@ -14,6 +14,12 @@ impl Compositor {
         let cols = ctx.cols;
         let rows = ctx.rows;
 
+        // Begin a synchronized-update frame; every exit path closes it via
+        // `end_frame`. Without this, layout changes that rewrite most of the
+        // screen (e.g. toggling the sidebar) can tear: the terminal paints a
+        // partially-applied frame with missing colors.
+        queue!(stdout, terminal::BeginSynchronizedUpdate)?;
+
         // Resize buffers if terminal size changed
         if self.current.width != cols || self.current.height != rows {
             self.current.resize(cols, rows);
@@ -119,7 +125,7 @@ impl Compositor {
             queue!(stdout, MoveTo(cursor_x, cursor_y))?;
             queue!(stdout, SetCursorStyle::BlinkingBar)?;
             queue!(stdout, cursor::Show)?;
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             // Swap buffers
             std::mem::swap(&mut self.current, &mut self.previous);
@@ -138,7 +144,7 @@ impl Compositor {
             } else {
                 queue!(stdout, cursor::Hide)?;
             }
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             std::mem::swap(&mut self.current, &mut self.previous);
             return Ok(());
@@ -156,7 +162,7 @@ impl Compositor {
             } else {
                 queue!(stdout, cursor::Hide)?;
             }
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             std::mem::swap(&mut self.current, &mut self.previous);
             return Ok(());
@@ -174,7 +180,7 @@ impl Compositor {
             } else {
                 queue!(stdout, cursor::Hide)?;
             }
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             std::mem::swap(&mut self.current, &mut self.previous);
             return Ok(());
@@ -192,7 +198,7 @@ impl Compositor {
             } else {
                 queue!(stdout, cursor::Hide)?;
             }
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             std::mem::swap(&mut self.current, &mut self.previous);
             return Ok(());
@@ -210,7 +216,7 @@ impl Compositor {
             } else {
                 queue!(stdout, cursor::Hide)?;
             }
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             std::mem::swap(&mut self.current, &mut self.previous);
             return Ok(());
@@ -228,7 +234,7 @@ impl Compositor {
             } else {
                 queue!(stdout, cursor::Hide)?;
             }
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             std::mem::swap(&mut self.current, &mut self.previous);
             return Ok(());
@@ -245,7 +251,7 @@ impl Compositor {
             } else {
                 queue!(stdout, cursor::Hide)?;
             }
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             std::mem::swap(&mut self.current, &mut self.previous);
             return Ok(());
@@ -263,7 +269,7 @@ impl Compositor {
             } else {
                 queue!(stdout, cursor::Hide)?;
             }
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             std::mem::swap(&mut self.current, &mut self.previous);
             return Ok(());
@@ -281,7 +287,7 @@ impl Compositor {
             } else {
                 queue!(stdout, cursor::Hide)?;
             }
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             std::mem::swap(&mut self.current, &mut self.previous);
             return Ok(());
@@ -299,7 +305,7 @@ impl Compositor {
             queue!(stdout, MoveTo(cx, cy))?;
             queue!(stdout, SetCursorStyle::BlinkingBar)?;
             queue!(stdout, cursor::Show)?;
-            stdout.flush()?;
+            end_frame(stdout)?;
 
             // Swap buffers
             std::mem::swap(&mut self.current, &mut self.previous);
@@ -355,7 +361,7 @@ impl Compositor {
             }
         }
 
-        stdout.flush()?;
+        end_frame(stdout)?;
 
         // Swap buffers
         std::mem::swap(&mut self.current, &mut self.previous);
@@ -458,4 +464,13 @@ impl Compositor {
         self.text_view
             .cursor_for_buffer(ctx, buffer, focused.rect, show_home)
     }
+}
+
+/// Close the synchronized-update frame opened at the top of
+/// [`Compositor::render`] and flush, so the terminal applies the whole frame
+/// atomically. Terminals without synchronized-update support ignore the
+/// escape sequences.
+fn end_frame(stdout: &mut impl Write) -> io::Result<()> {
+    queue!(stdout, terminal::EndSynchronizedUpdate)?;
+    stdout.flush()
 }

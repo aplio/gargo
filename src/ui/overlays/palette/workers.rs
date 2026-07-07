@@ -102,6 +102,7 @@ pub(super) fn find_global_search_matches(
         results.push(GlobalSearchResultEntry {
             rel_path: rel_path.to_string(),
             display_path: rel_path.to_string(),
+            origin_repo: None,
             line: line_idx,
             char_col,
             preview_lines: {
@@ -383,6 +384,7 @@ fn current_file_fzf_results(
         .map(|(_, path)| GlobalSearchResultEntry {
             rel_path: path.clone(),
             display_path: path.clone(),
+            origin_repo: None,
             line: 0,
             char_col: 0,
             preview_lines: vec![format!("[files] {path}")],
@@ -532,7 +534,8 @@ pub(super) fn global_search_worker(
                             let full_path = hit.repo_root.join(&hit.rel_path);
                             GlobalSearchResultEntry {
                                 rel_path: full_path.to_string_lossy().to_string(),
-                                display_path: hit.display_path.clone(),
+                                display_path: hit.rel_path.clone(),
+                                origin_repo: Some(repo.display_name.clone()),
                                 line: hit.line,
                                 char_col: hit.char_col,
                                 preview_lines: vec![

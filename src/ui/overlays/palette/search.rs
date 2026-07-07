@@ -1,5 +1,24 @@
 use super::*;
 
+/// Candidate-list label for a global search hit. Hits from other projects are
+/// prefixed with `[repo-name]` so it's clear which project they belong to.
+pub(super) fn search_result_label(entry: &GlobalSearchResultEntry) -> String {
+    let excerpt = entry
+        .preview_lines
+        .get(1)
+        .map(|s| {
+            s.split_once('|')
+                .map(|(_, right)| right)
+                .unwrap_or(s.as_str())
+        })
+        .unwrap_or("");
+    let location = format!("{}:{}", entry.display_path, entry.line + 1);
+    match &entry.origin_repo {
+        Some(repo) => format!("[{}] {} {}", repo, location, excerpt.trim()),
+        None => format!("{} {}", location, excerpt.trim()),
+    }
+}
+
 impl Palette {
     pub(super) fn restart_global_search_worker(&mut self) {
         if self.global_search_request_tx.is_none() {
@@ -83,28 +102,12 @@ impl Palette {
                 .global_search_entries
                 .iter()
                 .enumerate()
-                .map(|(i, entry)| {
-                    let excerpt = entry
-                        .preview_lines
-                        .get(1)
-                        .map(|s| {
-                            s.split_once('|')
-                                .map(|(_, right)| right)
-                                .unwrap_or(s.as_str())
-                        })
-                        .unwrap_or("");
-                    ScoredCandidate {
-                        kind: CandidateKind::SearchResult(i),
-                        label: format!(
-                            "{}:{} {}",
-                            entry.display_path,
-                            entry.line + 1,
-                            excerpt.trim()
-                        ),
-                        score: 0,
-                        match_positions: Vec::new(),
-                        preview_lines: entry.preview_lines.clone(),
-                    }
+                .map(|(i, entry)| ScoredCandidate {
+                    kind: CandidateKind::SearchResult(i),
+                    label: search_result_label(entry),
+                    score: 0,
+                    match_positions: Vec::new(),
+                    preview_lines: entry.preview_lines.clone(),
                 })
                 .collect();
 

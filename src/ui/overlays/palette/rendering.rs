@@ -118,6 +118,16 @@ impl Palette {
                         _ => None,
                     };
 
+                    // Hits from other projects render dimmed so they stand
+                    // apart from current-project results.
+                    let dim = match self.candidates[candidate_idx].kind {
+                        CandidateKind::SearchResult(idx) => self
+                            .global_search_entries
+                            .get(idx)
+                            .is_some_and(|entry| entry.origin_repo.is_some()),
+                        _ => false,
+                    };
+
                     render_candidate_label(
                         surface,
                         x + 1,
@@ -126,6 +136,7 @@ impl Palette {
                         inner_w,
                         is_selected,
                         status_color,
+                        dim,
                     );
                 } else {
                     surface.fill_region(x + 1, y + row, inner_w, ' ', &default_style);
@@ -331,6 +342,7 @@ pub(super) fn shorten_path(path: &str, max_width: usize) -> (String, usize, usiz
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render_candidate_label(
     surface: &mut Surface,
     x: usize,
@@ -339,33 +351,18 @@ pub(super) fn render_candidate_label(
     max_width: usize,
     is_selected: bool,
     status_color: Option<Color>,
+    dim: bool,
 ) {
-    let base_style = if is_selected {
-        CellStyle {
-            reverse: true,
-            fg: status_color,
-            ..CellStyle::default()
-        }
-    } else {
-        CellStyle {
-            fg: status_color,
-            ..CellStyle::default()
-        }
+    let base_style = CellStyle {
+        reverse: is_selected,
+        fg: status_color,
+        dim,
+        ..CellStyle::default()
     };
 
-    let bold_style = if is_selected {
-        CellStyle {
-            bold: true,
-            reverse: true,
-            fg: status_color,
-            ..CellStyle::default()
-        }
-    } else {
-        CellStyle {
-            bold: true,
-            fg: status_color,
-            ..CellStyle::default()
-        }
+    let bold_style = CellStyle {
+        bold: true,
+        ..base_style
     };
 
     // Write prefix space

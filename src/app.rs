@@ -3289,6 +3289,62 @@ mod tests {
     }
 
     #[test]
+    fn frame_tick_keeps_autoscrolling_while_drag_rests_on_top_row() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let mut app = test_app_with_text(&text);
+        app.last_term_cols = 80;
+        app.last_term_rows = 24;
+        app.editor.active_buffer_mut().scroll_offset = 50;
+
+        // Full input path, as App::run drives it: the compositor captures the
+        // gesture and emits actions, dispatch routes them to the handlers.
+        let down =
+            app.compositor
+                .handle_mouse(&mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
+        let EventResult::Action(action) = down else {
+            panic!("mouse down over a pane must emit BufferClick, got {down:?}");
+        };
+        app.dispatch_action(action);
+        let drag =
+            app.compositor
+                .handle_mouse(&mouse(MouseEventKind::Drag(MouseButton::Left), 10, 0));
+        let EventResult::Action(action) = drag else {
+            panic!("captured drag must emit BufferDrag, got {drag:?}");
+        };
+        app.dispatch_action(action);
+        assert_eq!(app.editor.active_buffer().scroll_offset, 49);
+
+        // No further mouse events: the per-frame tick must keep scrolling
+        // once the step interval elapses.
+        std::thread::sleep(Duration::from_millis(60));
+        app.tick_drag_autoscroll();
+        assert_eq!(
+            app.editor.active_buffer().scroll_offset,
+            48,
+            "frame tick must scroll while the drag rests on the top row"
+        );
+
+        // Releasing the button clears the compositor's capture; the next
+        // tick disarms without scrolling.
+        app.compositor
+            .handle_mouse(&mouse(MouseEventKind::Up(MouseButton::Left), 10, 0));
+        std::thread::sleep(Duration::from_millis(60));
+        app.tick_drag_autoscroll();
+        assert_eq!(app.editor.active_buffer().scroll_offset, 48);
+        assert!(app.drag_autoscroll.is_none());
+    }
+
+    #[test]
     fn drag_at_pane_edges_autoscrolls_selection() {
         let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
         let mut app = test_app_with_text(&text);

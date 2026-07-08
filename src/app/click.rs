@@ -11,6 +11,19 @@ use super::expand::{ExpandChain, expand_selection};
 
 const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
 const MULTI_CLICK_RADIUS_CHARS: usize = 1;
+/// Minimum delay between one-line auto-scroll steps while a drag selection
+/// holds the pointer on (or past) a pane's top/bottom row.
+const DRAG_AUTOSCROLL_STEP: Duration = Duration::from_millis(40);
+
+/// Edge auto-scroll state for an in-flight drag selection. Stores the last
+/// pointer position so the frame loop can replay the drag (scrolling one
+/// line per due step) without waiting for further mouse motion.
+pub(super) struct DragAutoscroll {
+    buffer: BufferId,
+    screen_col: u16,
+    screen_row: u16,
+    next_at: Instant,
+}
 
 /// Result of mapping a screen click to a document position.
 struct ClickTarget {
@@ -58,6 +71,7 @@ impl App {
         // clicks still record the line-start so dragging out into the content
         // extends from there.
         self.drag_anchor = Some((buffer_id, target.char_pos));
+        self.drag_autoscroll = None;
 
         let now = Instant::now();
         // Decide whether this click continues the current expand chain.
@@ -128,7 +142,9 @@ impl App {
 
     /// Extend selection from the drag anchor (seeded at mouse-down) to the
     /// current pointer position. No-op until a buffer click has seeded the
-    /// anchor.
+    /// anchor. The pointer is clamped into the pane, and resting it on (or
+    /// past) the pane's top/bottom row auto-scrolls the view one line per
+    /// due step so the selection can grow beyond the visible viewport.
     pub(super) fn handle_buffer_drag(
         &mut self,
         buffer_id: BufferId,
@@ -136,29 +152,75 @@ impl App {
         screen_row: u16,
     ) {
         let Some((anchor_buffer, anchor_pos)) = self.drag_anchor else {
+            self.drag_autoscroll = None;
             return;
         };
         if anchor_buffer != buffer_id {
+            self.drag_autoscroll = None;
             return;
         }
 
         let cols = self.last_term_cols;
         let rows = self.last_term_rows;
-        let Some(pane) = self.compositor.pane_at(screen_col, screen_row, cols, rows) else {
+        // Resolve the pane even when the pointer has left it, so dragging
+        // past a pane edge keeps extending the selection instead of stalling.
+        let Some(pane) = self
+            .compositor
+            .drag_pane_for_buffer(buffer_id, screen_col, screen_row, cols, rows)
+        else {
+            self.drag_autoscroll = None;
             return;
         };
-        if pane.buffer_id != buffer_id {
+        if self.editor.active_buffer().id != buffer_id && !self.editor.switch_to_buffer(buffer_id) {
+            self.drag_autoscroll = None;
             return;
         }
-        if self.editor.active_buffer().id != buffer_id && !self.editor.switch_to_buffer(buffer_id) {
-            return;
+
+        let top = pane.rect.y;
+        let bottom = pane.rect.y + pane.rect.height.saturating_sub(1);
+        let pointer_row = usize::from(screen_row);
+        let at_top = pointer_row <= top;
+        let at_bottom = pointer_row >= bottom;
+        let clamped_row = pointer_row.clamp(top, bottom) as u16;
+        let clamped_col = usize::from(screen_col)
+            .clamp(pane.rect.x, pane.rect.x + pane.rect.width.saturating_sub(1))
+            as u16;
+
+        if at_top || at_bottom {
+            let now = Instant::now();
+            let scroll_due = match &self.drag_autoscroll {
+                Some(auto) if auto.buffer == buffer_id => now >= auto.next_at,
+                _ => true,
+            };
+            let mut next_at = match &self.drag_autoscroll {
+                Some(auto) if auto.buffer == buffer_id => auto.next_at,
+                _ => now,
+            };
+            if scroll_due {
+                let view_height = pane.rect.height;
+                let doc = self.editor.active_buffer_mut();
+                if at_top {
+                    doc.scroll_offset = doc.scroll_offset.saturating_sub(1);
+                } else if doc.scroll_offset + view_height < doc.rope.len_lines() {
+                    doc.scroll_offset += 1;
+                }
+                next_at = now + DRAG_AUTOSCROLL_STEP;
+            }
+            self.drag_autoscroll = Some(DragAutoscroll {
+                buffer: buffer_id,
+                screen_col,
+                screen_row,
+                next_at,
+            });
+        } else {
+            self.drag_autoscroll = None;
         }
 
         let Some(target) = screen_to_doc_pos(
             self.editor.active_buffer(),
             pane.rect,
-            screen_col,
-            screen_row,
+            clamped_col,
+            clamped_row,
             self.config.show_line_number,
             self.config.line_number_width,
         ) else {
@@ -182,6 +244,26 @@ impl App {
             doc.selections[0] = Some(Selection::tail_on_forward(anchor_pos, head));
             set_cursor_to_pos(doc, head);
         }
+    }
+
+    /// Frame-loop step for drag-selection edge auto-scroll: while the button
+    /// is held with the pointer on (or past) a pane's top/bottom row, replay
+    /// the last drag position so the view keeps scrolling and the selection
+    /// keeps extending without further mouse motion. Disarms itself once the
+    /// gesture ends (mouse-up clears the compositor's drag capture).
+    pub(super) fn tick_drag_autoscroll(&mut self) {
+        let Some(auto) = &self.drag_autoscroll else {
+            return;
+        };
+        if self.compositor.text_drag_target() != Some(auto.buffer) {
+            self.drag_autoscroll = None;
+            return;
+        }
+        if Instant::now() < auto.next_at {
+            return;
+        }
+        let (buffer, col, row) = (auto.buffer, auto.screen_col, auto.screen_row);
+        self.handle_buffer_drag(buffer, col, row);
     }
 }
 

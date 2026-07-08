@@ -214,6 +214,10 @@ pub struct App {
     /// the left button goes down inside a buffer pane; consumed by
     /// `Action::BufferDrag` events until the button is released.
     drag_anchor: Option<(usize, usize)>,
+    /// Edge auto-scroll for an in-flight drag selection: while the pointer
+    /// rests on (or past) a pane's top/bottom row, the frame loop replays the
+    /// last drag position so the view keeps scrolling without mouse motion.
+    drag_autoscroll: Option<click::DragAutoscroll>,
     /// Background `git push` plumbing (lazygit-style, non-blocking): the worker
     /// thread sends its final status-bar message over `git_push_tx`, drained in
     /// `poll_git_push`. `git_push_in_flight` guards against overlapping pushes.
@@ -306,6 +310,7 @@ impl App {
             last_term_rows: 40,
             expand_chain: None,
             drag_anchor: None,
+            drag_autoscroll: None,
             git_push_tx,
             git_push_rx,
             git_push_in_flight: false,
@@ -1868,6 +1873,10 @@ impl App {
             // Flush any deferred highlight updates before rendering
             self.editor.update_highlights_if_dirty();
 
+            // Step drag-selection edge auto-scroll while the pointer rests on
+            // a pane's top/bottom row (no mouse events arrive without motion).
+            self.tick_drag_autoscroll();
+
             // Update find/replace popup preview if active
             if let Some(popup) = self.compositor.find_replace_popup_mut() {
                 let document_rope = &self.editor.active_buffer().rope;
@@ -3277,6 +3286,48 @@ mod tests {
         let editor = Editor::new();
         let app = App::new(editor, Config::default(), None);
         assert!(app.is_home_screen_active());
+    }
+
+    #[test]
+    fn drag_at_pane_edges_autoscrolls_selection() {
+        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let mut app = test_app_with_text(&text);
+        app.last_term_cols = 80;
+        app.last_term_rows = 24; // editor pane: rows 0..=21 (status/notification take 2)
+        let buffer_id = app.editor.active_buffer().id;
+        app.editor.active_buffer_mut().scroll_offset = 50;
+
+        // Mouse-down mid-pane seeds the drag anchor.
+        app.handle_buffer_click(buffer_id, 10, 10);
+        assert!(app.drag_anchor.is_some(), "click must seed the drag anchor");
+
+        // Dragging onto the pane's top row scrolls one line into the text
+        // above and moves the selection head to the newly revealed line.
+        app.handle_buffer_drag(buffer_id, 10, 0);
+        let doc = app.editor.active_buffer();
+        assert_eq!(doc.scroll_offset, 49, "top-edge drag must scroll up");
+        assert_eq!(doc.rope.char_to_line(doc.cursors[0]), 49);
+        assert!(doc.selections[0].is_some(), "drag must extend a selection");
+        assert!(
+            app.drag_autoscroll.is_some(),
+            "edge drag must arm auto-scroll"
+        );
+
+        // A second drag event before the step interval elapses is throttled.
+        app.handle_buffer_drag(buffer_id, 10, 0);
+        assert_eq!(app.editor.active_buffer().scroll_offset, 49);
+
+        // Dragging back inside the pane disarms auto-scroll.
+        app.handle_buffer_drag(buffer_id, 10, 10);
+        assert!(app.drag_autoscroll.is_none());
+
+        // Dragging past the pane's bottom edge scrolls down and pins the
+        // selection head on the bottom visible line.
+        app.handle_buffer_drag(buffer_id, 10, 30);
+        let doc = app.editor.active_buffer();
+        assert_eq!(doc.scroll_offset, 50, "bottom-edge drag must scroll down");
+        assert_eq!(doc.rope.char_to_line(doc.cursors[0]), 50 + 22 - 1);
+        assert!(app.drag_autoscroll.is_some());
     }
 
     #[test]

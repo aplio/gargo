@@ -207,6 +207,18 @@ pub fn git_branch_diff_files_in(
     Ok(diff_file_entries(&diff))
 }
 
+/// First line (0-based, HEAD side) touched by the `base_branch...HEAD` diff
+/// for `path`. `None` when the file has no textual hunks (binary, unchanged,
+/// or the diff is unavailable).
+pub fn git_branch_compare_first_diff_line_in(
+    project_root: &Path,
+    base_branch: &str,
+    path: &str,
+) -> Option<usize> {
+    let diff = git_backend::compare_diff_text(project_root, base_branch, "HEAD", Some(path))?;
+    parse_diff_hunks(&diff).into_keys().min()
+}
+
 pub fn git_local_branches_in(project_root: &Path) -> Result<Vec<(String, bool)>, String> {
     git_backend::list_local_branches(project_root)
         .ok_or_else(|| "git error: failed to list branches".to_string())
@@ -919,6 +931,37 @@ mod tests {
         assert_eq!(
             remote_to_github_url("  git@github.com:user/repo.git\n"),
             Some("https://github.com/user/repo".into())
+        );
+    }
+
+    #[test]
+    fn branch_compare_first_diff_line_points_at_first_hunk() {
+        let temp = setup_repo();
+        let repo = temp.path();
+        let base_content: String = (1..=40).map(|i| format!("line{}\n", i)).collect();
+        fs::write(repo.join("file.txt"), &base_content).expect("write base file");
+        run_git(repo, &["add", "."]);
+        run_git(repo, &["commit", "-m", "base"]);
+        run_git(repo, &["branch", "base"]);
+
+        let modified = base_content.replace("line30\n", "line30 changed\n");
+        fs::write(repo.join("file.txt"), &modified).expect("write modified file");
+        run_git(repo, &["add", "."]);
+        run_git(repo, &["commit", "-m", "change line 30"]);
+
+        let first = git_branch_compare_first_diff_line_in(repo, "base", "file.txt")
+            .expect("expected a diff line");
+        // The hunk around line 30 (1-based) starts at the context line a few
+        // lines above; it must land near the change, not at the file top.
+        assert!(
+            (26..=29).contains(&first),
+            "first diff line should be near line 30, got {}",
+            first
+        );
+
+        assert_eq!(
+            git_branch_compare_first_diff_line_in(repo, "base", "missing.txt"),
+            None
         );
     }
 

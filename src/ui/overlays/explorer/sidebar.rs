@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
 use crate::command::git::{GitFileEntry, GitFileStatus, dir_git_status};
 use crate::input::action::{Action, AppAction, BufferAction, IntegrationAction, WorkspaceAction};
@@ -26,6 +26,8 @@ use crate::ui::views::text_view::render_highlighted_line_windowed;
 
 const PREVIEW_MAX_LINES: usize = 500;
 const PREVIEW_HSCROLL_STEP: usize = 8;
+/// Lines scrolled per mouse-wheel tick over the preview pane.
+const MOUSE_SCROLL_LINES: usize = 3;
 /// How many entries above/below the selection get their previews prefetched
 /// so consecutive j/k moves hit the cache instead of waiting on the worker.
 const PREVIEW_PREFETCH_BEHIND: usize = 5;
@@ -129,6 +131,13 @@ pub struct Explorer {
     preview_kind: PreviewKind,
     preview_scroll: usize,
     preview_horizontal_scroll: usize,
+    /// Pending scroll target (0-based preview line): once the async preview
+    /// content arrives, the render centers this line. Seeded in
+    /// branch-compare mode with the first changed line of the selected file.
+    preview_target_line: Option<usize>,
+    /// Cache of the first changed line per branch-compare file, so moving
+    /// the selection doesn't recompute single-file diffs.
+    branch_diff_first_line_cache: HashMap<String, Option<usize>>,
     preview_image: Option<(PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>)>,
     preview_image_cache: HashMap<PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>>,
     pending_image_request: Option<crate::ui::image::ImageRenderRequest>,
@@ -192,6 +201,8 @@ impl Explorer {
             preview_kind: PreviewKind::None,
             preview_scroll: 0,
             preview_horizontal_scroll: 0,
+            preview_target_line: None,
+            branch_diff_first_line_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
@@ -241,6 +252,8 @@ impl Explorer {
             preview_kind: PreviewKind::None,
             preview_scroll: 0,
             preview_horizontal_scroll: 0,
+            preview_target_line: None,
+            branch_diff_first_line_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
@@ -281,6 +294,7 @@ impl Explorer {
         if files == self.branch_compare_files {
             return;
         }
+        self.branch_diff_first_line_cache.clear();
         let selected_name = self.selected_name().map(|s| s.to_string());
         let scroll_offset = self.scroll_offset;
         self.branch_compare_files = files;
@@ -320,6 +334,7 @@ impl Explorer {
         self.preview_kind = PreviewKind::None;
         self.preview_scroll = 0;
         self.preview_horizontal_scroll = 0;
+        self.preview_target_line = None;
         self.preview_image = None;
         self.preview_pending = None;
     }
@@ -383,7 +398,9 @@ impl Explorer {
             self.preview_image = None;
             return;
         }
-        let path = self.current_dir.join(&entry.name);
+        let entry_name = entry.name.clone();
+        let entry_is_dir = entry.is_dir;
+        let path = self.current_dir.join(&entry_name);
         if self.preview_path.as_ref() == Some(&path) {
             return;
         }
@@ -392,8 +409,13 @@ impl Explorer {
         self.preview_horizontal_scroll = 0;
         self.preview_spans.clear();
         self.preview_image = None;
+        self.preview_target_line = if entry_is_dir {
+            None
+        } else {
+            self.branch_compare_first_diff_line(&entry_name)
+        };
 
-        if entry.is_dir {
+        if entry_is_dir {
             self.preview_lines = build_dir_listing(&path);
             self.preview_kind = PreviewKind::Dir;
         } else if self.try_load_preview_image(&path) {
@@ -403,6 +425,49 @@ impl Explorer {
             self.preview_kind = PreviewKind::File;
         }
         self.preview_path = Some(path);
+    }
+
+    /// First changed line (0-based) of `rel_path` against the compare base,
+    /// cached per path. `None` outside branch-compare mode or when the file
+    /// has no textual hunks (binary, unchanged).
+    fn branch_compare_first_diff_line(&mut self, rel_path: &str) -> Option<usize> {
+        if self.mode != ExplorerMode::BranchCompare {
+            return None;
+        }
+        let base = self.branch_compare_base.clone()?;
+        if let Some(cached) = self.branch_diff_first_line_cache.get(rel_path) {
+            return *cached;
+        }
+        let line = crate::command::git::git_branch_compare_first_diff_line_in(
+            &self.project_root,
+            &base,
+            rel_path,
+        );
+        self.branch_diff_first_line_cache
+            .insert(rel_path.to_string(), line);
+        line
+    }
+
+    /// Scroll the preview pane in response to a mouse-wheel event over the
+    /// editor area. Returns `Ignored` when preview mode is off so the wheel
+    /// falls through to the default buffer scroll.
+    pub fn handle_preview_mouse_scroll(&mut self, kind: MouseEventKind) -> EventResult {
+        if !self.preview_mode {
+            return EventResult::Ignored;
+        }
+        match kind {
+            MouseEventKind::ScrollDown => {
+                self.preview_target_line = None;
+                self.preview_scroll = self.preview_scroll.saturating_add(MOUSE_SCROLL_LINES);
+                EventResult::Consumed
+            }
+            MouseEventKind::ScrollUp => {
+                self.preview_target_line = None;
+                self.preview_scroll = self.preview_scroll.saturating_sub(MOUSE_SCROLL_LINES);
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
     }
 
     /// Show the preview for `path` without blocking the UI thread: serve
@@ -571,6 +636,17 @@ impl Explorer {
                 data,
             });
             return;
+        }
+
+        // Once the async preview content has arrived, jump to the pending
+        // target line (branch-compare seeds it with the first changed line)
+        // so the diff is visible without manual scrolling.
+        if let Some(target) = self.preview_target_line
+            && self.preview_pending.is_none()
+            && !self.preview_lines.is_empty()
+        {
+            self.preview_scroll = target.saturating_sub(body_h / 3);
+            self.preview_target_line = None;
         }
 
         // Clamp vertical scroll.
@@ -856,10 +932,12 @@ impl Explorer {
         if self.preview_mode && key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Char('J') | KeyCode::Down => {
+                    self.preview_target_line = None;
                     self.preview_scroll = self.preview_scroll.saturating_add(1);
                     return EventResult::Consumed;
                 }
                 KeyCode::Char('K') | KeyCode::Up => {
+                    self.preview_target_line = None;
                     self.preview_scroll = self.preview_scroll.saturating_sub(1);
                     return EventResult::Consumed;
                 }
@@ -1970,6 +2048,103 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         panic!("preview result did not arrive in time");
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    #[test]
+    fn branch_compare_preview_scrolls_to_first_diff_line() {
+        let dir = setup("branch_diff_scroll");
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.name", "gargo-test"]);
+        run_git(&dir, &["config", "user.email", "gargo-test@example.com"]);
+        let base: String = (1..=120).map(|i| format!("line{}\n", i)).collect();
+        fs::write(dir.join("file.txt"), &base).unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "base"]);
+        run_git(&dir, &["branch", "base"]);
+        let modified = base.replace("line80\n", "line80 changed\n");
+        fs::write(dir.join("file.txt"), &modified).unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "change line 80"]);
+
+        let files = vec![GitFileEntry {
+            path: "file.txt".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 1,
+            deletions: 1,
+        }];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
+        explorer.select_by_name("file.txt");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+
+        let target = explorer
+            .preview_target_line
+            .expect("branch-compare preview should seed a diff target line");
+        // The hunk around line 80 (1-based) starts a few context lines above.
+        assert!(
+            (73..=79).contains(&target),
+            "target should be near line 80, got {}",
+            target
+        );
+
+        let theme = Theme::dark();
+        let mut surface = Surface::new(60, 22);
+        explorer.render_preview(&mut surface, 0, 0, 60, 22, &theme);
+
+        let body_h = 21; // height minus the title row
+        assert_eq!(explorer.preview_scroll, target - body_h / 3);
+        assert_eq!(explorer.preview_target_line, None);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn preview_mouse_scroll_requires_preview_mode() {
+        let dir = setup("preview_mouse_scroll");
+        let mut explorer = Explorer::new(dir.clone(), &dir, &HashMap::new());
+
+        assert!(matches!(
+            explorer.handle_preview_mouse_scroll(MouseEventKind::ScrollDown),
+            EventResult::Ignored
+        ));
+
+        explorer.select_by_name("bbb.txt");
+        explorer.set_preview_mode(true);
+        assert!(matches!(
+            explorer.handle_preview_mouse_scroll(MouseEventKind::ScrollDown),
+            EventResult::Consumed
+        ));
+        assert_eq!(explorer.preview_scroll, MOUSE_SCROLL_LINES);
+        assert!(matches!(
+            explorer.handle_preview_mouse_scroll(MouseEventKind::ScrollUp),
+            EventResult::Consumed
+        ));
+        assert_eq!(explorer.preview_scroll, 0);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn preview_mouse_scroll_cancels_pending_diff_target() {
+        let dir = setup("preview_scroll_cancels_target");
+        let mut explorer = Explorer::new(dir.clone(), &dir, &HashMap::new());
+        explorer.set_preview_mode(true);
+        explorer.preview_target_line = Some(42);
+
+        explorer.handle_preview_mouse_scroll(MouseEventKind::ScrollDown);
+
+        assert_eq!(explorer.preview_target_line, None);
+        cleanup(&dir);
     }
 
     #[test]

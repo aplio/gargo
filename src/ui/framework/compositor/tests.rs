@@ -149,6 +149,40 @@ fn mouse_scroll_consumed_by_issue_overlay() {
 }
 
 #[test]
+fn mouse_scroll_over_editor_area_scrolls_sidebar_preview() {
+    let dir = setup_dir("preview_scroll");
+    let mut comp = Compositor::new();
+    let mut explorer =
+        crate::ui::overlays::explorer::sidebar::Explorer::new(dir.clone(), &dir, &HashMap::new());
+    explorer.set_preview_mode(true);
+    comp.open_explorer(explorer);
+
+    // Fresh compositor falls back to an 80x24 event surface: sidebar covers
+    // cols 0..30, the preview (editor area) starts at col 31.
+    let over_preview = comp.handle_mouse(&mouse_at(MouseEventKind::ScrollDown, 40, 5));
+    assert!(matches!(over_preview, EventResult::Consumed));
+
+    let over_sidebar = comp.handle_mouse(&mouse_at(MouseEventKind::ScrollDown, 10, 5));
+    assert!(matches!(over_sidebar, EventResult::Ignored));
+
+    cleanup(&dir);
+}
+
+#[test]
+fn mouse_scroll_over_editor_area_ignored_without_preview_mode() {
+    let dir = setup_dir("no_preview_scroll");
+    let mut comp = Compositor::new();
+    let explorer =
+        crate::ui::overlays::explorer::sidebar::Explorer::new(dir.clone(), &dir, &HashMap::new());
+    comp.open_explorer(explorer);
+
+    let result = comp.handle_mouse(&mouse_at(MouseEventKind::ScrollDown, 40, 5));
+    assert!(matches!(result, EventResult::Ignored));
+
+    cleanup(&dir);
+}
+
+#[test]
 fn mouse_drag_vertical_divider_resizes_windows() {
     let mut comp = Compositor::new();
     comp.window_manager.split_focused(SplitAxis::Vertical, 2);

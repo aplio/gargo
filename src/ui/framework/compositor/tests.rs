@@ -722,3 +722,41 @@ fn same_size_render_does_not_emit_clear() {
         "Same-size render must NOT emit clear-screen escape sequence",
     );
 }
+
+#[test]
+fn ctrl_click_in_pane_emits_buffer_open_click() {
+    let mut comp = Compositor::new();
+    comp.window_manager.split_focused(SplitAxis::Vertical, 2);
+
+    let layout = comp.window_layout_for_event_dims(80, 24).expect("layout");
+    let left = layout
+        .panes
+        .iter()
+        .find(|pane| pane.rect.x == 0)
+        .expect("left pane");
+    let col = left.rect.x as u16;
+    let row = left.rect.y as u16;
+
+    let down = comp.handle_mouse(&MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: col,
+        row,
+        modifiers: KeyModifiers::CONTROL,
+    });
+    assert!(matches!(
+        down,
+        EventResult::Action(crate::input::action::Action::BufferOpenClick { .. })
+    ));
+
+    // An open-click must not arm a drag selection: the following drag is not
+    // a BufferDrag.
+    let drag = comp.handle_mouse(&mouse_at(
+        MouseEventKind::Drag(MouseButton::Left),
+        col.saturating_add(2),
+        row,
+    ));
+    assert!(!matches!(
+        drag,
+        EventResult::Action(crate::input::action::Action::BufferDrag { .. })
+    ));
+}

@@ -34,8 +34,8 @@ fn main() {
         }
         gargo::cli::CliMode::Server => {
             let config = Config::load();
-            let start = cli.path.as_deref();
-            let repo_root = gargo::project::find_project_root(start);
+            let start = cli.open_path();
+            let repo_root = gargo::project::find_project_root(start.as_deref());
             // CLI `--host` overrides the configured host.
             let host = cli
                 .host
@@ -51,14 +51,17 @@ fn main() {
     }
 
     let config = Config::load();
-    let path_arg = cli.path.as_ref().and_then(|p| p.to_str());
+    let open_path = cli.open_path();
+    let path_arg = open_path.as_ref().and_then(|p| p.to_str());
 
+    let mut opened_file = false;
     let editor = match path_arg {
         Some(path) => {
             let p = std::path::Path::new(path);
             if p.is_dir() {
                 Editor::new()
             } else {
+                opened_file = true;
                 Editor::open(path)
             }
         }
@@ -67,6 +70,9 @@ fn main() {
 
     let start_path = path_arg.map(std::path::Path::new);
     let mut app = gargo::app::App::new(editor, config, start_path);
+    if opened_file && let Some(line) = cli.open_line() {
+        app.jump_active_buffer_to_line(line.saturating_sub(1));
+    }
     let mut stdout = gargo::terminal::setup();
     let result = app.run(&mut stdout);
     gargo::terminal::teardown(stdout);

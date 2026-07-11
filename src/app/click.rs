@@ -26,12 +26,12 @@ pub(super) struct DragAutoscroll {
 }
 
 /// Result of mapping a screen click to a document position.
-struct ClickTarget {
-    line: usize,
-    char_pos: usize,
+pub(super) struct ClickTarget {
+    pub(super) line: usize,
+    pub(super) char_pos: usize,
     /// True when the click landed in the gutter; cursor goes to column 0,
     /// no escalation occurs.
-    on_gutter: bool,
+    pub(super) on_gutter: bool,
 }
 
 impl App {
@@ -277,7 +277,7 @@ fn set_cursor_to_pos(doc: &mut Document, pos: usize) {
 /// Inverse of `text_view::cursor_for_buffer`. Maps a terminal cell at
 /// `(screen_col, screen_row)` inside `pane` to a document `(line, char_pos)`.
 /// Returns None if the click is outside the pane.
-fn screen_to_doc_pos(
+pub(super) fn screen_to_doc_pos(
     doc: &Document,
     pane: PaneRect,
     screen_col: u16,

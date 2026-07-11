@@ -344,6 +344,19 @@ impl Compositor {
                 });
                 match pane {
                     Some(pane) => {
+                        // Ctrl+click opens the path or URL under the cursor
+                        // (ghostty-style cmd+click) instead of moving the
+                        // cursor or starting a drag selection.
+                        if mouse
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                        {
+                            return EventResult::Action(Action::BufferOpenClick {
+                                buffer_id: pane.buffer_id,
+                                screen_col: mouse.column,
+                                screen_row: mouse.row,
+                            });
+                        }
                         self.text_drag = Some(pane.buffer_id);
                         EventResult::Action(Action::BufferClick {
                             buffer_id: pane.buffer_id,

@@ -73,6 +73,8 @@ mod dispatch_core;
 mod event_loop;
 #[path = "app/expand.rs"]
 mod expand;
+#[path = "app/open_click.rs"]
+mod open_click;
 
 const DIRTY_CLOSE_WARNING: &str = "buffer is dirty. ctrl c to force close.";
 const CLOSE_ABORTED_MESSAGE: &str = "Close aborted";
@@ -324,6 +326,14 @@ impl App {
         app.queue_git_status_refresh(true);
         app.queue_active_doc_git_refresh(true);
         app
+    }
+
+    /// Move the active buffer's cursor to `line` (0-based); startup jump for
+    /// the CLI's vi-style `+N` argument.
+    pub fn jump_active_buffer_to_line(&mut self, line: usize) {
+        self.editor
+            .active_buffer_mut()
+            .set_cursor_line_char(line, 0);
     }
 
     fn count_behavior(action: &CoreAction) -> Option<CountBehavior> {
@@ -2106,6 +2116,14 @@ impl App {
                 screen_row,
             } => {
                 self.handle_buffer_click(buffer_id, screen_col, screen_row);
+                false
+            }
+            Action::BufferOpenClick {
+                buffer_id,
+                screen_col,
+                screen_row,
+            } => {
+                self.handle_buffer_open_click(buffer_id, screen_col, screen_row);
                 false
             }
             Action::BufferDrag {

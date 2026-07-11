@@ -6,10 +6,12 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::style::Color;
 
 use crate::command::git::{GitFileEntry, GitFileStatus, GitLineStatus, dir_git_status};
 use crate::input::action::{Action, AppAction, BufferAction, IntegrationAction, WorkspaceAction};
 use crate::input::chord::KeyState;
+use crate::split_render::{SplitCell, SplitKind, SplitRow};
 use crate::syntax::highlight::{HighlightSpan, highlight_text};
 use crate::syntax::language::LanguageRegistry;
 use crate::syntax::theme::Theme;
@@ -141,6 +143,14 @@ pub struct Explorer {
     /// Cache of per-line diff statuses per branch-compare file, so moving
     /// the selection doesn't recompute single-file diffs.
     branch_diff_gutter_cache: HashMap<String, HashMap<usize, GitLineStatus>>,
+    /// When true, branch-compare file previews render side-by-side
+    /// (base version left, worktree right) instead of inline with a gutter.
+    preview_split: bool,
+    /// Aligned split rows of the previewed branch-compare file; empty when
+    /// split mode is off or rows are unavailable (binary, missing file).
+    preview_split_rows: Vec<SplitRow>,
+    /// Cache of split rows per branch-compare file (`None` = unavailable).
+    branch_diff_split_cache: HashMap<String, Option<Vec<SplitRow>>>,
     preview_image: Option<(PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>)>,
     preview_image_cache: HashMap<PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>>,
     pending_image_request: Option<crate::ui::image::ImageRenderRequest>,
@@ -207,6 +217,9 @@ impl Explorer {
             preview_target_line: None,
             preview_gutter: HashMap::new(),
             branch_diff_gutter_cache: HashMap::new(),
+            preview_split: false,
+            preview_split_rows: Vec::new(),
+            branch_diff_split_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
@@ -259,6 +272,9 @@ impl Explorer {
             preview_target_line: None,
             preview_gutter: HashMap::new(),
             branch_diff_gutter_cache: HashMap::new(),
+            preview_split: false,
+            preview_split_rows: Vec::new(),
+            branch_diff_split_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
@@ -300,6 +316,7 @@ impl Explorer {
             return;
         }
         self.branch_diff_gutter_cache.clear();
+        self.branch_diff_split_cache.clear();
         let selected_name = self.selected_name().map(|s| s.to_string());
         let scroll_offset = self.scroll_offset;
         self.branch_compare_files = files;
@@ -341,6 +358,7 @@ impl Explorer {
         self.preview_horizontal_scroll = 0;
         self.preview_target_line = None;
         self.preview_gutter.clear();
+        self.preview_split_rows.clear();
         self.preview_image = None;
         self.preview_pending = None;
     }
@@ -422,7 +440,16 @@ impl Explorer {
         } else {
             self.branch_compare_gutter(&entry_name)
         };
-        self.preview_target_line = self.preview_gutter.keys().min().copied();
+        self.preview_split_rows = if entry_is_dir || !self.preview_split {
+            Vec::new()
+        } else {
+            self.branch_compare_split_rows(&entry_name)
+        };
+        self.preview_target_line = if self.preview_split_rows.is_empty() {
+            self.preview_gutter.keys().min().copied()
+        } else {
+            first_changed_split_row(&self.preview_split_rows)
+        };
 
         if entry_is_dir {
             self.preview_lines = build_dir_listing(&path);
@@ -457,6 +484,72 @@ impl Explorer {
         self.branch_diff_gutter_cache
             .insert(rel_path.to_string(), gutter.clone());
         gutter
+    }
+
+    /// Cached split rows of `rel_path` against the compare base. Empty when
+    /// unavailable (outside branch-compare mode, binary, missing file).
+    fn branch_compare_split_rows(&mut self, rel_path: &str) -> Vec<SplitRow> {
+        if self.mode != ExplorerMode::BranchCompare {
+            return Vec::new();
+        }
+        let Some(base) = self.branch_compare_base.clone() else {
+            return Vec::new();
+        };
+        if let Some(cached) = self.branch_diff_split_cache.get(rel_path) {
+            return cached.clone().unwrap_or_default();
+        }
+        let rows = crate::command::git::git_branch_compare_split_rows_in(
+            &self.project_root,
+            &base,
+            rel_path,
+        );
+        self.branch_diff_split_cache
+            .insert(rel_path.to_string(), rows.clone());
+        rows.unwrap_or_default()
+    }
+
+    /// Turn the split (side-by-side) branch-compare preview on or off and
+    /// refresh the current preview accordingly.
+    pub fn set_preview_split(&mut self, on: bool) {
+        if self.preview_split == on {
+            return;
+        }
+        self.preview_split = on;
+        if self.mode != ExplorerMode::BranchCompare {
+            return;
+        }
+        // Recompute the current preview state under the new mode: scroll
+        // domains differ (file lines vs aligned rows), so re-seed the first
+        // diff target rather than keeping a stale offset.
+        let rel_path = self
+            .preview_path
+            .as_ref()
+            .filter(|_| self.preview_kind == PreviewKind::File)
+            .and_then(|p| p.strip_prefix(&self.current_dir).ok())
+            .map(|p| p.to_string_lossy().to_string());
+        let Some(rel_path) = rel_path else {
+            return;
+        };
+        self.preview_split_rows = if on {
+            self.branch_compare_split_rows(&rel_path)
+        } else {
+            Vec::new()
+        };
+        self.preview_scroll = 0;
+        self.preview_horizontal_scroll = 0;
+        self.preview_target_line = if self.preview_split_rows.is_empty() {
+            self.preview_gutter.keys().min().copied()
+        } else {
+            first_changed_split_row(&self.preview_split_rows)
+        };
+    }
+
+    pub fn toggle_preview_split(&mut self) {
+        self.set_preview_split(!self.preview_split);
+    }
+
+    pub fn preview_split_enabled(&self) -> bool {
+        self.preview_split
     }
 
     /// Scroll the preview pane in response to a mouse-wheel event over the
@@ -608,11 +701,21 @@ impl Explorer {
             ..CellStyle::default()
         };
 
+        let split_active = self.preview_split
+            && self.mode == ExplorerMode::BranchCompare
+            && self.preview_kind == PreviewKind::File
+            && !self.preview_split_rows.is_empty();
+
         // Title row.
         let title = match (&self.preview_kind, self.preview_path.as_ref()) {
             (PreviewKind::File, Some(p)) => {
                 let rel = p.strip_prefix(&self.project_root).unwrap_or(p);
-                format!("PREVIEW: {}", rel.to_string_lossy())
+                let label = if split_active {
+                    "PREVIEW[split]"
+                } else {
+                    "PREVIEW"
+                };
+                format!("{}: {}", label, rel.to_string_lossy())
             }
             (PreviewKind::Dir, Some(p)) => {
                 let rel = p.strip_prefix(&self.project_root).unwrap_or(p);
@@ -646,6 +749,13 @@ impl Explorer {
                 cell_rows,
                 data,
             });
+            return;
+        }
+
+        // Side-by-side branch-compare preview: aligned base/worktree rows
+        // replace the inline file body entirely.
+        if split_active {
+            self.render_preview_split(surface, x, body_y, width, body_h, theme);
             return;
         }
 
@@ -735,6 +845,66 @@ impl Explorer {
             } else {
                 surface.fill_region(x, screen_row, width, ' ', &default_style);
             }
+        }
+    }
+
+    /// Render the aligned split rows: base version left, worktree right,
+    /// separated by a dim divider column. Removed/changed lines color the
+    /// left side, added/changed lines the right, GitHub-PR style.
+    fn render_preview_split(
+        &mut self,
+        surface: &mut Surface,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        theme: &Theme,
+    ) {
+        let dim_style = CellStyle {
+            dim: true,
+            ..CellStyle::default()
+        };
+
+        // Jump to the pending first-diff target; rows are available
+        // synchronously so there is nothing to wait for.
+        if let Some(target) = self.preview_target_line.take() {
+            self.preview_scroll = target.saturating_sub(height / 3);
+        }
+        let max_vscroll = self.preview_split_rows.len().saturating_sub(height);
+        if self.preview_scroll > max_vscroll {
+            self.preview_scroll = max_vscroll;
+        }
+
+        let left_w = width.saturating_sub(1) / 2;
+        let divider_x = x + left_w;
+        let right_x = divider_x + 1;
+        let right_w = (x + width).saturating_sub(right_x);
+
+        for row in 0..height {
+            let idx = self.preview_scroll + row;
+            let screen_row = y + row;
+            let split_row = self.preview_split_rows.get(idx);
+            put_split_cell(
+                surface,
+                x,
+                screen_row,
+                left_w,
+                split_row.and_then(|r| r.left.as_ref()),
+                true,
+                self.preview_horizontal_scroll,
+                theme,
+            );
+            surface.put_str(divider_x, screen_row, "\u{2502}", &dim_style);
+            put_split_cell(
+                surface,
+                right_x,
+                screen_row,
+                right_w,
+                split_row.and_then(|r| r.right.as_ref()),
+                false,
+                self.preview_horizontal_scroll,
+                theme,
+            );
         }
     }
 
@@ -1037,6 +1207,10 @@ impl Explorer {
             KeyCode::Char('d') => self.start_delete_confirm(),
             KeyCode::Char('p') => {
                 self.set_preview_mode(!self.preview_mode);
+                EventResult::Consumed
+            }
+            KeyCode::Char('s') if self.mode == ExplorerMode::BranchCompare => {
+                self.toggle_preview_split();
                 EventResult::Consumed
             }
             KeyCode::Esc => EventResult::Action(Action::App(AppAction::Workspace(
@@ -1998,6 +2172,74 @@ fn format_mtime(t: SystemTime) -> String {
 /// `GitFileStatus` enum used by the sidebar's display layer. Anything we
 /// don't recognise falls back to `Modified` (the explorer's most common
 /// rendering style).
+/// Index of the first split row that contains a non-context cell.
+fn first_changed_split_row(rows: &[SplitRow]) -> Option<usize> {
+    rows.iter().position(|row| {
+        let changed =
+            |cell: &Option<SplitCell>| cell.as_ref().is_some_and(|c| c.kind != SplitKind::Context);
+        changed(&row.left) || changed(&row.right)
+    })
+}
+
+/// Style for one side of a split row: removed/changed content is tinted on
+/// the left (base) side, added/changed content on the right (worktree) side.
+fn split_cell_style(kind: SplitKind, is_left: bool, theme: &Theme) -> CellStyle {
+    let capture = match kind {
+        SplitKind::Context => return CellStyle::default(),
+        SplitKind::Remove => "diff.minus",
+        SplitKind::Add => "diff.plus",
+        SplitKind::Change => {
+            if is_left {
+                "diff.minus"
+            } else {
+                "diff.plus"
+            }
+        }
+    };
+    let fallback = if capture == "diff.plus" {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    let fg = theme
+        .style_for_capture(capture)
+        .and_then(|style| style.fg)
+        .or(Some(fallback));
+    CellStyle {
+        fg,
+        ..CellStyle::default()
+    }
+}
+
+/// Draw one side of a split row; a missing side (one-sided add/remove)
+/// renders as a blank filler.
+#[allow(clippy::too_many_arguments)]
+fn put_split_cell(
+    surface: &mut Surface,
+    x: usize,
+    y: usize,
+    width: usize,
+    cell: Option<&SplitCell>,
+    is_left: bool,
+    horizontal_scroll: usize,
+    theme: &Theme,
+) {
+    if width == 0 {
+        return;
+    }
+    let Some(cell) = cell else {
+        surface.fill_region(x, y, width, ' ', &CellStyle::default());
+        return;
+    };
+    let style = split_cell_style(cell.kind, is_left, theme);
+    let window = slice_display_window(&cell.content, horizontal_scroll, width);
+    surface.put_str(x, y, window.visible, &style);
+    let pad = width.saturating_sub(window.used_width);
+    if pad > 0 {
+        surface.fill_region(x + window.used_width, y, pad, ' ', &style);
+    }
+}
+
 fn branch_diff_status_char_to_file_status(status_char: char) -> GitFileStatus {
     match status_char.to_ascii_uppercase() {
         'A' => GitFileStatus::Added,
@@ -2185,6 +2427,84 @@ mod tests {
         assert_eq!(surface.get(0, 6).symbol, "▍"); // line6: added
         // Text shifts right past the 2-cell gutter lane.
         assert_eq!(surface.get(2, 1).symbol, "l");
+
+        cleanup(&dir);
+    }
+
+    fn surface_row_text(surface: &Surface, y: usize, width: usize) -> String {
+        (0..width)
+            .map(|x| surface.get(x, y).symbol.clone())
+            .collect()
+    }
+
+    #[test]
+    fn branch_compare_preview_split_renders_side_by_side() {
+        let dir = setup("branch_diff_split");
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.name", "gargo-test"]);
+        run_git(&dir, &["config", "user.email", "gargo-test@example.com"]);
+        fs::write(dir.join("file.txt"), "one\nold-two\nthree\n").unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "base"]);
+        run_git(&dir, &["branch", "base"]);
+        fs::write(dir.join("file.txt"), "one\nnew-two\nthree\n").unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "change line 2"]);
+
+        let files = vec![GitFileEntry {
+            path: "file.txt".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 1,
+            deletions: 1,
+        }];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
+        explorer.select_by_name("file.txt");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+
+        // The `s` key toggles split mode in branch-compare sidebars.
+        let result = explorer.handle_key(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            &KeyState::Normal,
+        );
+        assert!(matches!(result, EventResult::Consumed));
+        assert!(explorer.preview_split_enabled());
+        assert_eq!(explorer.preview_split_rows.len(), 3);
+
+        let theme = Theme::dark();
+        let width = 61;
+        let mut surface = Surface::new(width, 10);
+        explorer.render_preview(&mut surface, 0, 0, width, 10, &theme);
+
+        let title = surface_row_text(&surface, 0, width);
+        assert!(title.contains("PREVIEW[split]"), "title: {title:?}");
+
+        // Row 2 (file line 2) shows the base version left of the divider and
+        // the worktree version right of it.
+        let changed_row = surface_row_text(&surface, 2, width);
+        let divider = changed_row.find('│').expect("divider column");
+        assert!(
+            changed_row[..divider].contains("old-two"),
+            "{changed_row:?}"
+        );
+        assert!(
+            changed_row[divider..].contains("new-two"),
+            "{changed_row:?}"
+        );
+        // Context rows show the same text on both sides.
+        let context_row = surface_row_text(&surface, 1, width);
+        assert_eq!(context_row.matches("one").count(), 2, "{context_row:?}");
+
+        // Toggling off restores the inline preview with the gutter lane.
+        explorer.toggle_preview_split();
+        assert!(!explorer.preview_split_enabled());
+        let mut surface = Surface::new(width, 10);
+        explorer.render_preview(&mut surface, 0, 0, width, 10, &theme);
+        assert_eq!(surface.get(0, 2).symbol, "▍");
+        let inline_row = surface_row_text(&surface, 2, width);
+        assert!(inline_row.contains("new-two"), "{inline_row:?}");
+        assert!(!inline_row.contains("old-two"), "{inline_row:?}");
 
         cleanup(&dir);
     }

@@ -727,9 +727,29 @@ impl App {
                         explorer
                     }
                 };
+                explorer.set_preview_split(self.config.ui.branch_compare_split_preview);
                 explorer.set_preview_mode(true);
                 self.compositor.open_explorer(explorer);
                 self.last_used_sidebar = Some(LastUsedSidebar::BranchCompare);
+            }
+            AppAction::Workspace(WorkspaceAction::ToggleBranchCompareSplitPreview) => {
+                match self.compositor.explorer_mut() {
+                    Some(explorer) if explorer.is_branch_compare() => {
+                        explorer.toggle_preview_split();
+                        let state = if explorer.preview_split_enabled() {
+                            "on"
+                        } else {
+                            "off"
+                        };
+                        self.editor.message =
+                            Some(format!("Branch-compare split preview: {}", state));
+                    }
+                    _ => {
+                        self.editor.message = Some(
+                            "Split preview toggles the branch-compare sidebar (SPC d)".to_string(),
+                        );
+                    }
+                }
             }
             AppAction::Workspace(WorkspaceAction::OpenBranchCompareView(branch)) => {
                 self.compositor.apply(UiAction::ClosePalette);

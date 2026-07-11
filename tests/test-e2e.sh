@@ -35,4 +35,5 @@ run_test gargo_server_e2e 3
 run_test verify_history_e2e
 run_test overlay_preview_scroll_e2e
 run_test branch_compare_gutter_e2e
+run_test branch_compare_split_e2e
 run_test render_snapshot_e2e

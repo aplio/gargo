@@ -108,6 +108,17 @@ pub fn register(registry: &mut CommandRegistry) {
     });
 
     registry.register(CommandEntry {
+        id: "diff.toggle_split_preview".into(),
+        label: "Toggle Split Diff Preview (Branch Compare)".into(),
+        category: Some("Diff".into()),
+        action: Box::new(|_ctx: &CommandContext| {
+            CommandEffect::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::ToggleBranchCompareSplitPreview,
+            )))
+        }),
+    });
+
+    registry.register(CommandEntry {
         id: "diff.refresh_in_editor".into(),
         label: "Refresh Diff View (In Editor)".into(),
         category: Some("Diff".into()),

@@ -338,6 +338,53 @@ pub(crate) fn branch_compare_line_status(
     line_status_between(&base_content, &content)
 }
 
+/// Aligned split-view rows (base side left, worktree side right) for one
+/// branch-compare file. The left side is the file at the merge-base of
+/// `base...HEAD`, matching the preview gutter; the right side is the live
+/// worktree file. `None` when neither side exists or either side is binary.
+pub(crate) fn branch_compare_split_rows(
+    root: &Path,
+    base: &str,
+    rel_path: &str,
+) -> Option<Vec<crate::split_render::SplitRow>> {
+    let old_text = branch_compare_base_content(root, base, rel_path);
+    let new_text = std::fs::read_to_string(root.join(rel_path)).ok();
+    if old_text.is_none() && new_text.is_none() {
+        return None;
+    }
+    let kind = match (&old_text, &new_text) {
+        (None, Some(_)) => FileChangeKind::Added,
+        (Some(_), None) => FileChangeKind::Deleted,
+        _ => FileChangeKind::Modified,
+    };
+
+    let mut diff = String::new();
+    append_file_diff(
+        &mut diff,
+        rel_path,
+        rel_path,
+        old_text.as_deref().unwrap_or_default().as_bytes(),
+        new_text.as_deref().unwrap_or_default().as_bytes(),
+        kind,
+    );
+    let file = crate::diff_render::parse_unified_diff(&diff)
+        .into_iter()
+        .next()?;
+    if file.binary {
+        return None;
+    }
+
+    let split_lines =
+        |text: Option<&str>| text.map(|t| t.lines().map(str::to_string).collect::<Vec<_>>());
+    let old_lines = split_lines(old_text.as_deref());
+    let new_lines = split_lines(new_text.as_deref());
+    Some(crate::split_render::build_split_rows(
+        old_lines.as_deref(),
+        new_lines.as_deref(),
+        &file,
+    ))
+}
+
 pub fn diff_line_status_for_file(path: &Path) -> HashMap<usize, GitLineStatus> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,

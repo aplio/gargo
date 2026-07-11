@@ -91,6 +91,11 @@ pub struct GitConfig {
 pub struct UiConfig {
     pub popup_width_percent: u8,
     pub popup_height_percent: u8,
+    /// When true, the branch-compare sidebar preview opens in split
+    /// (side-by-side before/after) mode instead of the inline gutter view.
+    /// Toggle at runtime with `s` in the sidebar or the
+    /// "Toggle Split Diff Preview" palette command.
+    pub branch_compare_split_preview: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -231,6 +236,7 @@ impl Default for UiConfig {
         Self {
             popup_width_percent: 95,
             popup_height_percent: 90,
+            branch_compare_split_preview: false,
         }
     }
 }
@@ -656,10 +662,12 @@ line_number_min_width = 7
 [ui]
 popup_width_percent = 80
 popup_height_percent = 75
+branch_compare_split_preview = true
 "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.ui.popup_width_percent, 80);
         assert_eq!(cfg.ui.popup_height_percent, 75);
+        assert!(cfg.ui.branch_compare_split_preview);
     }
 
     #[test]

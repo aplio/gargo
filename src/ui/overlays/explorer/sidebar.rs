@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
 
-use crate::command::git::{GitFileEntry, GitFileStatus, dir_git_status};
+use crate::command::git::{GitFileEntry, GitFileStatus, GitLineStatus, dir_git_status};
 use crate::input::action::{Action, AppAction, BufferAction, IntegrationAction, WorkspaceAction};
 use crate::input::chord::KeyState;
 use crate::syntax::highlight::{HighlightSpan, highlight_text};
@@ -22,7 +22,7 @@ use crate::ui::shared::file_browser::{
 use crate::ui::shared::filtering::fuzzy_match;
 use crate::ui::text::{slice_display_window, truncate_to_width};
 use crate::ui::text_input::delete_prev_word_input;
-use crate::ui::views::text_view::render_highlighted_line_windowed;
+use crate::ui::views::text_view::{git_gutter_style, render_highlighted_line_windowed};
 
 const PREVIEW_MAX_LINES: usize = 500;
 const PREVIEW_HSCROLL_STEP: usize = 8;
@@ -135,9 +135,12 @@ pub struct Explorer {
     /// content arrives, the render centers this line. Seeded in
     /// branch-compare mode with the first changed line of the selected file.
     preview_target_line: Option<usize>,
-    /// Cache of the first changed line per branch-compare file, so moving
+    /// Per-line diff statuses of the previewed branch-compare file against
+    /// the compare base, rendered as a git gutter in the preview pane.
+    preview_gutter: HashMap<usize, GitLineStatus>,
+    /// Cache of per-line diff statuses per branch-compare file, so moving
     /// the selection doesn't recompute single-file diffs.
-    branch_diff_first_line_cache: HashMap<String, Option<usize>>,
+    branch_diff_gutter_cache: HashMap<String, HashMap<usize, GitLineStatus>>,
     preview_image: Option<(PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>)>,
     preview_image_cache: HashMap<PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>>,
     pending_image_request: Option<crate::ui::image::ImageRenderRequest>,
@@ -202,7 +205,8 @@ impl Explorer {
             preview_scroll: 0,
             preview_horizontal_scroll: 0,
             preview_target_line: None,
-            branch_diff_first_line_cache: HashMap::new(),
+            preview_gutter: HashMap::new(),
+            branch_diff_gutter_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
@@ -253,7 +257,8 @@ impl Explorer {
             preview_scroll: 0,
             preview_horizontal_scroll: 0,
             preview_target_line: None,
-            branch_diff_first_line_cache: HashMap::new(),
+            preview_gutter: HashMap::new(),
+            branch_diff_gutter_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
@@ -294,7 +299,7 @@ impl Explorer {
         if files == self.branch_compare_files {
             return;
         }
-        self.branch_diff_first_line_cache.clear();
+        self.branch_diff_gutter_cache.clear();
         let selected_name = self.selected_name().map(|s| s.to_string());
         let scroll_offset = self.scroll_offset;
         self.branch_compare_files = files;
@@ -335,6 +340,7 @@ impl Explorer {
         self.preview_scroll = 0;
         self.preview_horizontal_scroll = 0;
         self.preview_target_line = None;
+        self.preview_gutter.clear();
         self.preview_image = None;
         self.preview_pending = None;
     }
@@ -386,6 +392,7 @@ impl Explorer {
             self.preview_spans.clear();
             self.preview_path = None;
             self.preview_kind = PreviewKind::None;
+            self.preview_gutter.clear();
             self.preview_image = None;
             return;
         };
@@ -395,6 +402,7 @@ impl Explorer {
             self.preview_spans.clear();
             self.preview_path = None;
             self.preview_kind = PreviewKind::None;
+            self.preview_gutter.clear();
             self.preview_image = None;
             return;
         }
@@ -409,11 +417,12 @@ impl Explorer {
         self.preview_horizontal_scroll = 0;
         self.preview_spans.clear();
         self.preview_image = None;
-        self.preview_target_line = if entry_is_dir {
-            None
+        self.preview_gutter = if entry_is_dir {
+            HashMap::new()
         } else {
-            self.branch_compare_first_diff_line(&entry_name)
+            self.branch_compare_gutter(&entry_name)
         };
+        self.preview_target_line = self.preview_gutter.keys().min().copied();
 
         if entry_is_dir {
             self.preview_lines = build_dir_listing(&path);
@@ -427,25 +436,27 @@ impl Explorer {
         self.preview_path = Some(path);
     }
 
-    /// First changed line (0-based) of `rel_path` against the compare base,
-    /// cached per path. `None` outside branch-compare mode or when the file
-    /// has no textual hunks (binary, unchanged).
-    fn branch_compare_first_diff_line(&mut self, rel_path: &str) -> Option<usize> {
+    /// Per-line diff statuses (0-based) of `rel_path` against the compare
+    /// base, cached per path. Empty outside branch-compare mode or when the
+    /// file has no textual hunks (binary, unchanged).
+    fn branch_compare_gutter(&mut self, rel_path: &str) -> HashMap<usize, GitLineStatus> {
         if self.mode != ExplorerMode::BranchCompare {
-            return None;
+            return HashMap::new();
         }
-        let base = self.branch_compare_base.clone()?;
-        if let Some(cached) = self.branch_diff_first_line_cache.get(rel_path) {
-            return *cached;
+        let Some(base) = self.branch_compare_base.clone() else {
+            return HashMap::new();
+        };
+        if let Some(cached) = self.branch_diff_gutter_cache.get(rel_path) {
+            return cached.clone();
         }
-        let line = crate::command::git::git_branch_compare_first_diff_line_in(
+        let gutter = crate::command::git::git_branch_compare_line_status_in(
             &self.project_root,
             &base,
             rel_path,
         );
-        self.branch_diff_first_line_cache
-            .insert(rel_path.to_string(), line);
-        line
+        self.branch_diff_gutter_cache
+            .insert(rel_path.to_string(), gutter.clone());
+        gutter
     }
 
     /// Scroll the preview pane in response to a mouse-wheel event over the
@@ -657,26 +668,46 @@ impl Explorer {
 
         let highlight_enabled = self.preview_kind == PreviewKind::File;
 
+        // Branch-compare previews reserve a git-gutter lane (marker + pad) on
+        // the left, mirroring the editor's per-line change markers.
+        let gutter_w =
+            if self.mode == ExplorerMode::BranchCompare && self.preview_kind == PreviewKind::File {
+                2
+            } else {
+                0
+            };
+        let text_x = x + gutter_w;
+        let text_w = width.saturating_sub(gutter_w);
+
         for row in 0..body_h {
             let line_idx = self.preview_scroll + row;
             let screen_row = body_y + row;
             if line_idx < self.preview_lines.len() {
+                if gutter_w > 0 {
+                    if let Some(status) = self.preview_gutter.get(&line_idx) {
+                        let symbol = status.gutter_symbol().to_string();
+                        surface.put_str(x, screen_row, &symbol, &git_gutter_style(status, theme));
+                    } else {
+                        surface.put_str(x, screen_row, " ", &default_style);
+                    }
+                    surface.put_str(x + 1, screen_row, " ", &default_style);
+                }
                 let line = &self.preview_lines[line_idx];
-                let window = slice_display_window(line, self.preview_horizontal_scroll, width);
+                let window = slice_display_window(line, self.preview_horizontal_scroll, text_w);
                 if highlight_enabled && let Some(spans) = self.preview_spans.get(&line_idx) {
                     render_highlighted_line_windowed(
                         surface,
-                        (screen_row, x),
+                        (screen_row, text_x),
                         window.visible,
                         spans,
                         window.start_byte..window.end_byte,
-                        width,
+                        text_w,
                         theme,
                     );
-                    let pad = width.saturating_sub(window.used_width);
+                    let pad = text_w.saturating_sub(window.used_width);
                     if pad > 0 {
                         surface.fill_region(
-                            x + window.used_width,
+                            text_x + window.used_width,
                             screen_row,
                             pad,
                             ' ',
@@ -689,11 +720,11 @@ impl Explorer {
                     } else {
                         default_style
                     };
-                    surface.put_str(x, screen_row, window.visible, &style);
-                    let pad = width.saturating_sub(window.used_width);
+                    surface.put_str(text_x, screen_row, window.visible, &style);
+                    let pad = text_w.saturating_sub(window.used_width);
                     if pad > 0 {
                         surface.fill_region(
-                            x + window.used_width,
+                            text_x + window.used_width,
                             screen_row,
                             pad,
                             ' ',
@@ -2104,6 +2135,56 @@ mod tests {
         let body_h = 21; // height minus the title row
         assert_eq!(explorer.preview_scroll, target - body_h / 3);
         assert_eq!(explorer.preview_target_line, None);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_preview_renders_gutter_markers() {
+        let dir = setup("branch_diff_gutter");
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.name", "gargo-test"]);
+        run_git(&dir, &["config", "user.email", "gargo-test@example.com"]);
+        let base: String = (1..=5).map(|i| format!("line{}\n", i)).collect();
+        fs::write(dir.join("file.txt"), &base).unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "base"]);
+        run_git(&dir, &["branch", "base"]);
+        let modified = base.replace("line2\n", "line2 changed\n") + "line6\n";
+        fs::write(dir.join("file.txt"), &modified).unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "change line 2, add line 6"]);
+
+        let files = vec![GitFileEntry {
+            path: "file.txt".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 2,
+            deletions: 1,
+        }];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
+        explorer.select_by_name("file.txt");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+
+        assert_eq!(
+            explorer.preview_gutter.get(&1),
+            Some(&GitLineStatus::Modified)
+        );
+        assert_eq!(explorer.preview_gutter.get(&5), Some(&GitLineStatus::Added));
+        assert_eq!(explorer.preview_gutter.len(), 2);
+
+        let theme = Theme::dark();
+        let mut surface = Surface::new(40, 10);
+        explorer.render_preview(&mut surface, 0, 0, 40, 10, &theme);
+
+        // preview_target_line = 1 → scroll = 0; body starts on row 1, so file
+        // line i renders on screen row 1 + i.
+        assert_eq!(surface.get(0, 1).symbol, " "); // line1: unchanged
+        assert_eq!(surface.get(0, 2).symbol, "▍"); // line2: modified
+        assert_eq!(surface.get(0, 6).symbol, "▍"); // line6: added
+        // Text shifts right past the 2-cell gutter lane.
+        assert_eq!(surface.get(2, 1).symbol, "l");
 
         cleanup(&dir);
     }

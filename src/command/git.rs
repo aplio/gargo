@@ -219,6 +219,18 @@ pub fn git_branch_compare_first_diff_line_in(
     parse_diff_hunks(&diff).into_keys().min()
 }
 
+/// Per-line gutter statuses (0-based worktree lines) of `path` against the
+/// merge-base of `base_branch...HEAD` — the branch-compare analogue of the
+/// working-tree git gutter. Empty when the file is unreadable or too large
+/// to diff; every line is Added when the file is new relative to the base.
+pub fn git_branch_compare_line_status_in(
+    project_root: &Path,
+    base_branch: &str,
+    path: &str,
+) -> HashMap<usize, GitLineStatus> {
+    git_backend::branch_compare_line_status(project_root, base_branch, path)
+}
+
 pub fn git_local_branches_in(project_root: &Path) -> Result<Vec<(String, bool)>, String> {
     git_backend::list_local_branches(project_root)
         .ok_or_else(|| "git error: failed to list branches".to_string())

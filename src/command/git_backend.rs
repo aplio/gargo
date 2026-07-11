@@ -233,8 +233,7 @@ pub(crate) fn status_files(root: &Path) -> Option<(Vec<GitFileEntry>, Vec<GitFil
 }
 
 pub fn diff_line_status_for_content(path: &Path, content: &str) -> HashMap<usize, GitLineStatus> {
-    let content_line_count = line_count(content);
-    if !within_diff_limits(content, content_line_count) {
+    if !within_diff_limits(content, line_count(content)) {
         return HashMap::new();
     }
 
@@ -242,8 +241,19 @@ pub fn diff_line_status_for_content(path: &Path, content: &str) -> HashMap<usize
         return full_added_map(content);
     };
 
-    let base_line_count = line_count(&base);
-    if !within_diff_limits(&base, base_line_count) {
+    line_status_between(&base, content)
+}
+
+/// Per-line gutter statuses of `content` relative to `base`, keyed by 0-based
+/// line on the `content` side. Empty when either side exceeds the diff limits.
+pub(crate) fn line_status_between(base: &str, content: &str) -> HashMap<usize, GitLineStatus> {
+    let content_line_count = line_count(content);
+    if !within_diff_limits(content, content_line_count) {
+        return HashMap::new();
+    }
+
+    let base_line_count = line_count(base);
+    if !within_diff_limits(base, base_line_count) {
         return HashMap::new();
     }
 
@@ -287,6 +297,45 @@ pub fn diff_line_status_for_content(path: &Path, content: &str) -> HashMap<usize
     }
 
     map
+}
+
+/// File content on the base side of a `base...HEAD` branch compare: the blob
+/// at the merge-base of `base` and `HEAD` (the same base `git diff A...B`
+/// uses). `None` when the repo/revs can't resolve or the file doesn't exist
+/// on that side.
+pub(crate) fn branch_compare_base_content(
+    root: &Path,
+    base: &str,
+    rel_path: &str,
+) -> Option<String> {
+    let repo = shared_repo(root)?.to_thread_local();
+    let base_id = repo.rev_parse_single(base.as_bytes().as_bstr()).ok()?;
+    let head_id = repo.rev_parse_single("HEAD".as_bytes().as_bstr()).ok()?;
+    let merge_base = repo.merge_base(base_id.detach(), head_id.detach()).ok()?;
+    let tree = repo.find_commit(merge_base.detach()).ok()?.tree().ok()?;
+    let bytes = tree_blob_bytes(&repo, &tree, rel_path)?;
+    Some(String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// Per-line gutter statuses for `rel_path` in a branch compare: the worktree
+/// file diffed against the merge-base of `base...HEAD`. Empty when the file
+/// is unreadable or exceeds the diff limits; every line is Added when the
+/// file is absent on the base side.
+pub(crate) fn branch_compare_line_status(
+    root: &Path,
+    base: &str,
+    rel_path: &str,
+) -> HashMap<usize, GitLineStatus> {
+    let Ok(content) = std::fs::read_to_string(root.join(rel_path)) else {
+        return HashMap::new();
+    };
+    if !within_diff_limits(&content, line_count(&content)) {
+        return HashMap::new();
+    }
+    let Some(base_content) = branch_compare_base_content(root, base, rel_path) else {
+        return full_added_map(&content);
+    };
+    line_status_between(&base_content, &content)
 }
 
 pub fn diff_line_status_for_file(path: &Path) -> HashMap<usize, GitLineStatus> {

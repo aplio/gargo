@@ -756,7 +756,7 @@ pub fn render_highlighted_line_windowed(
     }
 }
 
-fn git_gutter_style(
+pub(crate) fn git_gutter_style(
     status: &crate::command::git::GitLineStatus,
     theme: &crate::syntax::theme::Theme,
 ) -> CellStyle {

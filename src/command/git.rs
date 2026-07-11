@@ -231,15 +231,18 @@ pub fn git_branch_compare_line_status_in(
     git_backend::branch_compare_line_status(project_root, base_branch, path)
 }
 
-/// Aligned split-view rows for `path` in a branch compare: the merge-base of
-/// `base_branch...HEAD` on the left, the worktree file on the right. `None`
-/// when the pair is binary or neither side exists.
-pub fn git_branch_compare_split_rows_in(
+pub use git_backend::BranchCompareSplit;
+
+/// Aligned split view for `path` in a branch compare: the merge-base of
+/// `base_branch...HEAD` on the left, the worktree file on the right, plus
+/// both sides' full text. `None` when the pair is binary or neither side
+/// exists.
+pub fn git_branch_compare_split_in(
     project_root: &Path,
     base_branch: &str,
     path: &str,
-) -> Option<Vec<crate::split_render::SplitRow>> {
-    git_backend::branch_compare_split_rows(project_root, base_branch, path)
+) -> Option<BranchCompareSplit> {
+    git_backend::branch_compare_split(project_root, base_branch, path)
 }
 
 pub fn git_local_branches_in(project_root: &Path) -> Result<Vec<(String, bool)>, String> {

@@ -177,7 +177,7 @@ Some commands use multi-key sequences. A state machine in `input/chord.rs` track
 - In the in-editor diff buffer, `gd` opens the file location represented by the current diff line.
 - In the in-editor diff buffer, `r` refreshes the diff content and jump mapping.
 - `SPC g` opens a flat changed-files sidebar with git status badges (`[M]`, `[A]`, `[D]`, `[?]`, `[U]`).
-- `SPC d` opens the branch-compare sidebar. Its preview shows a git gutter marking lines changed against the compare base; `s` (or the `Toggle Split Diff Preview` palette command) switches between the inline view and a side-by-side before/after split. `[ui] branch_compare_split_preview = true` in `config.toml` makes split the default.
+- `SPC d` opens the branch-compare sidebar. Its preview shows a git gutter marking lines changed against the compare base; `s` (or the `Toggle Split Diff Preview` palette command) switches between the inline view and a side-by-side before/after split. Both views keep tree-sitter syntax highlighting — in split mode the diff kind renders as a red/green background tint under the highlighted tokens. `[ui] branch_compare_split_preview = true` in `config.toml` makes split the default.
 - In Git view (`SPC G`), `C` opens a commit message buffer generated from git's `COMMIT_EDITMSG` template. Closing that buffer strips comments and commits when non-empty; empty/unparsable messages abort the commit.
 - In Git view (`SPC G`), `Changed` and `Staged` headers are selectable. `u` on `Changed` stages all changed files, `u` on `Staged` unstages all staged files, and `u` on a file row toggles that file.
 - `Q` / `q` for macro record/play; `F4` replays the last recorded/played macro.

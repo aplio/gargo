@@ -338,15 +338,27 @@ pub(crate) fn branch_compare_line_status(
     line_status_between(&base_content, &content)
 }
 
-/// Aligned split-view rows (base side left, worktree side right) for one
+/// Split-view source for one branch-compare file: the aligned rows plus the
+/// full text of each side, so callers can derive per-side extras (syntax
+/// highlighting) without re-reading git.
+pub struct BranchCompareSplit {
+    pub rows: Vec<crate::split_render::SplitRow>,
+    /// File content at the merge-base of `base...HEAD`; `None` when the file
+    /// is new relative to the base.
+    pub base_text: Option<String>,
+    /// Live worktree content; `None` when the file was deleted.
+    pub worktree_text: Option<String>,
+}
+
+/// Aligned split view (base side left, worktree side right) for one
 /// branch-compare file. The left side is the file at the merge-base of
 /// `base...HEAD`, matching the preview gutter; the right side is the live
 /// worktree file. `None` when neither side exists or either side is binary.
-pub(crate) fn branch_compare_split_rows(
+pub(crate) fn branch_compare_split(
     root: &Path,
     base: &str,
     rel_path: &str,
-) -> Option<Vec<crate::split_render::SplitRow>> {
+) -> Option<BranchCompareSplit> {
     let old_text = branch_compare_base_content(root, base, rel_path);
     let new_text = std::fs::read_to_string(root.join(rel_path)).ok();
     if old_text.is_none() && new_text.is_none() {
@@ -378,11 +390,13 @@ pub(crate) fn branch_compare_split_rows(
         |text: Option<&str>| text.map(|t| t.lines().map(str::to_string).collect::<Vec<_>>());
     let old_lines = split_lines(old_text.as_deref());
     let new_lines = split_lines(new_text.as_deref());
-    Some(crate::split_render::build_split_rows(
-        old_lines.as_deref(),
-        new_lines.as_deref(),
-        &file,
-    ))
+    let rows =
+        crate::split_render::build_split_rows(old_lines.as_deref(), new_lines.as_deref(), &file);
+    Some(BranchCompareSplit {
+        rows,
+        base_text: old_text,
+        worktree_text: new_text,
+    })
 }
 
 pub fn diff_line_status_for_file(path: &Path) -> HashMap<usize, GitLineStatus> {

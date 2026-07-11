@@ -76,6 +76,16 @@ struct CachedPreview {
     spans: HashMap<usize, Vec<HighlightSpan>>,
 }
 
+/// Split-preview payload for one branch-compare file: aligned rows plus
+/// per-side syntax highlight spans, keyed by 0-based line in that side's
+/// file version (capped at [`PREVIEW_MAX_LINES`] like the inline preview).
+#[derive(Clone, Default)]
+struct SplitPreview {
+    rows: Vec<SplitRow>,
+    left_spans: HashMap<usize, Vec<HighlightSpan>>,
+    right_spans: HashMap<usize, Vec<HighlightSpan>>,
+}
+
 /// Background thread that reads and highlights requested files, so selection
 /// moves in the sidebar never block the render loop on file I/O or
 /// tree-sitter parsing.
@@ -146,11 +156,15 @@ pub struct Explorer {
     /// When true, branch-compare file previews render side-by-side
     /// (base version left, worktree right) instead of inline with a gutter.
     preview_split: bool,
-    /// Aligned split rows of the previewed branch-compare file; empty when
-    /// split mode is off or rows are unavailable (binary, missing file).
+    /// Split payload of the previewed branch-compare file (aligned rows +
+    /// per-side syntax highlights); empty when split mode is off or the
+    /// split is unavailable (binary, missing file).
     preview_split_rows: Vec<SplitRow>,
-    /// Cache of split rows per branch-compare file (`None` = unavailable).
-    branch_diff_split_cache: HashMap<String, Option<Vec<SplitRow>>>,
+    preview_split_left_spans: HashMap<usize, Vec<HighlightSpan>>,
+    preview_split_right_spans: HashMap<usize, Vec<HighlightSpan>>,
+    /// Cache of split payloads per branch-compare file (empty rows =
+    /// unavailable).
+    branch_diff_split_cache: HashMap<String, SplitPreview>,
     preview_image: Option<(PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>)>,
     preview_image_cache: HashMap<PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>>,
     pending_image_request: Option<crate::ui::image::ImageRenderRequest>,
@@ -219,6 +233,8 @@ impl Explorer {
             branch_diff_gutter_cache: HashMap::new(),
             preview_split: false,
             preview_split_rows: Vec::new(),
+            preview_split_left_spans: HashMap::new(),
+            preview_split_right_spans: HashMap::new(),
             branch_diff_split_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
@@ -274,6 +290,8 @@ impl Explorer {
             branch_diff_gutter_cache: HashMap::new(),
             preview_split: false,
             preview_split_rows: Vec::new(),
+            preview_split_left_spans: HashMap::new(),
+            preview_split_right_spans: HashMap::new(),
             branch_diff_split_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
@@ -359,6 +377,8 @@ impl Explorer {
         self.preview_target_line = None;
         self.preview_gutter.clear();
         self.preview_split_rows.clear();
+        self.preview_split_left_spans.clear();
+        self.preview_split_right_spans.clear();
         self.preview_image = None;
         self.preview_pending = None;
     }
@@ -440,16 +460,17 @@ impl Explorer {
         } else {
             self.branch_compare_gutter(&entry_name)
         };
-        self.preview_split_rows = if entry_is_dir || !self.preview_split {
-            Vec::new()
+        let split = if entry_is_dir || !self.preview_split {
+            SplitPreview::default()
         } else {
-            self.branch_compare_split_rows(&entry_name)
+            self.branch_compare_split_preview(&entry_name)
         };
-        self.preview_target_line = if self.preview_split_rows.is_empty() {
+        self.preview_target_line = if split.rows.is_empty() {
             self.preview_gutter.keys().min().copied()
         } else {
-            first_changed_split_row(&self.preview_split_rows)
+            first_changed_split_row(&split.rows)
         };
+        self.apply_split_preview(split);
 
         if entry_is_dir {
             self.preview_lines = build_dir_listing(&path);
@@ -486,26 +507,48 @@ impl Explorer {
         gutter
     }
 
-    /// Cached split rows of `rel_path` against the compare base. Empty when
+    /// Cached split payload of `rel_path` against the compare base: aligned
+    /// rows plus syntax highlight spans for both sides. Empty when
     /// unavailable (outside branch-compare mode, binary, missing file).
-    fn branch_compare_split_rows(&mut self, rel_path: &str) -> Vec<SplitRow> {
+    fn branch_compare_split_preview(&mut self, rel_path: &str) -> SplitPreview {
         if self.mode != ExplorerMode::BranchCompare {
-            return Vec::new();
+            return SplitPreview::default();
         }
         let Some(base) = self.branch_compare_base.clone() else {
-            return Vec::new();
+            return SplitPreview::default();
         };
         if let Some(cached) = self.branch_diff_split_cache.get(rel_path) {
-            return cached.clone().unwrap_or_default();
+            return cached.clone();
         }
-        let rows = crate::command::git::git_branch_compare_split_rows_in(
-            &self.project_root,
-            &base,
-            rel_path,
-        );
+        let preview =
+            crate::command::git::git_branch_compare_split_in(&self.project_root, &base, rel_path)
+                .map(|split| {
+                    let lang_registry = LanguageRegistry::new();
+                    let lang_def = lang_registry.detect_by_extension(rel_path);
+                    let spans_for = |text: Option<&String>| match (text, lang_def) {
+                        (Some(text), Some(lang_def)) => {
+                            let capped: Vec<&str> = text.lines().take(PREVIEW_MAX_LINES).collect();
+                            highlight_text(&capped.join("\n"), lang_def)
+                        }
+                        _ => HashMap::new(),
+                    };
+                    SplitPreview {
+                        left_spans: spans_for(split.base_text.as_ref()),
+                        right_spans: spans_for(split.worktree_text.as_ref()),
+                        rows: split.rows,
+                    }
+                })
+                .unwrap_or_default();
         self.branch_diff_split_cache
-            .insert(rel_path.to_string(), rows.clone());
-        rows.unwrap_or_default()
+            .insert(rel_path.to_string(), preview.clone());
+        preview
+    }
+
+    /// Install `split` as the current preview's split payload.
+    fn apply_split_preview(&mut self, split: SplitPreview) {
+        self.preview_split_rows = split.rows;
+        self.preview_split_left_spans = split.left_spans;
+        self.preview_split_right_spans = split.right_spans;
     }
 
     /// Turn the split (side-by-side) branch-compare preview on or off and
@@ -530,18 +573,19 @@ impl Explorer {
         let Some(rel_path) = rel_path else {
             return;
         };
-        self.preview_split_rows = if on {
-            self.branch_compare_split_rows(&rel_path)
+        let split = if on {
+            self.branch_compare_split_preview(&rel_path)
         } else {
-            Vec::new()
+            SplitPreview::default()
         };
         self.preview_scroll = 0;
         self.preview_horizontal_scroll = 0;
-        self.preview_target_line = if self.preview_split_rows.is_empty() {
+        self.preview_target_line = if split.rows.is_empty() {
             self.preview_gutter.keys().min().copied()
         } else {
-            first_changed_split_row(&self.preview_split_rows)
+            first_changed_split_row(&split.rows)
         };
+        self.apply_split_preview(split);
     }
 
     pub fn toggle_preview_split(&mut self) {
@@ -880,17 +924,39 @@ impl Explorer {
         let right_x = divider_x + 1;
         let right_w = (x + width).saturating_sub(right_x);
 
+        // A side is syntax-highlighted when its language was detected; the
+        // diff kind then moves from text color to a background tint so token
+        // colors stay readable.
+        let left_highlighted = !self.preview_split_left_spans.is_empty();
+        let right_highlighted = !self.preview_split_right_spans.is_empty();
+
         for row in 0..height {
             let idx = self.preview_scroll + row;
             let screen_row = y + row;
             let split_row = self.preview_split_rows.get(idx);
+            let left_cell = split_row.and_then(|r| r.left.as_ref());
+            let right_cell = split_row.and_then(|r| r.right.as_ref());
+            let left_spans = left_cell
+                .and_then(|c| {
+                    self.preview_split_left_spans
+                        .get(&c.line_no.saturating_sub(1))
+                })
+                .map(Vec::as_slice);
+            let right_spans = right_cell
+                .and_then(|c| {
+                    self.preview_split_right_spans
+                        .get(&c.line_no.saturating_sub(1))
+                })
+                .map(Vec::as_slice);
             put_split_cell(
                 surface,
                 x,
                 screen_row,
                 left_w,
-                split_row.and_then(|r| r.left.as_ref()),
+                left_cell,
                 true,
+                left_highlighted,
+                left_spans,
                 self.preview_horizontal_scroll,
                 theme,
             );
@@ -900,8 +966,10 @@ impl Explorer {
                 right_x,
                 screen_row,
                 right_w,
-                split_row.and_then(|r| r.right.as_ref()),
+                right_cell,
                 false,
+                right_highlighted,
+                right_spans,
                 self.preview_horizontal_scroll,
                 theme,
             );
@@ -2211,8 +2279,21 @@ fn split_cell_style(kind: SplitKind, is_left: bool, theme: &Theme) -> CellStyle 
     }
 }
 
+/// Background tint marking the diff kind of a syntax-highlighted split cell:
+/// removed/changed content on the left (base) side, added/changed on the
+/// right (worktree) side.
+fn split_cell_bg(kind: SplitKind, is_left: bool) -> Option<Color> {
+    match (kind, is_left) {
+        (SplitKind::Remove, true) | (SplitKind::Change, true) => Some(Color::DarkRed),
+        (SplitKind::Add, false) | (SplitKind::Change, false) => Some(Color::DarkGreen),
+        _ => None,
+    }
+}
+
 /// Draw one side of a split row; a missing side (one-sided add/remove)
-/// renders as a blank filler.
+/// renders as a blank filler. When `highlighted` is set the content renders
+/// with its syntax highlight spans and the diff kind becomes a background
+/// tint; otherwise (no language detected) the diff kind colors the text.
 #[allow(clippy::too_many_arguments)]
 fn put_split_cell(
     surface: &mut Surface,
@@ -2221,6 +2302,8 @@ fn put_split_cell(
     width: usize,
     cell: Option<&SplitCell>,
     is_left: bool,
+    highlighted: bool,
+    spans: Option<&[HighlightSpan]>,
     horizontal_scroll: usize,
     theme: &Theme,
 ) {
@@ -2231,12 +2314,41 @@ fn put_split_cell(
         surface.fill_region(x, y, width, ' ', &CellStyle::default());
         return;
     };
-    let style = split_cell_style(cell.kind, is_left, theme);
     let window = slice_display_window(&cell.content, horizontal_scroll, width);
-    surface.put_str(x, y, window.visible, &style);
-    let pad = width.saturating_sub(window.used_width);
-    if pad > 0 {
-        surface.fill_region(x + window.used_width, y, pad, ' ', &style);
+    if highlighted {
+        let default_style = CellStyle::default();
+        match spans {
+            Some(spans) => {
+                render_highlighted_line_windowed(
+                    surface,
+                    (y, x),
+                    window.visible,
+                    spans,
+                    window.start_byte..window.end_byte,
+                    width,
+                    theme,
+                );
+            }
+            None => {
+                surface.put_str(x, y, window.visible, &default_style);
+            }
+        }
+        let pad = width.saturating_sub(window.used_width);
+        if pad > 0 {
+            surface.fill_region(x + window.used_width, y, pad, ' ', &default_style);
+        }
+        if let Some(bg) = split_cell_bg(cell.kind, is_left) {
+            for cx in x..x + width {
+                surface.get_mut(cx, y).style.bg = Some(bg);
+            }
+        }
+    } else {
+        let style = split_cell_style(cell.kind, is_left, theme);
+        surface.put_str(x, y, window.visible, &style);
+        let pad = width.saturating_sub(window.used_width);
+        if pad > 0 {
+            surface.fill_region(x + window.used_width, y, pad, ' ', &style);
+        }
     }
 }
 
@@ -2505,6 +2617,66 @@ mod tests {
         let inline_row = surface_row_text(&surface, 2, width);
         assert!(inline_row.contains("new-two"), "{inline_row:?}");
         assert!(!inline_row.contains("old-two"), "{inline_row:?}");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_split_preview_keeps_syntax_highlighting() {
+        let dir = setup("branch_diff_split_hl");
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.name", "gargo-test"]);
+        run_git(&dir, &["config", "user.email", "gargo-test@example.com"]);
+        fs::write(dir.join("file.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "base"]);
+        run_git(&dir, &["branch", "base"]);
+        fs::write(
+            dir.join("file.rs"),
+            "fn alpha() {}\nfn gamma() { let x = 1; }\n",
+        )
+        .unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "change line 2"]);
+
+        let files = vec![GitFileEntry {
+            path: "file.rs".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 1,
+            deletions: 1,
+        }];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
+        explorer.select_by_name("file.rs");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+        explorer.toggle_preview_split();
+
+        let theme = Theme::dark();
+        let width = 81; // left 40 | divider | right 40
+        let mut surface = Surface::new(width, 12);
+        explorer.render_preview(&mut surface, 0, 0, width, 12, &theme);
+
+        // Screen row 1 = context row (`fn alpha() {}` on both sides), row 2 =
+        // change row. Both sides detected Rust, so tokens carry syntax
+        // colors: the `fn` keyword gets a themed fg instead of the default.
+        assert_eq!(surface.get(0, 1).symbol, "f");
+        assert_eq!(surface.get(41, 1).symbol, "f");
+        assert!(
+            surface.get(0, 1).style.fg.is_some(),
+            "left `fn` should be syntax-highlighted"
+        );
+        assert!(
+            surface.get(41, 1).style.fg.is_some(),
+            "right `fn` should be syntax-highlighted"
+        );
+
+        // The diff kind moves to a background tint: base side of the change
+        // row is red, worktree side green; context rows carry no tint.
+        assert_eq!(surface.get(0, 2).style.bg, Some(Color::DarkRed));
+        assert_eq!(surface.get(41, 2).style.bg, Some(Color::DarkGreen));
+        assert_eq!(surface.get(0, 1).style.bg, None);
+        assert_eq!(surface.get(41, 1).style.bg, None);
 
         cleanup(&dir);
     }

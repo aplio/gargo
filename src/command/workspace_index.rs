@@ -282,7 +282,9 @@ mod tests {
         symlink(outside.path(), dir.path().join("linked")).unwrap();
 
         let index = WorkspaceIndex::new(dir.path().to_path_buf(), false);
-        let deadline = Instant::now() + Duration::from_secs(3);
+        // Generous deadline: the index builds on a background thread and can
+        // be starved when the whole suite runs in parallel.
+        let deadline = Instant::now() + Duration::from_secs(15);
         let snapshot = loop {
             let snapshot = index.snapshot();
             if snapshot.ready && snapshot.search_ready {

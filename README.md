@@ -41,6 +41,7 @@ Configuration is read from `~/.config/gargo/config.toml` (respects `XDG_CONFIG_H
 - `SPC e`: file explorer sidebar
 - `SPC g` / `SPC G`: changed-files sidebar / Git view
 - `SPC w` + `v` / `s` / `q`: split window vertically / horizontally / close
+- `Alt+O`: cycle focus to the next window
 - Mouse: left-drag a split border to resize panes
 
 ### Web editor

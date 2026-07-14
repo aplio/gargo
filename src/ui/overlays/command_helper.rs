@@ -86,7 +86,7 @@ impl CommandHelper {
                     },
                     KeyBinding {
                         key: "w".to_string(),
-                        description: "Focus next".to_string(),
+                        description: "Focus next (also Alt+O)".to_string(),
                     },
                     KeyBinding {
                         key: "q".to_string(),

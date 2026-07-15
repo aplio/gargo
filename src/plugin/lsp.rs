@@ -537,6 +537,9 @@ impl Plugin for LspPlugin {
                 language_id,
                 rust_project
             );
+            if command_id == "lsp.goto_definition" {
+                return vec![PluginOutput::LspGotoDefinitionUnavailable];
+            }
             return vec![PluginOutput::Message(
                 "LSP is not configured for this file".to_string(),
             )];
@@ -582,6 +585,9 @@ impl Plugin for LspPlugin {
                 server_id,
                 command
             );
+            if command_id == "lsp.goto_definition" {
+                return vec![PluginOutput::LspGotoDefinitionUnavailable];
+            }
             return vec![PluginOutput::Message("LSP server unavailable".to_string())];
         }
         let Some(server) = self.servers.get(&server_id) else {
@@ -601,6 +607,9 @@ impl Plugin for LspPlugin {
                 server_id,
                 server.command
             );
+            if command_id == "lsp.goto_definition" {
+                return vec![PluginOutput::LspGotoDefinitionUnavailable];
+            }
             return vec![PluginOutput::Message("LSP server unavailable".to_string())];
         };
         let Some(path) = active_doc.file_path.as_ref() else {
@@ -1010,7 +1019,33 @@ mod tests {
 
         assert!(matches!(
             outputs.first(),
+            Some(PluginOutput::LspGotoDefinitionUnavailable)
+        ));
+    }
+
+    #[test]
+    fn no_server_keeps_message_output_for_commands_other_than_goto_definition() {
+        let tmp = tempdir().expect("temp dir");
+        let root = tmp.path();
+        let doc_path = root.join("main.rs");
+        let content = "fn main() {}\n";
+        fs::write(&doc_path, content).expect("write doc");
+
+        let editor = Editor::open(&doc_path.to_string_lossy());
+        let config = config_without_lsp_servers();
+        let mut plugin = LspPlugin::new(&config, root);
+        let ctx = PluginContext::new(&editor, root, &config);
+
+        let hover = plugin.on_command("lsp.hover", &ctx);
+        assert!(matches!(
+            hover.first(),
             Some(PluginOutput::Message(msg)) if msg == "LSP is not configured for this file"
+        ));
+
+        let goto = plugin.on_command("lsp.goto_definition", &ctx);
+        assert!(matches!(
+            goto.first(),
+            Some(PluginOutput::LspGotoDefinitionUnavailable)
         ));
     }
 

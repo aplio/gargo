@@ -217,6 +217,7 @@ pub enum WorkspaceAction {
     OpenBufferPicker,
     OpenJumpListPicker,
     OpenSymbolPicker,
+    RebuildSymbolIndex,
     OpenSmartCopy,
     OpenGlobalSearch,
     ToggleExplorer,
@@ -315,6 +316,9 @@ pub enum NavigationAction {
         line: usize,
         character_utf16: usize,
     },
+    /// Fuzzy goto-definition via the workspace tree-sitter symbol index,
+    /// independent of LSP availability.
+    GotoDefinitionViaSymbolIndex,
     ExecutePaletteCommand(usize),
 }
 

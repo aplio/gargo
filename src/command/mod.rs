@@ -18,6 +18,7 @@ pub mod lsp;
 pub mod recent_projects;
 pub mod registry;
 pub mod server_shared;
+pub mod symbol_index;
 pub mod update_check_runtime;
 pub mod web_editor_server;
 pub mod web_editor_theme;

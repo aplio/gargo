@@ -75,6 +75,8 @@ mod event_loop;
 mod expand;
 #[path = "app/open_click.rs"]
 mod open_click;
+#[path = "app/symbol_nav.rs"]
+mod symbol_nav;
 
 const DIRTY_CLOSE_WARNING: &str = "buffer is dirty. ctrl c to force close.";
 const CLOSE_ABORTED_MESSAGE: &str = "Close aborted";
@@ -200,6 +202,9 @@ pub struct App {
     command_history: Rc<CommandHistory>,
     recent_projects: RecentProjectsStore,
     plugin_host: PluginHost,
+    /// Lazily-built tree-sitter symbol index for fuzzy goto-definition; `None`
+    /// until the first lookup so users who never trigger it pay no scan cost.
+    symbol_index: Option<std::sync::Arc<crate::command::symbol_index::SymbolIndex>>,
     pending_count: Option<usize>,
     pending_edit_jump_locations: Vec<JumpLocation>,
     suspend_jump_recording: bool,
@@ -299,6 +304,7 @@ impl App {
             command_history,
             recent_projects,
             plugin_host: PluginHost::new(Vec::new()),
+            symbol_index: None,
             pending_count: None,
             pending_edit_jump_locations: Vec::new(),
             suspend_jump_recording: false,
@@ -1516,6 +1522,12 @@ impl App {
         format!("{}:{}:{}", rel, line + 1, char_col + 1)
     }
 
+    /// Inverse of [`Self::char_col_from_utf16`]: utf16 code-unit column of the
+    /// given char column within `line`.
+    fn utf16_col_from_char(line: &str, char_col: usize) -> usize {
+        line.chars().take(char_col).map(char::len_utf16).sum()
+    }
+
     fn char_col_from_utf16(line: &str, character_utf16: usize) -> usize {
         let mut utf16_col = 0usize;
         for (char_col, ch) in line.chars().enumerate() {
@@ -1537,15 +1549,38 @@ impl App {
         line: usize,
         character_utf16: usize,
     ) -> (Vec<String>, Option<usize>, usize) {
-        let mut target_char_col = character_utf16;
+        self.reference_preview_lines_with_column(path, line, character_utf16, |line_text| {
+            Self::char_col_from_utf16(line_text, character_utf16)
+        })
+    }
+
+    fn reference_preview_lines_for_char_location(
+        &self,
+        path: &Path,
+        line: usize,
+        char_col: usize,
+    ) -> (Vec<String>, Option<usize>, usize) {
+        self.reference_preview_lines_with_column(path, line, char_col, |_| char_col)
+    }
+
+    /// Shared preview builder. `fallback_char_col` is used when the file can't
+    /// be read; otherwise `resolve_char_col` maps the target line's text to the
+    /// char column the preview should highlight.
+    fn reference_preview_lines_with_column(
+        &self,
+        path: &Path,
+        line: usize,
+        fallback_char_col: usize,
+        resolve_char_col: impl Fn(&str) -> usize,
+    ) -> (Vec<String>, Option<usize>, usize) {
+        let mut target_char_col = fallback_char_col;
         let mut lines = Vec::new();
 
         if let Ok(content) = std::fs::read_to_string(path) {
             let file_lines: Vec<&str> = content.lines().collect();
             if !file_lines.is_empty() {
                 let target_line = line.min(file_lines.len().saturating_sub(1));
-                target_char_col =
-                    Self::char_col_from_utf16(file_lines[target_line], character_utf16);
+                target_char_col = resolve_char_col(file_lines[target_line]);
                 lines.push(self.lsp_location_label_base(path, line, target_char_col));
 
                 let start = target_line.saturating_sub(3);
@@ -2242,6 +2277,9 @@ impl App {
         if matches!(event, PluginEvent::BufferActivated { .. }) {
             self.record_recent_project_open_for_active_buffer();
         }
+        if let PluginEvent::BufferSaved { doc_id } = &event {
+            self.update_symbol_index_for_saved_doc(*doc_id);
+        }
         let ctx = PluginContext::new(&self.editor, &self.project_root, &self.config);
         let outputs = self.plugin_host.on_event(&event, &ctx);
         self.apply_plugin_outputs(outputs);
@@ -2280,6 +2318,9 @@ impl App {
                 }
                 PluginOutput::ClearDiagnostics { path } => {
                     self.editor.clear_lsp_diagnostics_for_path(&path);
+                }
+                PluginOutput::LspGotoDefinitionUnavailable => {
+                    self.goto_definition_via_symbol_index();
                 }
             }
         }
@@ -4169,10 +4210,16 @@ mod tests {
             },
         )));
 
+        // No jump target on this line, so the command falls through to the
+        // symbol-index fallback (LSP plugin is disabled) — the buffer stays put
+        // and the fallback reports one of its non-jump outcomes.
         assert!(app.editor.active_buffer().file_path.is_none());
-        assert_eq!(
-            app.editor.message.as_deref(),
-            Some("Unknown plugin command: lsp.goto_definition")
+        let msg = app.editor.message.as_deref().unwrap_or_default();
+        assert!(
+            msg == "Symbol index is building — try again in a moment"
+                || msg == "No identifier under cursor"
+                || msg.starts_with("No definition found for"),
+            "unexpected message: {msg}"
         );
     }
 
@@ -4295,11 +4342,15 @@ mod tests {
             },
         )));
 
-        // Active buffer should still be the scratch (no file opened)
+        // Active buffer should still be the scratch (no file opened). With the
+        // LSP plugin disabled, `g d` now falls back to the symbol index: the
+        // header word either misses or the index is still building.
         assert!(app.editor.active_buffer().file_path.is_none());
-        assert_eq!(
-            app.editor.message.as_deref(),
-            Some("Unknown plugin command: lsp.goto_definition")
+        let msg = app.editor.message.as_deref().unwrap_or_default();
+        assert!(
+            msg == "Symbol index is building — try again in a moment"
+                || msg == "No definition found for 'Global'",
+            "unexpected message: {msg}"
         );
     }
 
@@ -4340,6 +4391,59 @@ mod tests {
         );
         assert_eq!(palette.candidates.len(), 2);
         assert!(palette.candidates[0].label.contains("main.rs:1:4"));
+    }
+
+    #[test]
+    fn symbol_index_goto_definition_opens_picker_ranked_by_proximity() {
+        let temp = tempdir().expect("temp dir");
+        fs::create_dir(temp.path().join(".git")).expect("git dir");
+        fs::create_dir(temp.path().join("src")).expect("src dir");
+        fs::create_dir(temp.path().join("other")).expect("other dir");
+        fs::write(temp.path().join("src/near.rs"), "fn dup() {}\n").expect("write near");
+        fs::write(temp.path().join("other/far.rs"), "fn dup() {}\n").expect("write far");
+        let current = temp.path().join("src/current.rs");
+        fs::write(&current, "fn main() { dup(); }\n").expect("write current");
+
+        let mut config = Config::default();
+        config.plugins.enabled.clear();
+        let editor = Editor::open(&current.to_string_lossy());
+        let mut app = App::new(editor, config, Some(temp.path()));
+        // Cursor on the `dup` call site.
+        app.editor.active_buffer_mut().set_cursor_line_char(0, 13);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            app.dispatch(Action::App(AppAction::Integration(
+                IntegrationAction::RunPluginCommand {
+                    id: "lsp.goto_definition".to_string(),
+                },
+            )));
+            if app.compositor.palette_mut().is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "picker never opened; message: {:?}",
+                app.editor.message
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let palette = app.compositor.palette_mut().expect("palette");
+        assert_eq!(
+            palette.mode,
+            crate::ui::overlays::palette::PaletteMode::ReferencePicker
+        );
+        assert_eq!(palette.candidates.len(), 2);
+        // Same-directory hit ranks above the distant one.
+        assert!(
+            palette.candidates[0].label.contains("src/near.rs"),
+            "unexpected first candidate: {}",
+            palette.candidates[0].label
+        );
+        assert!(palette.candidates[1].label.contains("other/far.rs"));
+        // Tags kind is surfaced in the label.
+        assert!(palette.candidates[0].label.contains("[function]"));
     }
 
     #[test]

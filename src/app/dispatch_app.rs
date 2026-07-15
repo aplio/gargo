@@ -354,6 +354,11 @@ impl App {
                 debug_log!(&self.config, "palette: opened (jumplist picker)");
                 self.open_jump_list_picker();
             }
+            AppAction::Workspace(WorkspaceAction::RebuildSymbolIndex) => {
+                let index = self.ensure_symbol_index();
+                index.request_refresh();
+                self.editor.message = Some("Rebuilding symbol index...".to_string());
+            }
             AppAction::Workspace(WorkspaceAction::OpenSymbolPicker) => {
                 debug_log!(&self.config, "palette: opened (symbol picker)");
                 self.refresh_file_index_for_picker();
@@ -1272,6 +1277,13 @@ impl App {
                     return false;
                 }
                 self.flush_insert_transaction_if_active();
+                // With the LSP plugin disabled the command never reaches
+                // LspPlugin, so goto-definition falls back to the symbol
+                // index right here instead of reporting an unknown command.
+                if id == "lsp.goto_definition" && !self.plugin_host.has_command(&id) {
+                    self.goto_definition_via_symbol_index();
+                    return false;
+                }
                 let ctx = PluginContext::new(&self.editor, &self.project_root, &self.config);
                 let outputs = self.plugin_host.run_command(&id, &ctx);
                 self.apply_plugin_outputs(outputs);
@@ -1354,6 +1366,11 @@ impl App {
             }) => {
                 self.compositor.apply(UiAction::ClosePalette);
                 self.open_file_at_lsp_location(&path, line, character_utf16);
+            }
+            AppAction::Navigation(NavigationAction::GotoDefinitionViaSymbolIndex) => {
+                self.compositor.apply(UiAction::ClosePalette);
+                self.flush_insert_transaction_if_active();
+                self.goto_definition_via_symbol_index();
             }
         }
         if should_record_jump {

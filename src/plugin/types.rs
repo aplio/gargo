@@ -39,6 +39,9 @@ pub enum PluginOutput {
     ClearDiagnostics {
         path: PathBuf,
     },
+    /// goto_definition was requested but no LSP server is available for the
+    /// active document; the app falls back to the tree-sitter symbol index.
+    LspGotoDefinitionUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

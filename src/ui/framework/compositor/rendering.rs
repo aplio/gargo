@@ -133,7 +133,7 @@ impl Compositor {
         }
 
         if let Some(ref mut git_view) = self.git_view {
-            let cursor = git_view.render_overlay(&mut self.current);
+            let cursor = git_view.render_overlay(&mut self.current, ctx.theme);
 
             draw_diff(&self.previous, &self.current, stdout)?;
 

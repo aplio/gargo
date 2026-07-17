@@ -8,12 +8,14 @@ use std::sync::mpsc;
 use crate::command::git::{self, GitFileEntry};
 use crate::command::git_view_diff_runtime::{DiffCacheKey, GitViewDiffCommand, GitViewDiffEvent};
 use crate::input::action::{Action, AppAction, BufferAction, UiAction, WorkspaceAction};
+use crate::syntax::theme::Theme;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
 use crate::ui::shared::filtering::fuzzy_match;
 use crate::ui::text::{display_width, slice_display_window, truncate_to_width};
 use crate::ui::text_input::delete_prev_word_input;
+use crate::ui::views::text_view::git_gutter_style;
 
 #[derive(Debug, Clone, Default)]
 pub struct GitViewIndexSnapshot {
@@ -41,6 +43,8 @@ pub struct GitView {
     find_input: String,
     diff_state: DiffDisplayState,
     diff_scroll: usize,
+    /// Pending unified-diff row to reveal once the diff panel dimensions are known.
+    diff_target_line: Option<usize>,
     diff_horizontal_scroll: usize,
     message: Option<String>,
     diff_runtime_tx: Option<mpsc::Sender<GitViewDiffCommand>>,
@@ -234,6 +238,7 @@ impl GitView {
             find_input: String::new(),
             diff_state: DiffDisplayState::Idle,
             diff_scroll: 0,
+            diff_target_line: None,
             diff_horizontal_scroll: 0,
             message,
             diff_runtime_tx,
@@ -269,6 +274,7 @@ impl GitView {
             find_input: String::new(),
             diff_state: DiffDisplayState::Idle,
             diff_scroll: 0,
+            diff_target_line: None,
             diff_horizontal_scroll: 0,
             message: None,
             diff_runtime_tx,
@@ -687,7 +693,14 @@ impl GitView {
 
     fn reset_diff_scroll_state(&mut self) {
         self.diff_scroll = 0;
+        self.diff_target_line = None;
         self.diff_horizontal_scroll = 0;
+    }
+
+    fn seed_diff_target_line(&mut self) {
+        self.diff_target_line = self
+            .current_diff_lines()
+            .and_then(first_changed_diff_row_in_lines);
     }
 
     fn request_selected_diff(&mut self) {
@@ -707,6 +720,7 @@ impl GitView {
             self.diff_state = cached.into_display_state();
             if selection_changed {
                 self.reset_diff_scroll_state();
+                self.seed_diff_target_line();
             }
             self.prefetch_neighbors();
             return;
@@ -813,6 +827,7 @@ impl GitView {
                 let lines: Vec<String> = diff.lines().map(|line| line.to_string()).collect();
                 self.cache_insert(key.clone(), CachedDiffEntry::Ready(lines.clone()));
                 self.diff_state = DiffDisplayState::Ready(lines);
+                self.seed_diff_target_line();
             }
             Err(message) => {
                 self.cache_insert(key.clone(), CachedDiffEntry::Error(message.clone()));
@@ -952,6 +967,7 @@ impl GitView {
             self.selected_request_id = None;
             self.diff_state = cached_entry.into_display_state();
             self.reset_diff_scroll_state();
+            self.seed_diff_target_line();
         }
     }
 
@@ -975,15 +991,18 @@ impl GitView {
     }
 
     fn scroll_diff_down_lines(&mut self, lines: usize, content_h: usize) {
+        self.diff_target_line = None;
         let max_scroll = self.diff_max_scroll(content_h);
         self.diff_scroll = self.diff_scroll.saturating_add(lines).min(max_scroll);
     }
 
     fn scroll_diff_up_lines(&mut self, lines: usize) {
+        self.diff_target_line = None;
         self.diff_scroll = self.diff_scroll.saturating_sub(lines);
     }
 
     fn scroll_diff_down(&mut self) {
+        self.diff_target_line = None;
         self.diff_scroll = self.diff_scroll.saturating_add(1);
     }
 
@@ -1014,12 +1033,14 @@ impl GitView {
     }
 
     fn scroll_diff_right(&mut self) {
+        self.diff_target_line = None;
         self.diff_horizontal_scroll = self
             .diff_horizontal_scroll
             .saturating_add(HORIZONTAL_SCROLL_COLS);
     }
 
     fn scroll_diff_left(&mut self) {
+        self.diff_target_line = None;
         self.diff_horizontal_scroll = self
             .diff_horizontal_scroll
             .saturating_sub(HORIZONTAL_SCROLL_COLS);
@@ -1372,7 +1393,7 @@ impl GitView {
         }
     }
 
-    pub fn render_overlay(&mut self, surface: &mut Surface) -> Option<(u16, u16)> {
+    pub fn render_overlay(&mut self, surface: &mut Surface, theme: &Theme) -> Option<(u16, u16)> {
         let cols = surface.width;
         let rows = surface.height;
         let (popup_w, popup_h) = Self::popup_size(cols, rows);
@@ -1386,7 +1407,7 @@ impl GitView {
             let right_x = offset_x + left_w + gap;
 
             let cursor = self.render_file_panel(surface, offset_x, offset_y, left_w, popup_h);
-            self.render_diff_panel(surface, right_x, offset_y, right_w, popup_h);
+            self.render_diff_panel(surface, right_x, offset_y, right_w, popup_h, theme);
             cursor
         } else {
             self.render_file_panel(surface, offset_x, offset_y, popup_w, popup_h)
@@ -1727,12 +1748,26 @@ impl GitView {
         }
     }
 
-    fn render_diff_panel(&mut self, surface: &mut Surface, x: usize, y: usize, w: usize, h: usize) {
+    fn render_diff_panel(
+        &mut self,
+        surface: &mut Surface,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        theme: &Theme,
+    ) {
         let inner_w = w.saturating_sub(2);
         let content_h = h.saturating_sub(2);
         let default_style = CellStyle::default();
+
+        if let Some(target) = self.diff_target_line.take() {
+            self.diff_scroll = target.saturating_sub(content_h / 3);
+        }
         self.clamp_diff_scroll(content_h);
-        self.clamp_diff_horizontal_scroll(inner_w);
+        let gutter_w = usize::from(matches!(self.diff_state, DiffDisplayState::Ready(_))) * 2;
+        let text_w = inner_w.saturating_sub(gutter_w);
+        self.clamp_diff_horizontal_scroll(text_w);
 
         let placeholder = match &self.diff_state {
             DiffDisplayState::Loading => Some((
@@ -1797,14 +1832,21 @@ impl GitView {
                 let line_idx = self.diff_scroll + (row - 1);
                 if line_idx < lines.len() && (row - 1) < content_h {
                     let line = &lines[line_idx];
+                    if let Some(status) = diff_gutter_status(line) {
+                        let symbol = status.gutter_symbol().to_string();
+                        surface.put_str(x + 1, y + row, &symbol, &git_gutter_style(&status, theme));
+                    } else {
+                        surface.put_str(x + 1, y + row, " ", &default_style);
+                    }
+                    surface.put_str(x + 2, y + row, " ", &default_style);
                     let style = diff_line_style(line);
-                    let window = slice_display_window(line, self.diff_horizontal_scroll, inner_w);
-                    surface.put_str(x + 1, y + row, window.visible, &style);
-                    if window.used_width < inner_w {
+                    let window = slice_display_window(line, self.diff_horizontal_scroll, text_w);
+                    surface.put_str(x + 1 + gutter_w, y + row, window.visible, &style);
+                    if window.used_width < text_w {
                         surface.fill_region(
-                            x + 1 + window.used_width,
+                            x + 1 + gutter_w + window.used_width,
                             y + row,
-                            inner_w - window.used_width,
+                            text_w - window.used_width,
                             ' ',
                             &default_style,
                         );
@@ -1874,6 +1916,23 @@ fn first_changed_line_in_lines(lines: &[String]) -> Option<usize> {
         }
     }
     None
+}
+
+/// Return the first unified-diff display row that receives a gutter marker.
+fn first_changed_diff_row_in_lines(lines: &[String]) -> Option<usize> {
+    lines
+        .iter()
+        .position(|line| diff_gutter_status(line).is_some())
+}
+
+fn diff_gutter_status(line: &str) -> Option<git::GitLineStatus> {
+    if line.starts_with('+') && !line.starts_with("+++") {
+        Some(git::GitLineStatus::Added)
+    } else if line.starts_with('-') && !line.starts_with("---") {
+        Some(git::GitLineStatus::Deleted)
+    } else {
+        None
+    }
 }
 
 fn parse_hunk_new_start(line: &str) -> Option<usize> {
@@ -1963,6 +2022,7 @@ mod tests {
             find_input: String::new(),
             diff_state: DiffDisplayState::Idle,
             diff_scroll: 0,
+            diff_target_line: None,
             diff_horizontal_scroll: 0,
             message: None,
             diff_runtime_tx: None,
@@ -2109,6 +2169,45 @@ mod tests {
 
         assert!(view.first_changed_line_in_diff().is_none());
         assert_eq!(view.first_changed_line_for_selected(), Some(23));
+    }
+
+    #[test]
+    fn diff_panel_renders_gutters_and_scrolls_to_first_marker() {
+        let mut view = test_view();
+        let mut lines: Vec<String> = (0..40).map(|i| format!("context {i}")).collect();
+        lines.push("-old value".to_string());
+        lines.push("+new value".to_string());
+        lines.extend((42..70).map(|i| format!("context {i}")));
+        view.diff_state = DiffDisplayState::Ready(lines);
+        view.seed_diff_target_line();
+
+        let theme = Theme::dark();
+        let mut surface = Surface::new(32, 12);
+        view.render_diff_panel(&mut surface, 0, 0, 32, 12, &theme);
+
+        // content_h=10: mirror the branch-compare preview by placing the
+        // first marker one third of the viewport below the top.
+        assert_eq!(view.diff_scroll, 37);
+        assert_eq!(view.diff_target_line, None);
+        assert_eq!(surface.get(1, 4).symbol, "▔");
+        assert_eq!(surface.get(1, 5).symbol, "▍");
+        // The patch text starts after the marker + padding lane.
+        assert_eq!(surface.get(3, 4).symbol, "-");
+        assert_eq!(surface.get(3, 5).symbol, "+");
+    }
+
+    #[test]
+    fn diff_gutter_ignores_file_header_prefixes() {
+        let lines = vec![
+            "--- a/file.txt".to_string(),
+            "+++ b/file.txt".to_string(),
+            " context".to_string(),
+            "+changed".to_string(),
+        ];
+
+        assert_eq!(first_changed_diff_row_in_lines(&lines), Some(3));
+        assert_eq!(diff_gutter_status(&lines[0]), None);
+        assert_eq!(diff_gutter_status(&lines[1]), None);
     }
 
     #[test]

@@ -4,8 +4,8 @@ use std::process::{Command as ProcessCommand, Stdio};
 use crate::core::editor::Editor;
 use crate::core::mode::Mode;
 use crate::input::action::{
-    Action, AppAction, BufferAction, CoreAction, IntegrationAction, LifecycleAction, ProjectAction,
-    WorkspaceAction,
+    Action, AppAction, BufferAction, CoreAction, IntegrationAction, LifecycleAction,
+    NavigationAction, ProjectAction, WorkspaceAction,
 };
 
 pub(crate) fn copy_to_clipboard(text: &str) -> Result<(), String> {
@@ -508,6 +508,28 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
         action: Box::new(|_editor| {
             CommandEffect::Action(Action::App(AppAction::Workspace(
                 WorkspaceAction::OpenSymbolPicker,
+            )))
+        }),
+    });
+
+    registry.register(CommandEntry {
+        id: "symbol.goto_definition".into(),
+        label: "Go to Definition (Symbol Index)".into(),
+        category: Some("Navigation".into()),
+        action: Box::new(|_editor| {
+            CommandEffect::Action(Action::App(AppAction::Navigation(
+                NavigationAction::GotoDefinitionViaSymbolIndex,
+            )))
+        }),
+    });
+
+    registry.register(CommandEntry {
+        id: "symbol.rebuild_index".into(),
+        label: "Rebuild Symbol Index".into(),
+        category: Some("Navigation".into()),
+        action: Box::new(|_editor| {
+            CommandEffect::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::RebuildSymbolIndex,
             )))
         }),
     });

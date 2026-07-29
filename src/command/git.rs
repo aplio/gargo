@@ -17,7 +17,7 @@ use super::registry::{CommandEffect, CommandEntry, CommandRegistry, copy_to_clip
 // Public git helpers for GitView
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitFileEntry {
     pub path: String,
     pub status_char: char,
@@ -341,6 +341,44 @@ pub fn set_branch_compare_viewed(
         )
         .map_err(|e| format!("failed to save viewed state: {}", e))?;
     Ok(true)
+}
+
+/// First line (0-based, HEAD side) touched by the `base_branch...HEAD` diff
+/// for `path`. `None` when the file has no textual hunks (binary, unchanged,
+/// or the diff is unavailable).
+pub fn git_branch_compare_first_diff_line_in(
+    project_root: &Path,
+    base_branch: &str,
+    path: &str,
+) -> Option<usize> {
+    let diff = git_backend::compare_diff_text(project_root, base_branch, "HEAD", Some(path))?;
+    parse_diff_hunks(&diff).into_keys().min()
+}
+
+/// Per-line gutter statuses (0-based worktree lines) of `path` against the
+/// merge-base of `base_branch...HEAD` — the branch-compare analogue of the
+/// working-tree git gutter. Empty when the file is unreadable or too large
+/// to diff; every line is Added when the file is new relative to the base.
+pub fn git_branch_compare_line_status_in(
+    project_root: &Path,
+    base_branch: &str,
+    path: &str,
+) -> HashMap<usize, GitLineStatus> {
+    git_backend::branch_compare_line_status(project_root, base_branch, path)
+}
+
+pub use git_backend::BranchCompareSplit;
+
+/// Aligned split view for `path` in a branch compare: the merge-base of
+/// `base_branch...HEAD` on the left, the worktree file on the right, plus
+/// both sides' full text. `None` when the pair is binary or neither side
+/// exists.
+pub fn git_branch_compare_split_in(
+    project_root: &Path,
+    base_branch: &str,
+    path: &str,
+) -> Option<BranchCompareSplit> {
+    git_backend::branch_compare_split(project_root, base_branch, path)
 }
 
 pub fn git_local_branches_in(project_root: &Path) -> Result<Vec<(String, bool)>, String> {
@@ -1055,6 +1093,37 @@ mod tests {
         assert_eq!(
             remote_to_github_url("  git@github.com:user/repo.git\n"),
             Some("https://github.com/user/repo".into())
+        );
+    }
+
+    #[test]
+    fn branch_compare_first_diff_line_points_at_first_hunk() {
+        let temp = setup_repo();
+        let repo = temp.path();
+        let base_content: String = (1..=40).map(|i| format!("line{}\n", i)).collect();
+        fs::write(repo.join("file.txt"), &base_content).expect("write base file");
+        run_git(repo, &["add", "."]);
+        run_git(repo, &["commit", "-m", "base"]);
+        run_git(repo, &["branch", "base"]);
+
+        let modified = base_content.replace("line30\n", "line30 changed\n");
+        fs::write(repo.join("file.txt"), &modified).expect("write modified file");
+        run_git(repo, &["add", "."]);
+        run_git(repo, &["commit", "-m", "change line 30"]);
+
+        let first = git_branch_compare_first_diff_line_in(repo, "base", "file.txt")
+            .expect("expected a diff line");
+        // The hunk around line 30 (1-based) starts at the context line a few
+        // lines above; it must land near the change, not at the file top.
+        assert!(
+            (26..=29).contains(&first),
+            "first diff line should be near line 30, got {}",
+            first
+        );
+
+        assert_eq!(
+            git_branch_compare_first_diff_line_in(repo, "base", "missing.txt"),
+            None
         );
     }
 

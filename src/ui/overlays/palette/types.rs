@@ -51,6 +51,9 @@ pub(super) struct PreviewResult {
 pub(super) struct GlobalSearchResultEntry {
     pub(super) rel_path: String,
     pub(super) display_path: String,
+    /// Display name of the external repo this hit came from; `None` for
+    /// results from the current project.
+    pub(super) origin_repo: Option<String>,
     pub(super) line: usize,
     pub(super) char_col: usize,
     pub(super) preview_lines: Vec<String>,

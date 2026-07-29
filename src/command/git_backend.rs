@@ -233,8 +233,7 @@ pub(crate) fn status_files(root: &Path) -> Option<(Vec<GitFileEntry>, Vec<GitFil
 }
 
 pub fn diff_line_status_for_content(path: &Path, content: &str) -> HashMap<usize, GitLineStatus> {
-    let content_line_count = line_count(content);
-    if !within_diff_limits(content, content_line_count) {
+    if !within_diff_limits(content, line_count(content)) {
         return HashMap::new();
     }
 
@@ -242,8 +241,19 @@ pub fn diff_line_status_for_content(path: &Path, content: &str) -> HashMap<usize
         return full_added_map(content);
     };
 
-    let base_line_count = line_count(&base);
-    if !within_diff_limits(&base, base_line_count) {
+    line_status_between(&base, content)
+}
+
+/// Per-line gutter statuses of `content` relative to `base`, keyed by 0-based
+/// line on the `content` side. Empty when either side exceeds the diff limits.
+pub(crate) fn line_status_between(base: &str, content: &str) -> HashMap<usize, GitLineStatus> {
+    let content_line_count = line_count(content);
+    if !within_diff_limits(content, content_line_count) {
+        return HashMap::new();
+    }
+
+    let base_line_count = line_count(base);
+    if !within_diff_limits(base, base_line_count) {
         return HashMap::new();
     }
 
@@ -287,6 +297,106 @@ pub fn diff_line_status_for_content(path: &Path, content: &str) -> HashMap<usize
     }
 
     map
+}
+
+/// File content on the base side of a `base...HEAD` branch compare: the blob
+/// at the merge-base of `base` and `HEAD` (the same base `git diff A...B`
+/// uses). `None` when the repo/revs can't resolve or the file doesn't exist
+/// on that side.
+pub(crate) fn branch_compare_base_content(
+    root: &Path,
+    base: &str,
+    rel_path: &str,
+) -> Option<String> {
+    let repo = shared_repo(root)?.to_thread_local();
+    let base_id = repo.rev_parse_single(base.as_bytes().as_bstr()).ok()?;
+    let head_id = repo.rev_parse_single("HEAD".as_bytes().as_bstr()).ok()?;
+    let merge_base = repo.merge_base(base_id.detach(), head_id.detach()).ok()?;
+    let tree = repo.find_commit(merge_base.detach()).ok()?.tree().ok()?;
+    let bytes = tree_blob_bytes(&repo, &tree, rel_path)?;
+    Some(String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// Per-line gutter statuses for `rel_path` in a branch compare: the worktree
+/// file diffed against the merge-base of `base...HEAD`. Empty when the file
+/// is unreadable or exceeds the diff limits; every line is Added when the
+/// file is absent on the base side.
+pub(crate) fn branch_compare_line_status(
+    root: &Path,
+    base: &str,
+    rel_path: &str,
+) -> HashMap<usize, GitLineStatus> {
+    let Ok(content) = std::fs::read_to_string(root.join(rel_path)) else {
+        return HashMap::new();
+    };
+    if !within_diff_limits(&content, line_count(&content)) {
+        return HashMap::new();
+    }
+    let Some(base_content) = branch_compare_base_content(root, base, rel_path) else {
+        return full_added_map(&content);
+    };
+    line_status_between(&base_content, &content)
+}
+
+/// Split-view source for one branch-compare file: the aligned rows plus the
+/// full text of each side, so callers can derive per-side extras (syntax
+/// highlighting) without re-reading git.
+pub struct BranchCompareSplit {
+    pub rows: Vec<crate::split_render::SplitRow>,
+    /// File content at the merge-base of `base...HEAD`; `None` when the file
+    /// is new relative to the base.
+    pub base_text: Option<String>,
+    /// Live worktree content; `None` when the file was deleted.
+    pub worktree_text: Option<String>,
+}
+
+/// Aligned split view (base side left, worktree side right) for one
+/// branch-compare file. The left side is the file at the merge-base of
+/// `base...HEAD`, matching the preview gutter; the right side is the live
+/// worktree file. `None` when neither side exists or either side is binary.
+pub(crate) fn branch_compare_split(
+    root: &Path,
+    base: &str,
+    rel_path: &str,
+) -> Option<BranchCompareSplit> {
+    let old_text = branch_compare_base_content(root, base, rel_path);
+    let new_text = std::fs::read_to_string(root.join(rel_path)).ok();
+    if old_text.is_none() && new_text.is_none() {
+        return None;
+    }
+    let kind = match (&old_text, &new_text) {
+        (None, Some(_)) => FileChangeKind::Added,
+        (Some(_), None) => FileChangeKind::Deleted,
+        _ => FileChangeKind::Modified,
+    };
+
+    let mut diff = String::new();
+    append_file_diff(
+        &mut diff,
+        rel_path,
+        rel_path,
+        old_text.as_deref().unwrap_or_default().as_bytes(),
+        new_text.as_deref().unwrap_or_default().as_bytes(),
+        kind,
+    );
+    let file = crate::diff_render::parse_unified_diff(&diff)
+        .into_iter()
+        .next()?;
+    if file.binary {
+        return None;
+    }
+
+    let split_lines =
+        |text: Option<&str>| text.map(|t| t.lines().map(str::to_string).collect::<Vec<_>>());
+    let old_lines = split_lines(old_text.as_deref());
+    let new_lines = split_lines(new_text.as_deref());
+    let rows =
+        crate::split_render::build_split_rows(old_lines.as_deref(), new_lines.as_deref(), &file);
+    Some(BranchCompareSplit {
+        rows,
+        base_text: old_text,
+        worktree_text: new_text,
+    })
 }
 
 pub fn diff_line_status_for_file(path: &Path) -> HashMap<usize, GitLineStatus> {

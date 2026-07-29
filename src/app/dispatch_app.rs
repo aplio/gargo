@@ -354,6 +354,11 @@ impl App {
                 debug_log!(&self.config, "palette: opened (jumplist picker)");
                 self.open_jump_list_picker();
             }
+            AppAction::Workspace(WorkspaceAction::RebuildSymbolIndex) => {
+                let index = self.ensure_symbol_index();
+                index.request_refresh();
+                self.editor.message = Some("Rebuilding symbol index...".to_string());
+            }
             AppAction::Workspace(WorkspaceAction::OpenSymbolPicker) => {
                 debug_log!(&self.config, "palette: opened (symbol picker)");
                 self.refresh_file_index_for_picker();
@@ -708,22 +713,30 @@ impl App {
                 self.compositor.apply(UiAction::ClosePalette);
                 let repo_root = self.active_buffer_repo_root();
 
-                let compare = match crate::command::git::git_branch_compare_files_in(
-                    &repo_root,
-                    &base_branch,
-                ) {
-                    Ok(compare) => compare,
-                    Err(err) => {
-                        self.editor.message = Some(format!("Branch compare failed: {}", err));
-                        return false;
+                // Compute the branch diff on the git-index runtime so the
+                // sidebar opens instantly even for large diffs; the file list
+                // and its viewed records land via BranchDiffReady. Only fall
+                // back to a synchronous load when the runtime is unavailable.
+                let sync_compare = if self.git_index_runtime.is_some() {
+                    None
+                } else {
+                    match crate::command::git::git_branch_compare_files_in(&repo_root, &base_branch)
+                    {
+                        Ok(compare) => Some(compare),
+                        Err(err) => {
+                            self.editor.message = Some(format!("Branch compare failed: {}", err));
+                            return false;
+                        }
                     }
                 };
-                let viewed = crate::command::git::branch_compare_viewed_paths(
-                    self.diff_viewed_store(),
-                    &repo_root,
-                    &base_branch,
-                    &compare.content_hashes,
-                );
+                let sync_viewed = sync_compare.as_ref().map(|compare| {
+                    crate::command::git::branch_compare_viewed_paths(
+                        self.diff_viewed_store(),
+                        &repo_root,
+                        &base_branch,
+                        &compare.content_hashes,
+                    )
+                });
 
                 // Close any open Explorer first, stashing it.
                 if let Some(explorer) = self.compositor.close_explorer() {
@@ -734,15 +747,33 @@ impl App {
                     .recent_projects
                     .record_compare_base(&repo_root, &base_branch);
 
-                let mut explorer =
-                    Explorer::new_branch_compare(repo_root, base_branch, compare.files);
-                explorer.set_branch_compare_viewed(viewed);
+                let mut explorer = match sync_compare {
+                    Some(compare) => {
+                        let mut explorer =
+                            Explorer::new_branch_compare(repo_root, base_branch, compare.files);
+                        if let Some(viewed) = sync_viewed {
+                            explorer.set_branch_compare_viewed(viewed);
+                        }
+                        explorer
+                    }
+                    None => {
+                        let mut explorer = Explorer::new_branch_compare(
+                            repo_root.clone(),
+                            base_branch.clone(),
+                            Vec::new(),
+                        );
+                        explorer.set_branch_compare_loading(true);
+                        self.queue_branch_diff_refresh(repo_root, base_branch);
+                        explorer
+                    }
+                };
+                explorer.set_preview_split(self.config.ui.branch_compare_split_preview);
                 // Start with the diff preview visible, like the web compare page.
                 explorer.set_preview_mode(true);
                 self.compositor.open_explorer(explorer);
                 self.last_used_sidebar = Some(LastUsedSidebar::BranchCompare);
                 self.editor.message = Some(
-                    "Compare: Enter/e=edit file  o=diff buffer  v=viewed  p=preview  Shift+J/K=scroll"
+                    "Compare: Enter/e=edit  o=diff buffer  v=viewed  p=preview  s=split  Shift+J/K=scroll"
                         .to_string(),
                 );
             }
@@ -836,6 +867,25 @@ impl App {
                     }
                     Err(err) => {
                         self.editor.message = Some(format!("Viewed toggle failed: {}", err));
+                    }
+                }
+            }
+            AppAction::Workspace(WorkspaceAction::ToggleBranchCompareSplitPreview) => {
+                match self.compositor.explorer_mut() {
+                    Some(explorer) if explorer.is_branch_compare() => {
+                        explorer.toggle_preview_split();
+                        let state = if explorer.preview_split_enabled() {
+                            "on"
+                        } else {
+                            "off"
+                        };
+                        self.editor.message =
+                            Some(format!("Branch-compare split preview: {}", state));
+                    }
+                    _ => {
+                        self.editor.message = Some(
+                            "Split preview toggles the branch-compare sidebar (SPC d)".to_string(),
+                        );
                     }
                 }
             }
@@ -1364,6 +1414,13 @@ impl App {
                     return false;
                 }
                 self.flush_insert_transaction_if_active();
+                // With the LSP plugin disabled the command never reaches
+                // LspPlugin, so goto-definition falls back to the symbol
+                // index right here instead of reporting an unknown command.
+                if id == "lsp.goto_definition" && !self.plugin_host.has_command(&id) {
+                    self.goto_definition_via_symbol_index();
+                    return false;
+                }
                 let ctx = PluginContext::new(&self.editor, &self.project_root, &self.config);
                 let outputs = self.plugin_host.run_command(&id, &ctx);
                 self.apply_plugin_outputs(outputs);
@@ -1446,6 +1503,11 @@ impl App {
             }) => {
                 self.compositor.apply(UiAction::ClosePalette);
                 self.open_file_at_lsp_location(&path, line, character_utf16);
+            }
+            AppAction::Navigation(NavigationAction::GotoDefinitionViaSymbolIndex) => {
+                self.compositor.apply(UiAction::ClosePalette);
+                self.flush_insert_transaction_if_active();
+                self.goto_definition_via_symbol_index();
             }
         }
         if should_record_jump {

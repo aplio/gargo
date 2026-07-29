@@ -73,6 +73,10 @@ mod dispatch_core;
 mod event_loop;
 #[path = "app/expand.rs"]
 mod expand;
+#[path = "app/open_click.rs"]
+mod open_click;
+#[path = "app/symbol_nav.rs"]
+mod symbol_nav;
 
 const DIRTY_CLOSE_WARNING: &str = "buffer is dirty. ctrl c to force close.";
 const CLOSE_ABORTED_MESSAGE: &str = "Close aborted";
@@ -201,6 +205,9 @@ pub struct App {
     /// the web compare page (`~/.local/share/gargo/diff_viewed.db`).
     diff_viewed_store: Option<crate::command::diff_viewed::ViewedStore>,
     plugin_host: PluginHost,
+    /// Lazily-built tree-sitter symbol index for fuzzy goto-definition; `None`
+    /// until the first lookup so users who never trigger it pay no scan cost.
+    symbol_index: Option<std::sync::Arc<crate::command::symbol_index::SymbolIndex>>,
     pending_count: Option<usize>,
     pending_edit_jump_locations: Vec<JumpLocation>,
     suspend_jump_recording: bool,
@@ -217,6 +224,10 @@ pub struct App {
     /// the left button goes down inside a buffer pane; consumed by
     /// `Action::BufferDrag` events until the button is released.
     drag_anchor: Option<(usize, usize)>,
+    /// Edge auto-scroll for an in-flight drag selection: while the pointer
+    /// rests on (or past) a pane's top/bottom row, the frame loop replays the
+    /// last drag position so the view keeps scrolling without mouse motion.
+    drag_autoscroll: Option<click::DragAutoscroll>,
     /// Background `git push` plumbing (lazygit-style, non-blocking): the worker
     /// thread sends its final status-bar message over `git_push_tx`, drained in
     /// `poll_git_push`. `git_push_in_flight` guards against overlapping pushes.
@@ -297,6 +308,7 @@ impl App {
             recent_projects,
             diff_viewed_store: None,
             plugin_host: PluginHost::new(Vec::new()),
+            symbol_index: None,
             pending_count: None,
             pending_edit_jump_locations: Vec::new(),
             suspend_jump_recording: false,
@@ -310,6 +322,7 @@ impl App {
             last_term_rows: 40,
             expand_chain: None,
             drag_anchor: None,
+            drag_autoscroll: None,
             git_push_tx,
             git_push_rx,
             git_push_in_flight: false,
@@ -323,6 +336,14 @@ impl App {
         app.queue_git_status_refresh(true);
         app.queue_active_doc_git_refresh(true);
         app
+    }
+
+    /// Move the active buffer's cursor to `line` (0-based); startup jump for
+    /// the CLI's vi-style `+N` argument.
+    pub fn jump_active_buffer_to_line(&mut self, line: usize) {
+        self.editor
+            .active_buffer_mut()
+            .set_cursor_line_char(line, 0);
     }
 
     fn count_behavior(action: &CoreAction) -> Option<CountBehavior> {
@@ -1600,6 +1621,12 @@ impl App {
         format!("{}:{}:{}", rel, line + 1, char_col + 1)
     }
 
+    /// Inverse of [`Self::char_col_from_utf16`]: utf16 code-unit column of the
+    /// given char column within `line`.
+    fn utf16_col_from_char(line: &str, char_col: usize) -> usize {
+        line.chars().take(char_col).map(char::len_utf16).sum()
+    }
+
     fn char_col_from_utf16(line: &str, character_utf16: usize) -> usize {
         let mut utf16_col = 0usize;
         for (char_col, ch) in line.chars().enumerate() {
@@ -1621,15 +1648,38 @@ impl App {
         line: usize,
         character_utf16: usize,
     ) -> (Vec<String>, Option<usize>, usize) {
-        let mut target_char_col = character_utf16;
+        self.reference_preview_lines_with_column(path, line, character_utf16, |line_text| {
+            Self::char_col_from_utf16(line_text, character_utf16)
+        })
+    }
+
+    fn reference_preview_lines_for_char_location(
+        &self,
+        path: &Path,
+        line: usize,
+        char_col: usize,
+    ) -> (Vec<String>, Option<usize>, usize) {
+        self.reference_preview_lines_with_column(path, line, char_col, |_| char_col)
+    }
+
+    /// Shared preview builder. `fallback_char_col` is used when the file can't
+    /// be read; otherwise `resolve_char_col` maps the target line's text to the
+    /// char column the preview should highlight.
+    fn reference_preview_lines_with_column(
+        &self,
+        path: &Path,
+        line: usize,
+        fallback_char_col: usize,
+        resolve_char_col: impl Fn(&str) -> usize,
+    ) -> (Vec<String>, Option<usize>, usize) {
+        let mut target_char_col = fallback_char_col;
         let mut lines = Vec::new();
 
         if let Ok(content) = std::fs::read_to_string(path) {
             let file_lines: Vec<&str> = content.lines().collect();
             if !file_lines.is_empty() {
                 let target_line = line.min(file_lines.len().saturating_sub(1));
-                target_char_col =
-                    Self::char_col_from_utf16(file_lines[target_line], character_utf16);
+                target_char_col = resolve_char_col(file_lines[target_line]);
                 lines.push(self.lsp_location_label_base(path, line, target_char_col));
 
                 let start = target_line.saturating_sub(3);
@@ -1967,6 +2017,10 @@ impl App {
             // Flush any deferred highlight updates before rendering
             self.editor.update_highlights_if_dirty();
 
+            // Step drag-selection edge auto-scroll while the pointer rests on
+            // a pane's top/bottom row (no mouse events arrive without motion).
+            self.tick_drag_autoscroll();
+
             // Update find/replace popup preview if active
             if let Some(popup) = self.compositor.find_replace_popup_mut() {
                 let document_rope = &self.editor.active_buffer().rope;
@@ -2198,6 +2252,14 @@ impl App {
                 self.handle_buffer_click(buffer_id, screen_col, screen_row);
                 false
             }
+            Action::BufferOpenClick {
+                buffer_id,
+                screen_col,
+                screen_row,
+            } => {
+                self.handle_buffer_open_click(buffer_id, screen_col, screen_row);
+                false
+            }
             Action::BufferDrag {
                 buffer_id,
                 screen_col,
@@ -2314,6 +2376,9 @@ impl App {
         if matches!(event, PluginEvent::BufferActivated { .. }) {
             self.record_recent_project_open_for_active_buffer();
         }
+        if let PluginEvent::BufferSaved { doc_id } = &event {
+            self.update_symbol_index_for_saved_doc(*doc_id);
+        }
         let ctx = PluginContext::new(&self.editor, &self.project_root, &self.config);
         let outputs = self.plugin_host.on_event(&event, &ctx);
         self.apply_plugin_outputs(outputs);
@@ -2352,6 +2417,9 @@ impl App {
                 }
                 PluginOutput::ClearDiagnostics { path } => {
                     self.editor.clear_lsp_diagnostics_for_path(&path);
+                }
+                PluginOutput::LspGotoDefinitionUnavailable => {
+                    self.goto_definition_via_symbol_index();
                 }
             }
         }
@@ -3418,6 +3486,104 @@ mod tests {
     }
 
     #[test]
+    fn frame_tick_keeps_autoscrolling_while_drag_rests_on_top_row() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+            MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            }
+        }
+
+        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let mut app = test_app_with_text(&text);
+        app.last_term_cols = 80;
+        app.last_term_rows = 24;
+        app.editor.active_buffer_mut().scroll_offset = 50;
+
+        // Full input path, as App::run drives it: the compositor captures the
+        // gesture and emits actions, dispatch routes them to the handlers.
+        let down =
+            app.compositor
+                .handle_mouse(&mouse(MouseEventKind::Down(MouseButton::Left), 10, 10));
+        let EventResult::Action(action) = down else {
+            panic!("mouse down over a pane must emit BufferClick, got {down:?}");
+        };
+        app.dispatch_action(action);
+        let drag =
+            app.compositor
+                .handle_mouse(&mouse(MouseEventKind::Drag(MouseButton::Left), 10, 0));
+        let EventResult::Action(action) = drag else {
+            panic!("captured drag must emit BufferDrag, got {drag:?}");
+        };
+        app.dispatch_action(action);
+        assert_eq!(app.editor.active_buffer().scroll_offset, 49);
+
+        // No further mouse events: the per-frame tick must keep scrolling
+        // once the step interval elapses.
+        std::thread::sleep(Duration::from_millis(60));
+        app.tick_drag_autoscroll();
+        assert_eq!(
+            app.editor.active_buffer().scroll_offset,
+            48,
+            "frame tick must scroll while the drag rests on the top row"
+        );
+
+        // Releasing the button clears the compositor's capture; the next
+        // tick disarms without scrolling.
+        app.compositor
+            .handle_mouse(&mouse(MouseEventKind::Up(MouseButton::Left), 10, 0));
+        std::thread::sleep(Duration::from_millis(60));
+        app.tick_drag_autoscroll();
+        assert_eq!(app.editor.active_buffer().scroll_offset, 48);
+        assert!(app.drag_autoscroll.is_none());
+    }
+
+    #[test]
+    fn drag_at_pane_edges_autoscrolls_selection() {
+        let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        let mut app = test_app_with_text(&text);
+        app.last_term_cols = 80;
+        app.last_term_rows = 24; // editor pane: rows 0..=21 (status/notification take 2)
+        let buffer_id = app.editor.active_buffer().id;
+        app.editor.active_buffer_mut().scroll_offset = 50;
+
+        // Mouse-down mid-pane seeds the drag anchor.
+        app.handle_buffer_click(buffer_id, 10, 10);
+        assert!(app.drag_anchor.is_some(), "click must seed the drag anchor");
+
+        // Dragging onto the pane's top row scrolls one line into the text
+        // above and moves the selection head to the newly revealed line.
+        app.handle_buffer_drag(buffer_id, 10, 0);
+        let doc = app.editor.active_buffer();
+        assert_eq!(doc.scroll_offset, 49, "top-edge drag must scroll up");
+        assert_eq!(doc.rope.char_to_line(doc.cursors[0]), 49);
+        assert!(doc.selections[0].is_some(), "drag must extend a selection");
+        assert!(
+            app.drag_autoscroll.is_some(),
+            "edge drag must arm auto-scroll"
+        );
+
+        // A second drag event before the step interval elapses is throttled.
+        app.handle_buffer_drag(buffer_id, 10, 0);
+        assert_eq!(app.editor.active_buffer().scroll_offset, 49);
+
+        // Dragging back inside the pane disarms auto-scroll.
+        app.handle_buffer_drag(buffer_id, 10, 10);
+        assert!(app.drag_autoscroll.is_none());
+
+        // Dragging past the pane's bottom edge scrolls down and pins the
+        // selection head on the bottom visible line.
+        app.handle_buffer_drag(buffer_id, 10, 30);
+        let doc = app.editor.active_buffer();
+        assert_eq!(doc.scroll_offset, 50, "bottom-edge drag must scroll down");
+        assert_eq!(doc.rope.char_to_line(doc.cursors[0]), 50 + 22 - 1);
+        assert!(app.drag_autoscroll.is_some());
+    }
+
+    #[test]
     fn path_within_project_root_accepts_direct_and_canonicalized_matches() {
         let temp = tempdir().expect("create temp dir");
         let root = temp.path().join("repo");
@@ -4182,10 +4348,16 @@ mod tests {
             },
         )));
 
+        // No jump target on this line, so the command falls through to the
+        // symbol-index fallback (LSP plugin is disabled) — the buffer stays put
+        // and the fallback reports one of its non-jump outcomes.
         assert!(app.editor.active_buffer().file_path.is_none());
-        assert_eq!(
-            app.editor.message.as_deref(),
-            Some("Unknown plugin command: lsp.goto_definition")
+        let msg = app.editor.message.as_deref().unwrap_or_default();
+        assert!(
+            msg == "Symbol index is building — try again in a moment"
+                || msg == "No identifier under cursor"
+                || msg.starts_with("No definition found for"),
+            "unexpected message: {msg}"
         );
     }
 
@@ -4308,11 +4480,15 @@ mod tests {
             },
         )));
 
-        // Active buffer should still be the scratch (no file opened)
+        // Active buffer should still be the scratch (no file opened). With the
+        // LSP plugin disabled, `g d` now falls back to the symbol index: the
+        // header word either misses or the index is still building.
         assert!(app.editor.active_buffer().file_path.is_none());
-        assert_eq!(
-            app.editor.message.as_deref(),
-            Some("Unknown plugin command: lsp.goto_definition")
+        let msg = app.editor.message.as_deref().unwrap_or_default();
+        assert!(
+            msg == "Symbol index is building — try again in a moment"
+                || msg == "No definition found for 'Global'",
+            "unexpected message: {msg}"
         );
     }
 
@@ -4353,6 +4529,59 @@ mod tests {
         );
         assert_eq!(palette.candidates.len(), 2);
         assert!(palette.candidates[0].label.contains("main.rs:1:4"));
+    }
+
+    #[test]
+    fn symbol_index_goto_definition_opens_picker_ranked_by_proximity() {
+        let temp = tempdir().expect("temp dir");
+        fs::create_dir(temp.path().join(".git")).expect("git dir");
+        fs::create_dir(temp.path().join("src")).expect("src dir");
+        fs::create_dir(temp.path().join("other")).expect("other dir");
+        fs::write(temp.path().join("src/near.rs"), "fn dup() {}\n").expect("write near");
+        fs::write(temp.path().join("other/far.rs"), "fn dup() {}\n").expect("write far");
+        let current = temp.path().join("src/current.rs");
+        fs::write(&current, "fn main() { dup(); }\n").expect("write current");
+
+        let mut config = Config::default();
+        config.plugins.enabled.clear();
+        let editor = Editor::open(&current.to_string_lossy());
+        let mut app = App::new(editor, config, Some(temp.path()));
+        // Cursor on the `dup` call site.
+        app.editor.active_buffer_mut().set_cursor_line_char(0, 13);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            app.dispatch(Action::App(AppAction::Integration(
+                IntegrationAction::RunPluginCommand {
+                    id: "lsp.goto_definition".to_string(),
+                },
+            )));
+            if app.compositor.palette_mut().is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "picker never opened; message: {:?}",
+                app.editor.message
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let palette = app.compositor.palette_mut().expect("palette");
+        assert_eq!(
+            palette.mode,
+            crate::ui::overlays::palette::PaletteMode::ReferencePicker
+        );
+        assert_eq!(palette.candidates.len(), 2);
+        // Same-directory hit ranks above the distant one.
+        assert!(
+            palette.candidates[0].label.contains("src/near.rs"),
+            "unexpected first candidate: {}",
+            palette.candidates[0].label
+        );
+        assert!(palette.candidates[1].label.contains("other/far.rs"));
+        // Tags kind is surfaced in the label.
+        assert!(palette.candidates[0].label.contains("[function]"));
     }
 
     #[test]

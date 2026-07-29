@@ -15,6 +15,15 @@ pub enum Action {
         screen_col: u16,
         screen_row: u16,
     },
+    /// A ctrl+left-click landed inside a buffer pane (ghostty-style
+    /// cmd+click). The dispatcher resolves the path or URL under the click:
+    /// a file opens as a buffer (jumping to a trailing `:line`), a directory
+    /// opens the explorer there, a URL opens in the browser.
+    BufferOpenClick {
+        buffer_id: usize,
+        screen_col: u16,
+        screen_row: u16,
+    },
     /// The pointer moved while the left button is held after a click landed in
     /// a buffer pane. The dispatcher extends the selection from the original
     /// click anchor to the current screen position.
@@ -208,6 +217,7 @@ pub enum WorkspaceAction {
     OpenBufferPicker,
     OpenJumpListPicker,
     OpenSymbolPicker,
+    RebuildSymbolIndex,
     OpenSmartCopy,
     OpenGlobalSearch,
     ToggleExplorer,
@@ -240,6 +250,7 @@ pub enum WorkspaceAction {
         path: String,
         viewed: bool,
     },
+    ToggleBranchCompareSplitPreview,
     OpenCommitDiffView(String),
     ShowLastUsedSidebar,
     OpenSearchResultsBuffer {
@@ -318,6 +329,9 @@ pub enum NavigationAction {
         line: usize,
         character_utf16: usize,
     },
+    /// Fuzzy goto-definition via the workspace tree-sitter symbol index,
+    /// independent of LSP availability.
+    GotoDefinitionViaSymbolIndex,
     ExecutePaletteCommand(usize),
 }
 

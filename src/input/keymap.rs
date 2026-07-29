@@ -241,6 +241,11 @@ pub fn resolve(key: KeyEvent, state: &mut KeyState, mode: &Mode, is_recording: b
         }
     }
 
+    // Alt+O → cycle focus to the next window (all modes)
+    if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('o') {
+        return app(AppAction::Window(WindowAction::WindowFocusNext));
+    }
+
     // F4 → replay the last recorded/played macro (all modes)
     if key.code == KeyCode::F(4) {
         return core(CoreAction::MacroPlayLast);
@@ -1161,6 +1166,24 @@ mod tests {
                 false,
             );
             assert_eq!(action, core(CoreAction::MacroPlayLast));
+        }
+    }
+
+    #[test]
+    fn alt_o_cycles_window_focus_in_all_modes() {
+        for mode in [Mode::Normal, Mode::Visual, Mode::Insert] {
+            let mut state = KeyState::Normal;
+            let action = resolve(
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
+                &mut state,
+                &mode,
+                false,
+            );
+            assert_eq!(
+                action,
+                app(AppAction::Window(WindowAction::WindowFocusNext))
+            );
+            assert_eq!(state, KeyState::Normal);
         }
     }
 

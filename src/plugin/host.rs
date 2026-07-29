@@ -40,6 +40,10 @@ impl PluginHost {
             .collect()
     }
 
+    pub fn has_command(&self, command_id: &str) -> bool {
+        self.command_to_plugin_index.contains_key(command_id)
+    }
+
     pub fn run_command(&mut self, command_id: &str, ctx: &PluginContext) -> Vec<PluginOutput> {
         let Some(plugin_idx) = self.command_to_plugin_index.get(command_id).copied() else {
             return vec![PluginOutput::Message(format!(

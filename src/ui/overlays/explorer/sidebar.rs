@@ -1,14 +1,17 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
+use crossterm::style::Color;
 
-use crate::command::git::{GitFileEntry, GitFileStatus, dir_git_status};
-use crate::diff_render::LineKind;
+use crate::command::git::{GitFileEntry, GitFileStatus, GitLineStatus, dir_git_status};
 use crate::input::action::{Action, AppAction, BufferAction, IntegrationAction, WorkspaceAction};
 use crate::input::chord::KeyState;
+use crate::split_render::{SplitCell, SplitKind, SplitRow};
 use crate::syntax::highlight::{HighlightSpan, highlight_text};
 use crate::syntax::language::LanguageRegistry;
 use crate::syntax::theme::Theme;
@@ -21,22 +24,16 @@ use crate::ui::shared::file_browser::{
 use crate::ui::shared::filtering::fuzzy_match;
 use crate::ui::text::{slice_display_window, truncate_to_width};
 use crate::ui::text_input::delete_prev_word_input;
-use crate::ui::views::text_view::render_highlighted_line_windowed;
+use crate::ui::views::text_view::{git_gutter_style, render_highlighted_line_windowed};
 
 const PREVIEW_MAX_LINES: usize = 500;
 const PREVIEW_HSCROLL_STEP: usize = 8;
-
-/// Rendered diff preview for one branch-compare file: the file's lines with
-/// normal syntax highlighting, plus per-line add/remove gutter markers.
-#[derive(Clone, Default)]
-struct DiffPreview {
-    lines: Vec<String>,
-    spans: HashMap<usize, Vec<HighlightSpan>>,
-    /// display line → Add / Remove (context lines are absent).
-    gutter: HashMap<usize, LineKind>,
-    /// hunk headers and placeholder lines, rendered dim without highlight.
-    meta: std::collections::HashSet<usize>,
-}
+/// Lines scrolled per mouse-wheel tick over the preview pane.
+const MOUSE_SCROLL_LINES: usize = 3;
+/// How many entries above/below the selection get their previews prefetched
+/// so consecutive j/k moves hit the cache instead of waiting on the worker.
+const PREVIEW_PREFETCH_BEHIND: usize = 5;
+const PREVIEW_PREFETCH_AHEAD: usize = 15;
 
 struct DirEntry {
     name: String,
@@ -62,6 +59,59 @@ enum PreviewKind {
     Dir,
 }
 
+struct PreviewRequest {
+    path: PathBuf,
+}
+
+struct PreviewResult {
+    path: PathBuf,
+    mtime: Option<SystemTime>,
+    lines: Vec<String>,
+    spans: HashMap<usize, Vec<HighlightSpan>>,
+}
+
+struct CachedPreview {
+    mtime: Option<SystemTime>,
+    lines: Vec<String>,
+    spans: HashMap<usize, Vec<HighlightSpan>>,
+}
+
+/// Split-preview payload for one branch-compare file: aligned rows plus
+/// per-side syntax highlight spans, keyed by 0-based line in that side's
+/// file version (capped at [`PREVIEW_MAX_LINES`] like the inline preview).
+#[derive(Clone, Default)]
+struct SplitPreview {
+    rows: Vec<SplitRow>,
+    left_spans: HashMap<usize, Vec<HighlightSpan>>,
+    right_spans: HashMap<usize, Vec<HighlightSpan>>,
+}
+
+/// Background thread that reads and highlights requested files, so selection
+/// moves in the sidebar never block the render loop on file I/O or
+/// tree-sitter parsing.
+fn preview_worker(rx: mpsc::Receiver<PreviewRequest>, tx: mpsc::Sender<PreviewResult>) {
+    let lang_registry = LanguageRegistry::new();
+    while let Ok(req) = rx.recv() {
+        let mtime = file_mtime(&req.path);
+        let (lines, spans) = read_file_preview(&req.path, &lang_registry);
+        if tx
+            .send(PreviewResult {
+                path: req.path,
+                mtime,
+                lines,
+                spans,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 pub struct Explorer {
     mode: ExplorerMode,
     current_dir: PathBuf,
@@ -82,13 +132,11 @@ pub struct Explorer {
     // Populated only when mode == BranchCompare.
     branch_compare_base: Option<String>,
     branch_compare_files: Vec<GitFileEntry>,
+    /// True while the branch-compare file list is being computed in the
+    /// background; lets the render distinguish "loading" from "no diff".
+    branch_compare_loading: bool,
     // Paths whose "viewed" checkbox is ticked (BranchCompare mode only).
     branch_compare_viewed: HashSet<String>,
-    // path → highlighted diff preview; cleared when the file list refreshes.
-    branch_compare_diff_cache: HashMap<String, DiffPreview>,
-    // Gutter/meta info for the currently shown diff preview.
-    preview_diff_gutter: HashMap<usize, LineKind>,
-    preview_diff_meta: std::collections::HashSet<usize>,
     // preview
     preview_mode: bool,
     preview_lines: Vec<String>,
@@ -97,9 +145,39 @@ pub struct Explorer {
     preview_kind: PreviewKind,
     preview_scroll: usize,
     preview_horizontal_scroll: usize,
+    /// Pending scroll target (0-based preview line): once the async preview
+    /// content arrives, the render centers this line. Seeded in
+    /// branch-compare mode with the first changed line of the selected file.
+    preview_target_line: Option<usize>,
+    /// Per-line diff statuses of the previewed branch-compare file against
+    /// the compare base, rendered as a git gutter in the preview pane.
+    preview_gutter: HashMap<usize, GitLineStatus>,
+    /// Cache of per-line diff statuses per branch-compare file, so moving
+    /// the selection doesn't recompute single-file diffs.
+    branch_diff_gutter_cache: HashMap<String, HashMap<usize, GitLineStatus>>,
+    /// When true, branch-compare file previews render side-by-side
+    /// (base version left, worktree right) instead of inline with a gutter.
+    preview_split: bool,
+    /// Split payload of the previewed branch-compare file (aligned rows +
+    /// per-side syntax highlights); empty when split mode is off or the
+    /// split is unavailable (binary, missing file).
+    preview_split_rows: Vec<SplitRow>,
+    preview_split_left_spans: HashMap<usize, Vec<HighlightSpan>>,
+    preview_split_right_spans: HashMap<usize, Vec<HighlightSpan>>,
+    /// Cache of split payloads per branch-compare file (empty rows =
+    /// unavailable).
+    branch_diff_split_cache: HashMap<String, SplitPreview>,
     preview_image: Option<(PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>)>,
     preview_image_cache: HashMap<PathBuf, std::sync::Arc<crate::ui::image::EncodedImage>>,
     pending_image_request: Option<crate::ui::image::ImageRenderRequest>,
+    // Async preview loading: file contents are read and highlighted on a
+    // worker thread (spawned lazily) and cached per path.
+    preview_cache: HashMap<PathBuf, CachedPreview>,
+    preview_requested: HashSet<PathBuf>,
+    preview_pending: Option<PathBuf>,
+    preview_request_tx: Option<mpsc::Sender<PreviewRequest>>,
+    preview_result_rx: Option<mpsc::Receiver<PreviewResult>>,
+    _preview_worker: Option<thread::JoinHandle<()>>,
 }
 
 impl Explorer {
@@ -144,10 +222,8 @@ impl Explorer {
             git_status_map: git_status_map.clone(),
             branch_compare_base: None,
             branch_compare_files: Vec::new(),
+            branch_compare_loading: false,
             branch_compare_viewed: HashSet::new(),
-            branch_compare_diff_cache: HashMap::new(),
-            preview_diff_gutter: HashMap::new(),
-            preview_diff_meta: std::collections::HashSet::new(),
             preview_mode: false,
             preview_lines: Vec::new(),
             preview_spans: HashMap::new(),
@@ -155,9 +231,23 @@ impl Explorer {
             preview_kind: PreviewKind::None,
             preview_scroll: 0,
             preview_horizontal_scroll: 0,
+            preview_target_line: None,
+            preview_gutter: HashMap::new(),
+            branch_diff_gutter_cache: HashMap::new(),
+            preview_split: false,
+            preview_split_rows: Vec::new(),
+            preview_split_left_spans: HashMap::new(),
+            preview_split_right_spans: HashMap::new(),
+            branch_diff_split_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
+            preview_cache: HashMap::new(),
+            preview_requested: HashSet::new(),
+            preview_pending: None,
+            preview_request_tx: None,
+            preview_result_rx: None,
+            _preview_worker: None,
         };
         explorer.read_directory();
         explorer
@@ -190,10 +280,8 @@ impl Explorer {
             git_status_map: HashMap::new(),
             branch_compare_base: Some(base_branch),
             branch_compare_files: files,
+            branch_compare_loading: false,
             branch_compare_viewed: HashSet::new(),
-            branch_compare_diff_cache: HashMap::new(),
-            preview_diff_gutter: HashMap::new(),
-            preview_diff_meta: std::collections::HashSet::new(),
             preview_mode: false,
             preview_lines: Vec::new(),
             preview_spans: HashMap::new(),
@@ -201,9 +289,23 @@ impl Explorer {
             preview_kind: PreviewKind::None,
             preview_scroll: 0,
             preview_horizontal_scroll: 0,
+            preview_target_line: None,
+            preview_gutter: HashMap::new(),
+            branch_diff_gutter_cache: HashMap::new(),
+            preview_split: false,
+            preview_split_rows: Vec::new(),
+            preview_split_left_spans: HashMap::new(),
+            preview_split_right_spans: HashMap::new(),
+            branch_diff_split_cache: HashMap::new(),
             preview_image: None,
             preview_image_cache: HashMap::new(),
             pending_image_request: None,
+            preview_cache: HashMap::new(),
+            preview_requested: HashSet::new(),
+            preview_pending: None,
+            preview_request_tx: None,
+            preview_result_rx: None,
+            _preview_worker: None,
         };
         explorer.read_directory();
         explorer
@@ -217,21 +319,36 @@ impl Explorer {
         self.branch_compare_base.as_deref()
     }
 
-    /// Replace the branch-compare file list and reread entries. Preserves
-    /// the selected file by path when possible.
+    /// Mark the branch-compare file list as being computed in the
+    /// background (cleared by [`apply_branch_diff_files`]).
+    pub fn set_branch_compare_loading(&mut self, on: bool) {
+        self.branch_compare_loading = on;
+    }
+
+    /// Replace the branch-compare file list and reread entries. A no-op when
+    /// the list is unchanged, so background refreshes don't visibly disturb
+    /// the sidebar. Preserves the selected file (by path) and the scroll
+    /// position when possible.
     pub fn apply_branch_diff_files(&mut self, files: Vec<GitFileEntry>) {
         if !self.is_branch_compare() {
             return;
         }
+        self.branch_compare_loading = false;
+        if files == self.branch_compare_files {
+            return;
+        }
+        self.branch_diff_gutter_cache.clear();
+        self.branch_diff_split_cache.clear();
         let selected_name = self.selected_name().map(|s| s.to_string());
+        let scroll_offset = self.scroll_offset;
         self.branch_compare_files = files;
-        self.branch_compare_diff_cache.clear();
         self.read_directory();
+        // Restore the scroll position; render clamps it to keep the
+        // selection visible.
+        self.scroll_offset = scroll_offset;
         if let Some(name) = selected_name {
             self.select_by_name(&name);
         }
-        // Diff content may have changed; force the preview to reload.
-        self.preview_path = None;
         self.update_preview();
     }
 
@@ -275,9 +392,13 @@ impl Explorer {
         self.preview_kind = PreviewKind::None;
         self.preview_scroll = 0;
         self.preview_horizontal_scroll = 0;
+        self.preview_target_line = None;
+        self.preview_gutter.clear();
+        self.preview_split_rows.clear();
+        self.preview_split_left_spans.clear();
+        self.preview_split_right_spans.clear();
         self.preview_image = None;
-        self.preview_diff_gutter.clear();
-        self.preview_diff_meta.clear();
+        self.preview_pending = None;
     }
 
     pub fn take_pending_image_request(&mut self) -> Option<crate::ui::image::ImageRenderRequest> {
@@ -327,6 +448,7 @@ impl Explorer {
             self.preview_spans.clear();
             self.preview_path = None;
             self.preview_kind = PreviewKind::None;
+            self.preview_gutter.clear();
             self.preview_image = None;
             return;
         };
@@ -336,10 +458,13 @@ impl Explorer {
             self.preview_spans.clear();
             self.preview_path = None;
             self.preview_kind = PreviewKind::None;
+            self.preview_gutter.clear();
             self.preview_image = None;
             return;
         }
-        let path = self.current_dir.join(&entry.name);
+        let entry_name = entry.name.clone();
+        let entry_is_dir = entry.is_dir;
+        let path = self.current_dir.join(&entry_name);
         if self.preview_path.as_ref() == Some(&path) {
             return;
         }
@@ -348,56 +473,273 @@ impl Explorer {
         self.preview_horizontal_scroll = 0;
         self.preview_spans.clear();
         self.preview_image = None;
+        self.preview_gutter = if entry_is_dir {
+            HashMap::new()
+        } else {
+            self.branch_compare_gutter(&entry_name)
+        };
+        let split = if entry_is_dir || !self.preview_split {
+            SplitPreview::default()
+        } else {
+            self.branch_compare_split_preview(&entry_name)
+        };
+        self.preview_target_line = if split.rows.is_empty() {
+            self.preview_gutter.keys().min().copied()
+        } else {
+            first_changed_split_row(&split.rows)
+        };
+        self.apply_split_preview(split);
 
-        // Branch-compare mode previews the file's diff against the base
-        // branch instead of the file contents.
-        if self.mode == ExplorerMode::BranchCompare && !entry.is_dir {
-            let name = entry.name.clone();
-            let preview = self.branch_compare_diff_preview(&name);
-            self.preview_lines = preview.lines;
-            self.preview_spans = preview.spans;
-            self.preview_diff_gutter = preview.gutter;
-            self.preview_diff_meta = preview.meta;
-            self.preview_kind = PreviewKind::File;
-            self.preview_path = Some(path);
-            return;
-        }
-        self.preview_diff_gutter.clear();
-        self.preview_diff_meta.clear();
-
-        if entry.is_dir {
+        if entry_is_dir {
             self.preview_lines = build_dir_listing(&path);
             self.preview_kind = PreviewKind::Dir;
         } else if self.try_load_preview_image(&path) {
             // Image preview state set above.
         } else {
-            let (lines, spans) = read_file_preview(&path);
-            self.preview_lines = lines;
-            self.preview_spans = spans;
+            self.load_file_preview(&path);
             self.preview_kind = PreviewKind::File;
         }
         self.preview_path = Some(path);
     }
 
-    /// The base-vs-worktree diff for one file, as normally syntax-highlighted
-    /// code lines with add/remove gutter markers.
-    fn branch_compare_diff_preview(&mut self, path: &str) -> DiffPreview {
-        if let Some(cached) = self.branch_compare_diff_cache.get(path) {
-            return cached.clone();
+    /// Per-line diff statuses (0-based) of `rel_path` against the compare
+    /// base, cached per path. Empty outside branch-compare mode or when the
+    /// file has no textual hunks (binary, unchanged).
+    fn branch_compare_gutter(&mut self, rel_path: &str) -> HashMap<usize, GitLineStatus> {
+        if self.mode != ExplorerMode::BranchCompare {
+            return HashMap::new();
         }
         let Some(base) = self.branch_compare_base.clone() else {
-            return diff_preview_placeholder("<no base branch>");
+            return HashMap::new();
         };
-        let diff = crate::command::git_backend::compare_worktree_diff_text(
+        if let Some(cached) = self.branch_diff_gutter_cache.get(rel_path) {
+            return cached.clone();
+        }
+        let gutter = crate::command::git::git_branch_compare_line_status_in(
             &self.project_root,
             &base,
-            Some(path),
-        )
-        .unwrap_or_default();
-        let preview = build_diff_preview(&diff, path);
-        self.branch_compare_diff_cache
-            .insert(path.to_string(), preview.clone());
+            rel_path,
+        );
+        self.branch_diff_gutter_cache
+            .insert(rel_path.to_string(), gutter.clone());
+        gutter
+    }
+
+    /// Cached split payload of `rel_path` against the compare base: aligned
+    /// rows plus syntax highlight spans for both sides. Empty when
+    /// unavailable (outside branch-compare mode, binary, missing file).
+    fn branch_compare_split_preview(&mut self, rel_path: &str) -> SplitPreview {
+        if self.mode != ExplorerMode::BranchCompare {
+            return SplitPreview::default();
+        }
+        let Some(base) = self.branch_compare_base.clone() else {
+            return SplitPreview::default();
+        };
+        if let Some(cached) = self.branch_diff_split_cache.get(rel_path) {
+            return cached.clone();
+        }
+        let preview =
+            crate::command::git::git_branch_compare_split_in(&self.project_root, &base, rel_path)
+                .map(|split| {
+                    let lang_registry = LanguageRegistry::new();
+                    let lang_def = lang_registry.detect_by_extension(rel_path);
+                    let spans_for = |text: Option<&String>| match (text, lang_def) {
+                        (Some(text), Some(lang_def)) => {
+                            let capped: Vec<&str> = text.lines().take(PREVIEW_MAX_LINES).collect();
+                            highlight_text(&capped.join("\n"), lang_def)
+                        }
+                        _ => HashMap::new(),
+                    };
+                    SplitPreview {
+                        left_spans: spans_for(split.base_text.as_ref()),
+                        right_spans: spans_for(split.worktree_text.as_ref()),
+                        rows: split.rows,
+                    }
+                })
+                .unwrap_or_default();
+        self.branch_diff_split_cache
+            .insert(rel_path.to_string(), preview.clone());
         preview
+    }
+
+    /// Install `split` as the current preview's split payload.
+    fn apply_split_preview(&mut self, split: SplitPreview) {
+        self.preview_split_rows = split.rows;
+        self.preview_split_left_spans = split.left_spans;
+        self.preview_split_right_spans = split.right_spans;
+    }
+
+    /// Turn the split (side-by-side) branch-compare preview on or off and
+    /// refresh the current preview accordingly.
+    pub fn set_preview_split(&mut self, on: bool) {
+        if self.preview_split == on {
+            return;
+        }
+        self.preview_split = on;
+        if self.mode != ExplorerMode::BranchCompare {
+            return;
+        }
+        // Recompute the current preview state under the new mode: scroll
+        // domains differ (file lines vs aligned rows), so re-seed the first
+        // diff target rather than keeping a stale offset.
+        let rel_path = self
+            .preview_path
+            .as_ref()
+            .filter(|_| self.preview_kind == PreviewKind::File)
+            .and_then(|p| p.strip_prefix(&self.current_dir).ok())
+            .map(|p| p.to_string_lossy().to_string());
+        let Some(rel_path) = rel_path else {
+            return;
+        };
+        let split = if on {
+            self.branch_compare_split_preview(&rel_path)
+        } else {
+            SplitPreview::default()
+        };
+        self.preview_scroll = 0;
+        self.preview_horizontal_scroll = 0;
+        self.preview_target_line = if split.rows.is_empty() {
+            self.preview_gutter.keys().min().copied()
+        } else {
+            first_changed_split_row(&split.rows)
+        };
+        self.apply_split_preview(split);
+    }
+
+    pub fn toggle_preview_split(&mut self) {
+        self.set_preview_split(!self.preview_split);
+    }
+
+    pub fn preview_split_enabled(&self) -> bool {
+        self.preview_split
+    }
+
+    /// Scroll the preview pane in response to a mouse-wheel event over the
+    /// editor area. Returns `Ignored` when preview mode is off so the wheel
+    /// falls through to the default buffer scroll.
+    pub fn handle_preview_mouse_scroll(&mut self, kind: MouseEventKind) -> EventResult {
+        if !self.preview_mode {
+            return EventResult::Ignored;
+        }
+        match kind {
+            MouseEventKind::ScrollDown => {
+                self.preview_target_line = None;
+                self.preview_scroll = self.preview_scroll.saturating_add(MOUSE_SCROLL_LINES);
+                EventResult::Consumed
+            }
+            MouseEventKind::ScrollUp => {
+                self.preview_target_line = None;
+                self.preview_scroll = self.preview_scroll.saturating_sub(MOUSE_SCROLL_LINES);
+                EventResult::Consumed
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Show the preview for `path` without blocking the UI thread: serve
+    /// from the cache when fresh, otherwise queue a background load and keep
+    /// showing the stale cached copy (or a blank pane) until the result is
+    /// applied by `poll_preview_results`.
+    fn load_file_preview(&mut self, path: &Path) {
+        self.drain_preview_results();
+        let mtime = file_mtime(path);
+        if let Some(cached) = self.preview_cache.get(path) {
+            self.preview_lines = cached.lines.clone();
+            self.preview_spans = cached.spans.clone();
+            if cached.mtime == mtime {
+                self.preview_pending = None;
+                self.prefetch_nearby_previews();
+                return;
+            }
+        } else {
+            self.preview_lines.clear();
+            self.preview_spans.clear();
+        }
+        self.preview_pending = Some(path.to_path_buf());
+        self.queue_preview_request(path.to_path_buf());
+        self.prefetch_nearby_previews();
+    }
+
+    fn ensure_preview_worker(&mut self) {
+        if self.preview_request_tx.is_some() {
+            return;
+        }
+        let (req_tx, req_rx) = mpsc::channel::<PreviewRequest>();
+        let (res_tx, res_rx) = mpsc::channel::<PreviewResult>();
+        self._preview_worker = Some(thread::spawn(move || preview_worker(req_rx, res_tx)));
+        self.preview_request_tx = Some(req_tx);
+        self.preview_result_rx = Some(res_rx);
+    }
+
+    fn queue_preview_request(&mut self, path: PathBuf) {
+        if self.preview_requested.contains(&path) {
+            return;
+        }
+        self.ensure_preview_worker();
+        let Some(tx) = self.preview_request_tx.clone() else {
+            return;
+        };
+        if tx.send(PreviewRequest { path: path.clone() }).is_ok() {
+            self.preview_requested.insert(path);
+        }
+    }
+
+    fn drain_preview_results(&mut self) {
+        let Some(rx) = &self.preview_result_rx else {
+            return;
+        };
+        while let Ok(result) = rx.try_recv() {
+            self.preview_requested.remove(&result.path);
+            self.preview_cache.insert(
+                result.path,
+                CachedPreview {
+                    mtime: result.mtime,
+                    lines: result.lines,
+                    spans: result.spans,
+                },
+            );
+        }
+    }
+
+    /// Apply the background result for the file currently previewed, if it
+    /// has arrived. Called once per frame from `render_preview`.
+    fn poll_preview_results(&mut self) {
+        let Some(pending) = self.preview_pending.clone() else {
+            return;
+        };
+        self.drain_preview_results();
+        if self.preview_requested.contains(&pending) {
+            return; // still loading
+        }
+        if let Some(cached) = self.preview_cache.get(&pending) {
+            self.preview_lines = cached.lines.clone();
+            self.preview_spans = cached.spans.clone();
+        }
+        self.preview_pending = None;
+    }
+
+    /// Warm the preview cache for entries around the selection.
+    fn prefetch_nearby_previews(&mut self) {
+        if self.visible_entries.is_empty() {
+            return;
+        }
+        let start = self.selected.saturating_sub(PREVIEW_PREFETCH_BEHIND);
+        let end = (self.selected + PREVIEW_PREFETCH_AHEAD).min(self.visible_entries.len());
+        let mut paths = Vec::new();
+        for visible_idx in start..end {
+            let entry = &self.entries[self.visible_entries[visible_idx]];
+            if entry.is_dir || entry.is_repo_header {
+                continue;
+            }
+            let path = self.current_dir.join(&entry.name);
+            if crate::ui::image::is_image_path(&path) || self.preview_cache.contains_key(&path) {
+                continue;
+            }
+            paths.push(path);
+        }
+        for path in paths {
+            self.queue_preview_request(path);
+        }
     }
 
     pub fn render_preview(
@@ -413,6 +755,7 @@ impl Explorer {
         if width == 0 || height == 0 {
             return;
         }
+        self.poll_preview_results();
 
         let default_style = CellStyle::default();
         let dim_style = CellStyle {
@@ -420,16 +763,21 @@ impl Explorer {
             ..CellStyle::default()
         };
 
+        let split_active = self.preview_split
+            && self.mode == ExplorerMode::BranchCompare
+            && self.preview_kind == PreviewKind::File
+            && !self.preview_split_rows.is_empty();
+
         // Title row.
         let title = match (&self.preview_kind, self.preview_path.as_ref()) {
-            (PreviewKind::File, Some(p)) if self.mode == ExplorerMode::BranchCompare => {
-                let rel = p.strip_prefix(&self.project_root).unwrap_or(p);
-                let base = self.branch_compare_base.as_deref().unwrap_or("?");
-                format!("DIFF {}…worktree: {}", base, rel.to_string_lossy())
-            }
             (PreviewKind::File, Some(p)) => {
                 let rel = p.strip_prefix(&self.project_root).unwrap_or(p);
-                format!("PREVIEW: {}", rel.to_string_lossy())
+                let label = if split_active {
+                    "PREVIEW[split]"
+                } else {
+                    "PREVIEW"
+                };
+                format!("{}: {}", label, rel.to_string_lossy())
             }
             (PreviewKind::Dir, Some(p)) => {
                 let rel = p.strip_prefix(&self.project_root).unwrap_or(p);
@@ -466,6 +814,24 @@ impl Explorer {
             return;
         }
 
+        // Side-by-side branch-compare preview: aligned base/worktree rows
+        // replace the inline file body entirely.
+        if split_active {
+            self.render_preview_split(surface, x, body_y, width, body_h, theme);
+            return;
+        }
+
+        // Once the async preview content has arrived, jump to the pending
+        // target line (branch-compare seeds it with the first changed line)
+        // so the diff is visible without manual scrolling.
+        if let Some(target) = self.preview_target_line
+            && self.preview_pending.is_none()
+            && !self.preview_lines.is_empty()
+        {
+            self.preview_scroll = target.saturating_sub(body_h / 3);
+            self.preview_target_line = None;
+        }
+
         // Clamp vertical scroll.
         let max_vscroll = self.preview_lines.len().saturating_sub(body_h);
         if self.preview_scroll > max_vscroll {
@@ -473,44 +839,34 @@ impl Explorer {
         }
 
         let highlight_enabled = self.preview_kind == PreviewKind::File;
-        // Branch-compare diff previews get a 2-column add/remove gutter.
-        let diff_gutter = self.mode == ExplorerMode::BranchCompare
-            && self.preview_kind == PreviewKind::File
-            && width > 2;
-        let gutter_w = if diff_gutter { 2 } else { 0 };
+
+        // Branch-compare previews reserve a git-gutter lane (marker + pad) on
+        // the left, mirroring the editor's per-line change markers.
+        let gutter_w =
+            if self.mode == ExplorerMode::BranchCompare && self.preview_kind == PreviewKind::File {
+                2
+            } else {
+                0
+            };
         let text_x = x + gutter_w;
-        let text_w = width - gutter_w;
+        let text_w = width.saturating_sub(gutter_w);
 
         for row in 0..body_h {
             let line_idx = self.preview_scroll + row;
             let screen_row = body_y + row;
             if line_idx < self.preview_lines.len() {
-                if diff_gutter {
-                    let marker_style = match self.preview_diff_gutter.get(&line_idx) {
-                        Some(LineKind::Add) => CellStyle {
-                            fg: Some(crossterm::style::Color::Green),
-                            ..CellStyle::default()
-                        },
-                        Some(LineKind::Remove) => CellStyle {
-                            fg: Some(crossterm::style::Color::Red),
-                            ..CellStyle::default()
-                        },
-                        _ => default_style,
-                    };
-                    let marker = match self.preview_diff_gutter.get(&line_idx) {
-                        Some(LineKind::Add) | Some(LineKind::Remove) => "▎",
-                        _ => " ",
-                    };
-                    surface.put_str(x, screen_row, marker, &marker_style);
+                if gutter_w > 0 {
+                    if let Some(status) = self.preview_gutter.get(&line_idx) {
+                        let symbol = status.gutter_symbol().to_string();
+                        surface.put_str(x, screen_row, &symbol, &git_gutter_style(status, theme));
+                    } else {
+                        surface.put_str(x, screen_row, " ", &default_style);
+                    }
                     surface.put_str(x + 1, screen_row, " ", &default_style);
                 }
                 let line = &self.preview_lines[line_idx];
                 let window = slice_display_window(line, self.preview_horizontal_scroll, text_w);
-                let is_meta = diff_gutter && self.preview_diff_meta.contains(&line_idx);
-                if highlight_enabled
-                    && !is_meta
-                    && let Some(spans) = self.preview_spans.get(&line_idx)
-                {
+                if highlight_enabled && let Some(spans) = self.preview_spans.get(&line_idx) {
                     render_highlighted_line_windowed(
                         surface,
                         (screen_row, text_x),
@@ -531,12 +887,11 @@ impl Explorer {
                         );
                     }
                 } else {
-                    let style =
-                        if (self.preview_kind == PreviewKind::Dir && line_idx == 0) || is_meta {
-                            dim_style
-                        } else {
-                            default_style
-                        };
+                    let style = if self.preview_kind == PreviewKind::Dir && line_idx == 0 {
+                        dim_style
+                    } else {
+                        default_style
+                    };
                     surface.put_str(text_x, screen_row, window.visible, &style);
                     let pad = text_w.saturating_sub(window.used_width);
                     if pad > 0 {
@@ -552,6 +907,90 @@ impl Explorer {
             } else {
                 surface.fill_region(x, screen_row, width, ' ', &default_style);
             }
+        }
+    }
+
+    /// Render the aligned split rows: base version left, worktree right,
+    /// separated by a dim divider column. Removed/changed lines color the
+    /// left side, added/changed lines the right, GitHub-PR style.
+    fn render_preview_split(
+        &mut self,
+        surface: &mut Surface,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        theme: &Theme,
+    ) {
+        let dim_style = CellStyle {
+            dim: true,
+            ..CellStyle::default()
+        };
+
+        // Jump to the pending first-diff target; rows are available
+        // synchronously so there is nothing to wait for.
+        if let Some(target) = self.preview_target_line.take() {
+            self.preview_scroll = target.saturating_sub(height / 3);
+        }
+        let max_vscroll = self.preview_split_rows.len().saturating_sub(height);
+        if self.preview_scroll > max_vscroll {
+            self.preview_scroll = max_vscroll;
+        }
+
+        let left_w = width.saturating_sub(1) / 2;
+        let divider_x = x + left_w;
+        let right_x = divider_x + 1;
+        let right_w = (x + width).saturating_sub(right_x);
+
+        // A side is syntax-highlighted when its language was detected; the
+        // diff kind then moves from text color to a background tint so token
+        // colors stay readable.
+        let left_highlighted = !self.preview_split_left_spans.is_empty();
+        let right_highlighted = !self.preview_split_right_spans.is_empty();
+
+        for row in 0..height {
+            let idx = self.preview_scroll + row;
+            let screen_row = y + row;
+            let split_row = self.preview_split_rows.get(idx);
+            let left_cell = split_row.and_then(|r| r.left.as_ref());
+            let right_cell = split_row.and_then(|r| r.right.as_ref());
+            let left_spans = left_cell
+                .and_then(|c| {
+                    self.preview_split_left_spans
+                        .get(&c.line_no.saturating_sub(1))
+                })
+                .map(Vec::as_slice);
+            let right_spans = right_cell
+                .and_then(|c| {
+                    self.preview_split_right_spans
+                        .get(&c.line_no.saturating_sub(1))
+                })
+                .map(Vec::as_slice);
+            put_split_cell(
+                surface,
+                x,
+                screen_row,
+                left_w,
+                left_cell,
+                true,
+                left_highlighted,
+                left_spans,
+                self.preview_horizontal_scroll,
+                theme,
+            );
+            surface.put_str(divider_x, screen_row, "\u{2502}", &dim_style);
+            put_split_cell(
+                surface,
+                right_x,
+                screen_row,
+                right_w,
+                right_cell,
+                false,
+                right_highlighted,
+                right_spans,
+                self.preview_horizontal_scroll,
+                theme,
+            );
         }
     }
 
@@ -780,10 +1219,12 @@ impl Explorer {
         if self.preview_mode && key.modifiers.contains(KeyModifiers::SHIFT) {
             match key.code {
                 KeyCode::Char('J') | KeyCode::Down => {
+                    self.preview_target_line = None;
                     self.preview_scroll = self.preview_scroll.saturating_add(1);
                     return EventResult::Consumed;
                 }
                 KeyCode::Char('K') | KeyCode::Up => {
+                    self.preview_target_line = None;
                     self.preview_scroll = self.preview_scroll.saturating_sub(1);
                     return EventResult::Consumed;
                 }
@@ -866,6 +1307,10 @@ impl Explorer {
                 self.set_preview_mode(!self.preview_mode);
                 EventResult::Consumed
             }
+            KeyCode::Char('s') if self.mode == ExplorerMode::BranchCompare => {
+                self.toggle_preview_split();
+                EventResult::Consumed
+            }
             KeyCode::Esc => EventResult::Action(Action::App(AppAction::Workspace(
                 WorkspaceAction::ToggleExplorer,
             ))),
@@ -875,6 +1320,14 @@ impl Explorer {
     }
 
     pub fn set_git_status_map(&mut self, git_status_map: &HashMap<String, GitFileStatus>) {
+        if self.mode == ExplorerMode::BranchCompare {
+            // Entry statuses come from the branch diff, not the working-tree
+            // status map; overwriting them here would wipe the sidebar colors
+            // (committed changes aren't in the status map) until the next
+            // branch-diff refresh landed.
+            return;
+        }
+
         self.git_status_map = git_status_map.clone();
 
         if self.mode == ExplorerMode::ChangedOnly {
@@ -1629,6 +2082,18 @@ impl Explorer {
             }
         }
 
+        // Branch compare with an empty list: distinguish a background load
+        // in progress from a genuinely empty diff.
+        if plan.is_empty() && self.mode == ExplorerMode::BranchCompare && content_height > 0 {
+            let msg = if self.branch_compare_loading {
+                "  loading files…"
+            } else {
+                "  (no differences)"
+            };
+            let (truncated, _) = truncate_to_width(msg, width);
+            surface.put_str(x, content_start_row, truncated, &dim_style);
+        }
+
         // Bottom prompt
         if bottom_prompt_active {
             let find_row = height.saturating_sub(1);
@@ -1728,67 +2193,10 @@ impl Explorer {
     }
 }
 
-fn diff_preview_placeholder(message: &str) -> DiffPreview {
-    DiffPreview {
-        lines: vec![message.to_string()],
-        meta: std::iter::once(0).collect(),
-        ..DiffPreview::default()
-    }
-}
-
-/// Turn one file's unified diff into preview lines: hunk headers stay as dim
-/// separators, code lines lose their +/- prefix and get normal syntax
-/// highlighting for `path`'s language, with add/remove recorded per line for
-/// the gutter.
-fn build_diff_preview(diff: &str, path: &str) -> DiffPreview {
-    let Some(file) = crate::diff_render::parse_unified_diff(diff)
-        .into_iter()
-        .next()
-    else {
-        return diff_preview_placeholder("(no differences)");
-    };
-    if file.binary {
-        return diff_preview_placeholder("(binary file)");
-    }
-
-    let mut preview = DiffPreview::default();
-    // Text fed to the highlighter: hunk headers are blanked so they don't
-    // derail the syntax tree; indexes stay aligned with `preview.lines`.
-    let mut highlight_lines: Vec<String> = Vec::new();
-    'hunks: for hunk in &file.hunks {
-        if preview.lines.len() >= PREVIEW_MAX_LINES {
-            break;
-        }
-        preview.meta.insert(preview.lines.len());
-        preview.lines.push(hunk.header.clone());
-        highlight_lines.push(String::new());
-        for line in &hunk.lines {
-            if preview.lines.len() >= PREVIEW_MAX_LINES {
-                break 'hunks;
-            }
-            match line.kind {
-                LineKind::NoNewline => continue,
-                LineKind::Add | LineKind::Remove => {
-                    preview.gutter.insert(preview.lines.len(), line.kind);
-                }
-                LineKind::Context => {}
-            }
-            preview.lines.push(line.content.clone());
-            highlight_lines.push(line.content.clone());
-        }
-    }
-    if preview.lines.is_empty() {
-        return diff_preview_placeholder("(no content changes)");
-    }
-
-    let lang_registry = LanguageRegistry::new();
-    if let Some(lang_def) = lang_registry.detect_by_extension(path) {
-        preview.spans = highlight_text(&highlight_lines.join("\n"), lang_def);
-    }
-    preview
-}
-
-fn read_file_preview(path: &Path) -> (Vec<String>, HashMap<usize, Vec<HighlightSpan>>) {
+fn read_file_preview(
+    path: &Path,
+    lang_registry: &LanguageRegistry,
+) -> (Vec<String>, HashMap<usize, Vec<HighlightSpan>>) {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return (vec!["<binary or unreadable>".to_string()], HashMap::new()),
@@ -1798,7 +2206,6 @@ fn read_file_preview(path: &Path) -> (Vec<String>, HashMap<usize, Vec<HighlightS
         .take(PREVIEW_MAX_LINES)
         .map(|l| l.to_string())
         .collect();
-    let lang_registry = LanguageRegistry::new();
     let path_str = path.to_string_lossy();
     let spans = if let Some(lang_def) = lang_registry.detect_by_extension(&path_str) {
         let preview_text: String = lines.join("\n");
@@ -1924,6 +2331,118 @@ fn format_mtime(t: SystemTime) -> String {
 /// `GitFileStatus` enum used by the sidebar's display layer. Anything we
 /// don't recognise falls back to `Modified` (the explorer's most common
 /// rendering style).
+/// Index of the first split row that contains a non-context cell.
+fn first_changed_split_row(rows: &[SplitRow]) -> Option<usize> {
+    rows.iter().position(|row| {
+        let changed =
+            |cell: &Option<SplitCell>| cell.as_ref().is_some_and(|c| c.kind != SplitKind::Context);
+        changed(&row.left) || changed(&row.right)
+    })
+}
+
+/// Style for one side of a split row: removed/changed content is tinted on
+/// the left (base) side, added/changed content on the right (worktree) side.
+fn split_cell_style(kind: SplitKind, is_left: bool, theme: &Theme) -> CellStyle {
+    let capture = match kind {
+        SplitKind::Context => return CellStyle::default(),
+        SplitKind::Remove => "diff.minus",
+        SplitKind::Add => "diff.plus",
+        SplitKind::Change => {
+            if is_left {
+                "diff.minus"
+            } else {
+                "diff.plus"
+            }
+        }
+    };
+    let fallback = if capture == "diff.plus" {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    let fg = theme
+        .style_for_capture(capture)
+        .and_then(|style| style.fg)
+        .or(Some(fallback));
+    CellStyle {
+        fg,
+        ..CellStyle::default()
+    }
+}
+
+/// Background tint marking the diff kind of a syntax-highlighted split cell:
+/// removed/changed content on the left (base) side, added/changed on the
+/// right (worktree) side.
+fn split_cell_bg(kind: SplitKind, is_left: bool) -> Option<Color> {
+    match (kind, is_left) {
+        (SplitKind::Remove, true) | (SplitKind::Change, true) => Some(Color::DarkRed),
+        (SplitKind::Add, false) | (SplitKind::Change, false) => Some(Color::DarkGreen),
+        _ => None,
+    }
+}
+
+/// Draw one side of a split row; a missing side (one-sided add/remove)
+/// renders as a blank filler. When `highlighted` is set the content renders
+/// with its syntax highlight spans and the diff kind becomes a background
+/// tint; otherwise (no language detected) the diff kind colors the text.
+#[allow(clippy::too_many_arguments)]
+fn put_split_cell(
+    surface: &mut Surface,
+    x: usize,
+    y: usize,
+    width: usize,
+    cell: Option<&SplitCell>,
+    is_left: bool,
+    highlighted: bool,
+    spans: Option<&[HighlightSpan]>,
+    horizontal_scroll: usize,
+    theme: &Theme,
+) {
+    if width == 0 {
+        return;
+    }
+    let Some(cell) = cell else {
+        surface.fill_region(x, y, width, ' ', &CellStyle::default());
+        return;
+    };
+    let window = slice_display_window(&cell.content, horizontal_scroll, width);
+    if highlighted {
+        let default_style = CellStyle::default();
+        match spans {
+            Some(spans) => {
+                render_highlighted_line_windowed(
+                    surface,
+                    (y, x),
+                    window.visible,
+                    spans,
+                    window.start_byte..window.end_byte,
+                    width,
+                    theme,
+                );
+            }
+            None => {
+                surface.put_str(x, y, window.visible, &default_style);
+            }
+        }
+        let pad = width.saturating_sub(window.used_width);
+        if pad > 0 {
+            surface.fill_region(x + window.used_width, y, pad, ' ', &default_style);
+        }
+        if let Some(bg) = split_cell_bg(cell.kind, is_left) {
+            for cx in x..x + width {
+                surface.get_mut(cx, y).style.bg = Some(bg);
+            }
+        }
+    } else {
+        let style = split_cell_style(cell.kind, is_left, theme);
+        surface.put_str(x, y, window.visible, &style);
+        let pad = width.saturating_sub(window.used_width);
+        if pad > 0 {
+            surface.fill_region(x + window.used_width, y, pad, ' ', &style);
+        }
+    }
+}
+
 fn branch_diff_status_char_to_file_status(status_char: char) -> GitFileStatus {
     match status_char.to_ascii_uppercase() {
         'A' => GitFileStatus::Added,
@@ -1992,6 +2511,351 @@ mod tests {
 
     fn cleanup(dir: &Path) {
         let _ = fs::remove_dir_all(dir);
+    }
+
+    /// Poll the async preview pipeline until the pending result lands (or
+    /// time out), mimicking the per-frame `render_preview` polling.
+    fn wait_for_preview(explorer: &mut Explorer) {
+        for _ in 0..100 {
+            explorer.poll_preview_results();
+            if explorer.preview_pending.is_none() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("preview result did not arrive in time");
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(repo)
+            .args(args)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+
+    #[test]
+    fn branch_compare_preview_scrolls_to_first_diff_line() {
+        let dir = setup("branch_diff_scroll");
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.name", "gargo-test"]);
+        run_git(&dir, &["config", "user.email", "gargo-test@example.com"]);
+        let base: String = (1..=120).map(|i| format!("line{}\n", i)).collect();
+        fs::write(dir.join("file.txt"), &base).unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "base"]);
+        run_git(&dir, &["branch", "base"]);
+        let modified = base.replace("line80\n", "line80 changed\n");
+        fs::write(dir.join("file.txt"), &modified).unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "change line 80"]);
+
+        let files = vec![GitFileEntry {
+            path: "file.txt".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 1,
+            deletions: 1,
+        }];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
+        explorer.select_by_name("file.txt");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+
+        let target = explorer
+            .preview_target_line
+            .expect("branch-compare preview should seed a diff target line");
+        // The hunk around line 80 (1-based) starts a few context lines above.
+        assert!(
+            (73..=79).contains(&target),
+            "target should be near line 80, got {}",
+            target
+        );
+
+        let theme = Theme::dark();
+        let mut surface = Surface::new(60, 22);
+        explorer.render_preview(&mut surface, 0, 0, 60, 22, &theme);
+
+        let body_h = 21; // height minus the title row
+        assert_eq!(explorer.preview_scroll, target - body_h / 3);
+        assert_eq!(explorer.preview_target_line, None);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_preview_renders_gutter_markers() {
+        let dir = setup("branch_diff_gutter");
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.name", "gargo-test"]);
+        run_git(&dir, &["config", "user.email", "gargo-test@example.com"]);
+        let base: String = (1..=5).map(|i| format!("line{}\n", i)).collect();
+        fs::write(dir.join("file.txt"), &base).unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "base"]);
+        run_git(&dir, &["branch", "base"]);
+        let modified = base.replace("line2\n", "line2 changed\n") + "line6\n";
+        fs::write(dir.join("file.txt"), &modified).unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "change line 2, add line 6"]);
+
+        let files = vec![GitFileEntry {
+            path: "file.txt".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 2,
+            deletions: 1,
+        }];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
+        explorer.select_by_name("file.txt");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+
+        assert_eq!(
+            explorer.preview_gutter.get(&1),
+            Some(&GitLineStatus::Modified)
+        );
+        assert_eq!(explorer.preview_gutter.get(&5), Some(&GitLineStatus::Added));
+        assert_eq!(explorer.preview_gutter.len(), 2);
+
+        let theme = Theme::dark();
+        let mut surface = Surface::new(40, 10);
+        explorer.render_preview(&mut surface, 0, 0, 40, 10, &theme);
+
+        // preview_target_line = 1 → scroll = 0; body starts on row 1, so file
+        // line i renders on screen row 1 + i.
+        assert_eq!(surface.get(0, 1).symbol, " "); // line1: unchanged
+        assert_eq!(surface.get(0, 2).symbol, "▍"); // line2: modified
+        assert_eq!(surface.get(0, 6).symbol, "▍"); // line6: added
+        // Text shifts right past the 2-cell gutter lane.
+        assert_eq!(surface.get(2, 1).symbol, "l");
+
+        cleanup(&dir);
+    }
+
+    fn surface_row_text(surface: &Surface, y: usize, width: usize) -> String {
+        (0..width)
+            .map(|x| surface.get(x, y).symbol.clone())
+            .collect()
+    }
+
+    #[test]
+    fn branch_compare_preview_split_renders_side_by_side() {
+        let dir = setup("branch_diff_split");
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.name", "gargo-test"]);
+        run_git(&dir, &["config", "user.email", "gargo-test@example.com"]);
+        fs::write(dir.join("file.txt"), "one\nold-two\nthree\n").unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "base"]);
+        run_git(&dir, &["branch", "base"]);
+        fs::write(dir.join("file.txt"), "one\nnew-two\nthree\n").unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "change line 2"]);
+
+        let files = vec![GitFileEntry {
+            path: "file.txt".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 1,
+            deletions: 1,
+        }];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
+        explorer.select_by_name("file.txt");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+
+        // The `s` key toggles split mode in branch-compare sidebars.
+        let result = explorer.handle_key(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+            &KeyState::Normal,
+        );
+        assert!(matches!(result, EventResult::Consumed));
+        assert!(explorer.preview_split_enabled());
+        assert_eq!(explorer.preview_split_rows.len(), 3);
+
+        let theme = Theme::dark();
+        let width = 61;
+        let mut surface = Surface::new(width, 10);
+        explorer.render_preview(&mut surface, 0, 0, width, 10, &theme);
+
+        let title = surface_row_text(&surface, 0, width);
+        assert!(title.contains("PREVIEW[split]"), "title: {title:?}");
+
+        // Row 2 (file line 2) shows the base version left of the divider and
+        // the worktree version right of it.
+        let changed_row = surface_row_text(&surface, 2, width);
+        let divider = changed_row.find('│').expect("divider column");
+        assert!(
+            changed_row[..divider].contains("old-two"),
+            "{changed_row:?}"
+        );
+        assert!(
+            changed_row[divider..].contains("new-two"),
+            "{changed_row:?}"
+        );
+        // Context rows show the same text on both sides.
+        let context_row = surface_row_text(&surface, 1, width);
+        assert_eq!(context_row.matches("one").count(), 2, "{context_row:?}");
+
+        // Toggling off restores the inline preview with the gutter lane.
+        explorer.toggle_preview_split();
+        assert!(!explorer.preview_split_enabled());
+        let mut surface = Surface::new(width, 10);
+        explorer.render_preview(&mut surface, 0, 0, width, 10, &theme);
+        assert_eq!(surface.get(0, 2).symbol, "▍");
+        let inline_row = surface_row_text(&surface, 2, width);
+        assert!(inline_row.contains("new-two"), "{inline_row:?}");
+        assert!(!inline_row.contains("old-two"), "{inline_row:?}");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_split_preview_keeps_syntax_highlighting() {
+        let dir = setup("branch_diff_split_hl");
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.name", "gargo-test"]);
+        run_git(&dir, &["config", "user.email", "gargo-test@example.com"]);
+        fs::write(dir.join("file.rs"), "fn alpha() {}\nfn beta() {}\n").unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "base"]);
+        run_git(&dir, &["branch", "base"]);
+        fs::write(
+            dir.join("file.rs"),
+            "fn alpha() {}\nfn gamma() { let x = 1; }\n",
+        )
+        .unwrap();
+        run_git(&dir, &["add", "."]);
+        run_git(&dir, &["commit", "-m", "change line 2"]);
+
+        let files = vec![GitFileEntry {
+            path: "file.rs".to_string(),
+            status_char: 'M',
+            staged: false,
+            additions: 1,
+            deletions: 1,
+        }];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
+        explorer.select_by_name("file.rs");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+        explorer.toggle_preview_split();
+
+        let theme = Theme::dark();
+        let width = 81; // left 40 | divider | right 40
+        let mut surface = Surface::new(width, 12);
+        explorer.render_preview(&mut surface, 0, 0, width, 12, &theme);
+
+        // Screen row 1 = context row (`fn alpha() {}` on both sides), row 2 =
+        // change row. Both sides detected Rust, so tokens carry syntax
+        // colors: the `fn` keyword gets a themed fg instead of the default.
+        assert_eq!(surface.get(0, 1).symbol, "f");
+        assert_eq!(surface.get(41, 1).symbol, "f");
+        assert!(
+            surface.get(0, 1).style.fg.is_some(),
+            "left `fn` should be syntax-highlighted"
+        );
+        assert!(
+            surface.get(41, 1).style.fg.is_some(),
+            "right `fn` should be syntax-highlighted"
+        );
+
+        // The diff kind moves to a background tint: base side of the change
+        // row is red, worktree side green; context rows carry no tint.
+        assert_eq!(surface.get(0, 2).style.bg, Some(Color::DarkRed));
+        assert_eq!(surface.get(41, 2).style.bg, Some(Color::DarkGreen));
+        assert_eq!(surface.get(0, 1).style.bg, None);
+        assert_eq!(surface.get(41, 1).style.bg, None);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn preview_mouse_scroll_requires_preview_mode() {
+        let dir = setup("preview_mouse_scroll");
+        let mut explorer = Explorer::new(dir.clone(), &dir, &HashMap::new());
+
+        assert!(matches!(
+            explorer.handle_preview_mouse_scroll(MouseEventKind::ScrollDown),
+            EventResult::Ignored
+        ));
+
+        explorer.select_by_name("bbb.txt");
+        explorer.set_preview_mode(true);
+        assert!(matches!(
+            explorer.handle_preview_mouse_scroll(MouseEventKind::ScrollDown),
+            EventResult::Consumed
+        ));
+        assert_eq!(explorer.preview_scroll, MOUSE_SCROLL_LINES);
+        assert!(matches!(
+            explorer.handle_preview_mouse_scroll(MouseEventKind::ScrollUp),
+            EventResult::Consumed
+        ));
+        assert_eq!(explorer.preview_scroll, 0);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn preview_mouse_scroll_cancels_pending_diff_target() {
+        let dir = setup("preview_scroll_cancels_target");
+        let mut explorer = Explorer::new(dir.clone(), &dir, &HashMap::new());
+        explorer.set_preview_mode(true);
+        explorer.preview_target_line = Some(42);
+
+        explorer.handle_preview_mouse_scroll(MouseEventKind::ScrollDown);
+
+        assert_eq!(explorer.preview_target_line, None);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn preview_loads_file_contents_asynchronously() {
+        let dir = setup("preview_async");
+        let mut explorer = Explorer::new(dir.clone(), &dir, &HashMap::new());
+        explorer.select_by_name("bbb.txt");
+        explorer.set_preview_mode(true);
+
+        assert_eq!(explorer.preview_path, Some(dir.join("bbb.txt")));
+        wait_for_preview(&mut explorer);
+        assert_eq!(explorer.preview_lines, vec!["bbb".to_string()]);
+        assert_eq!(explorer.preview_kind, PreviewKind::File);
+
+        // Moving the selection swaps the pending preview to the new file.
+        explorer.select_by_name("ccc.rs");
+        explorer.update_preview();
+        wait_for_preview(&mut explorer);
+        assert_eq!(explorer.preview_lines, vec!["ccc".to_string()]);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn preview_cache_revalidates_when_file_changes_on_disk() {
+        let dir = setup("preview_stale");
+        let mut explorer = Explorer::new(dir.clone(), &dir, &HashMap::new());
+        explorer.select_by_name("bbb.txt");
+        explorer.set_preview_mode(true);
+        wait_for_preview(&mut explorer);
+        assert_eq!(explorer.preview_lines, vec!["bbb".to_string()]);
+
+        // Rewrite the file with a different mtime, then revisit it.
+        fs::write(dir.join("bbb.txt"), "updated").unwrap();
+        let stale_mtime = SystemTime::now() - std::time::Duration::from_secs(60);
+        let file = fs::File::open(dir.join("bbb.txt")).unwrap();
+        file.set_modified(stale_mtime).unwrap();
+
+        explorer.select_by_name("ccc.rs");
+        explorer.update_preview();
+        wait_for_preview(&mut explorer);
+        explorer.select_by_name("bbb.txt");
+        explorer.update_preview();
+        wait_for_preview(&mut explorer);
+        assert_eq!(explorer.preview_lines, vec!["updated".to_string()]);
+
+        cleanup(&dir);
     }
 
     #[test]
@@ -2412,6 +3276,73 @@ mod tests {
         cleanup(&dir);
     }
 
+    fn compare_entry(path: &str, status_char: char) -> GitFileEntry {
+        GitFileEntry {
+            path: path.to_string(),
+            status_char,
+            staged: false,
+            additions: 1,
+            deletions: 0,
+        }
+    }
+
+    #[test]
+    fn branch_compare_refresh_with_unchanged_files_is_a_noop() {
+        let dir = setup("branch_compare_noop");
+        let files = vec![compare_entry("a.rs", 'M'), compare_entry("b.rs", 'M')];
+        let mut explorer =
+            Explorer::new_branch_compare(dir.clone(), "main".to_string(), files.clone());
+        let _ = explorer.handle_key(key(KeyCode::Char('j')), &KeyState::Normal);
+        explorer.scroll_offset = 1;
+
+        explorer.apply_branch_diff_files(files);
+
+        // Selection and scroll position are untouched by the no-op refresh.
+        assert_eq!(explorer.selected_name(), Some("b.rs"));
+        assert_eq!(explorer.scroll_offset, 1);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_ignores_working_tree_status_map() {
+        let dir = setup("branch_compare_status_map");
+        let files = vec![compare_entry("a.rs", 'M'), compare_entry("b.rs", 'A')];
+        let mut explorer = Explorer::new_branch_compare(dir.clone(), "main".to_string(), files);
+        let statuses_before: Vec<_> = explorer.entries.iter().map(|e| e.git_status).collect();
+        assert!(statuses_before.iter().all(|s| s.is_some()));
+
+        // A working-tree status refresh (which won't contain committed
+        // branch changes) must not wipe the branch-diff statuses.
+        explorer.set_git_status_map(&HashMap::new());
+
+        let statuses_after: Vec<_> = explorer.entries.iter().map(|e| e.git_status).collect();
+        assert_eq!(statuses_before, statuses_after);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn branch_compare_renders_loading_then_no_differences_placeholder() {
+        let dir = setup("branch_compare_loading");
+        let mut explorer =
+            Explorer::new_branch_compare(dir.clone(), "main".to_string(), Vec::new());
+        explorer.set_branch_compare_loading(true);
+
+        let mut surface = Surface::new(40, 6);
+        explorer.render(&mut surface, 0, 40, 6);
+        let row: String = (0..40).map(|x| surface.get(x, 1).symbol.as_str()).collect();
+        assert!(row.contains("loading files"), "got row: {row:?}");
+
+        explorer.apply_branch_diff_files(Vec::new());
+        let mut surface = Surface::new(40, 6);
+        explorer.render(&mut surface, 0, 40, 6);
+        let row: String = (0..40).map(|x| surface.get(x, 1).symbol.as_str()).collect();
+        assert!(row.contains("(no differences)"), "got row: {row:?}");
+
+        cleanup(&dir);
+    }
+
     fn branch_compare_explorer(dir: PathBuf) -> Explorer {
         let files = vec![GitFileEntry {
             path: "a.rs".to_string(),
@@ -2485,100 +3416,5 @@ mod tests {
         assert!(!explorer.branch_compare_viewed.contains("a.rs"));
 
         cleanup(&dir);
-    }
-
-    fn run_git_in(dir: &Path, args: &[&str]) {
-        let status = std::process::Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .status()
-            .expect("run git");
-        assert!(status.success(), "git {:?} failed", args);
-    }
-
-    #[test]
-    fn branch_compare_preview_shows_file_diff() {
-        let dir = setup("branch_compare_preview");
-        run_git_in(&dir, &["init"]);
-        run_git_in(&dir, &["config", "user.name", "gargo-test"]);
-        run_git_in(&dir, &["config", "user.email", "gargo-test@example.com"]);
-        fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
-        run_git_in(&dir, &["add", "-A"]);
-        run_git_in(&dir, &["commit", "-m", "init"]);
-        run_git_in(&dir, &["branch", "base"]);
-        fs::write(dir.join("a.rs"), "fn a() {}\nfn b() {}\n").unwrap();
-        run_git_in(&dir, &["commit", "-am", "change"]);
-
-        let files = vec![GitFileEntry {
-            path: "a.rs".to_string(),
-            status_char: 'M',
-            staged: false,
-            additions: 1,
-            deletions: 0,
-        }];
-        let mut explorer = Explorer::new_branch_compare(dir.clone(), "base".to_string(), files);
-        explorer.select_by_name("a.rs");
-        explorer.set_preview_mode(true);
-
-        // The added line appears without its '+' prefix, marked in the gutter.
-        let added_idx = explorer
-            .preview_lines
-            .iter()
-            .position(|line| line == "fn b() {}")
-            .unwrap_or_else(|| {
-                panic!(
-                    "expected diff preview to contain the added line, got: {:?}",
-                    explorer.preview_lines
-                )
-            });
-        assert_eq!(
-            explorer.preview_diff_gutter.get(&added_idx),
-            Some(&LineKind::Add)
-        );
-        // The context line has no gutter mark.
-        let ctx_idx = explorer
-            .preview_lines
-            .iter()
-            .position(|line| line == "fn a() {}")
-            .expect("context line present");
-        assert!(!explorer.preview_diff_gutter.contains_key(&ctx_idx));
-        // The hunk header is a dim meta separator.
-        assert!(explorer.preview_diff_meta.contains(&0));
-        assert!(explorer.preview_lines[0].starts_with("@@"));
-
-        cleanup(&dir);
-    }
-
-    #[test]
-    fn build_diff_preview_strips_prefixes_and_marks_gutter() {
-        let diff = "\
-diff --git a/src/x.rs b/src/x.rs
---- a/src/x.rs
-+++ b/src/x.rs
-@@ -1,3 +1,3 @@
- fn keep() {}
--fn old() {}
-+fn new() {}
-";
-        let preview = build_diff_preview(diff, "src/x.rs");
-
-        assert_eq!(
-            preview.lines,
-            vec![
-                "@@ -1,3 +1,3 @@".to_string(),
-                "fn keep() {}".to_string(),
-                "fn old() {}".to_string(),
-                "fn new() {}".to_string(),
-            ]
-        );
-        assert!(preview.meta.contains(&0));
-        assert!(!preview.gutter.contains_key(&1));
-        assert_eq!(preview.gutter.get(&2), Some(&LineKind::Remove));
-        assert_eq!(preview.gutter.get(&3), Some(&LineKind::Add));
-        // Rust code gets normal syntax highlighting.
-        assert!(
-            preview.spans.values().any(|spans| !spans.is_empty()),
-            "expected syntax highlight spans for .rs content"
-        );
     }
 }

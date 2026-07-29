@@ -286,6 +286,27 @@ impl Compositor {
                     }
                 }
 
+                // Wheel over the sidebar preview (rendered in the editor
+                // area) scrolls the preview contents.
+                if !self.has_modal_mouse_overlay()
+                    && self.explorer.is_some()
+                    && let Some(rect) = self.editor_rect_for_dims(cols, rows)
+                {
+                    let col = usize::from(mouse.column);
+                    let row = usize::from(mouse.row);
+                    if col >= rect.x
+                        && col < rect.x + rect.width
+                        && row >= rect.y
+                        && row < rect.y + rect.height
+                        && let Some(ref mut explorer) = self.explorer
+                    {
+                        let result = explorer.handle_preview_mouse_scroll(mouse.kind);
+                        if !matches!(result, EventResult::Ignored) {
+                            return result;
+                        }
+                    }
+                }
+
                 EventResult::Ignored
             }
             MouseEventKind::Down(MouseButton::Left) => {
@@ -323,6 +344,19 @@ impl Compositor {
                 });
                 match pane {
                     Some(pane) => {
+                        // Ctrl+click opens the path or URL under the cursor
+                        // (ghostty-style cmd+click) instead of moving the
+                        // cursor or starting a drag selection.
+                        if mouse
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                        {
+                            return EventResult::Action(Action::BufferOpenClick {
+                                buffer_id: pane.buffer_id,
+                                screen_col: mouse.column,
+                                screen_row: mouse.row,
+                            });
+                        }
                         self.text_drag = Some(pane.buffer_id);
                         EventResult::Action(Action::BufferClick {
                             buffer_id: pane.buffer_id,

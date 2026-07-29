@@ -40,12 +40,35 @@ pub struct Cli {
     #[arg(long, requires = "server", conflicts_with_all = ["check", "update"])]
     pub host: Option<String>,
 
-    /// Optional file or directory to open.
-    #[arg(value_name = "PATH", conflicts_with_all = ["check", "update"])]
-    pub path: Option<PathBuf>,
+    /// Optional file or directory to open, with an optional vi-style `+N`
+    /// argument that jumps to line N (`gargo +12 src/main.rs`).
+    #[arg(value_name = "PATH", num_args = 0..=2, conflicts_with_all = ["check", "update"])]
+    pub args: Vec<String>,
+}
+
+fn plus_line_arg(arg: &str) -> Option<usize> {
+    let digits = arg.strip_prefix('+')?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 impl Cli {
+    /// The positional path argument, with a vi-style `+N` argument filtered
+    /// out.
+    pub fn open_path(&self) -> Option<PathBuf> {
+        self.args
+            .iter()
+            .find(|arg| plus_line_arg(arg).is_none())
+            .map(PathBuf::from)
+    }
+
+    /// Line (1-based) from a vi-style `+N` argument, when present.
+    pub fn open_line(&self) -> Option<usize> {
+        self.args.iter().find_map(|arg| plus_line_arg(arg))
+    }
+
     pub fn mode(&self) -> CliMode {
         if self.check {
             CliMode::CheckUpgrade
@@ -75,21 +98,21 @@ mod tests {
     fn parses_check_flag() {
         let cli = Cli::try_parse_from(["gargo", "--check"]).expect("parse --check");
         assert_eq!(cli.mode(), CliMode::CheckUpgrade);
-        assert!(cli.path.is_none());
+        assert!(cli.open_path().is_none());
     }
 
     #[test]
     fn parses_update_flag() {
         let cli = Cli::try_parse_from(["gargo", "--update"]).expect("parse --update");
         assert_eq!(cli.mode(), CliMode::Update);
-        assert!(cli.path.is_none());
+        assert!(cli.open_path().is_none());
     }
 
     #[test]
     fn parses_server_flag() {
         let cli = Cli::try_parse_from(["gargo", "--server"]).expect("parse --server");
         assert_eq!(cli.mode(), CliMode::Server);
-        assert!(cli.path.is_none());
+        assert!(cli.open_path().is_none());
         assert!(cli.open_browser(), "server defaults to opening the browser");
     }
 
@@ -165,14 +188,20 @@ mod tests {
     fn parses_positional_path() {
         let cli = Cli::try_parse_from(["gargo", "README.md"]).expect("parse path");
         assert_eq!(cli.mode(), CliMode::RunEditor);
-        assert_eq!(cli.path.as_deref(), Some(std::path::Path::new("README.md")));
+        assert_eq!(
+            cli.open_path().as_deref(),
+            Some(std::path::Path::new("README.md"))
+        );
     }
 
     #[test]
     fn parses_separator_for_path_like_flag() {
         let cli = Cli::try_parse_from(["gargo", "--", "--update"]).expect("parse -- separator");
         assert_eq!(cli.mode(), CliMode::RunEditor);
-        assert_eq!(cli.path.as_deref(), Some(std::path::Path::new("--update")));
+        assert_eq!(
+            cli.open_path().as_deref(),
+            Some(std::path::Path::new("--update"))
+        );
     }
 
     #[test]
@@ -194,5 +223,30 @@ mod tests {
             message.contains("cannot be used with"),
             "unexpected clap error: {message}"
         );
+    }
+
+    #[test]
+    fn parses_plus_line_with_path_in_either_order() {
+        let cli = Cli::try_parse_from(["gargo", "+12", "src/main.rs"]).expect("parse +N path");
+        assert_eq!(cli.mode(), CliMode::RunEditor);
+        assert_eq!(
+            cli.open_path().as_deref(),
+            Some(std::path::Path::new("src/main.rs"))
+        );
+        assert_eq!(cli.open_line(), Some(12));
+
+        let cli = Cli::try_parse_from(["gargo", "src/main.rs", "+12"]).expect("parse path +N");
+        assert_eq!(
+            cli.open_path().as_deref(),
+            Some(std::path::Path::new("src/main.rs"))
+        );
+        assert_eq!(cli.open_line(), Some(12));
+    }
+
+    #[test]
+    fn plus_without_digits_is_a_path_not_a_line() {
+        let cli = Cli::try_parse_from(["gargo", "+x"]).expect("parse +x");
+        assert_eq!(cli.open_path().as_deref(), Some(std::path::Path::new("+x")));
+        assert_eq!(cli.open_line(), None);
     }
 }

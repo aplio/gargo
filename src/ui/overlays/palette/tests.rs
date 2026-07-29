@@ -213,6 +213,53 @@ fn global_search_literal_case_insensitive() {
 }
 
 #[test]
+fn search_result_label_prefixes_external_project() {
+    let entry = GlobalSearchResultEntry {
+        rel_path: "/home/user/other/src/lib.rs".to_string(),
+        display_path: "src/lib.rs".to_string(),
+        origin_repo: Some("other".to_string()),
+        line: 4,
+        char_col: 0,
+        preview_lines: vec![
+            "[global] other/src/lib.rs:5:1".to_string(),
+            "    5 | needle here".to_string(),
+        ],
+    };
+    assert_eq!(
+        search::search_result_label(&entry),
+        "[other] src/lib.rs:5 needle here"
+    );
+
+    let local = GlobalSearchResultEntry {
+        origin_repo: None,
+        ..entry
+    };
+    assert_eq!(
+        search::search_result_label(&local),
+        "src/lib.rs:5 needle here"
+    );
+}
+
+#[test]
+fn render_candidate_label_dims_external_results() {
+    let candidate = ScoredCandidate {
+        kind: CandidateKind::SearchResult(0),
+        label: "[other] src/lib.rs:5 needle".to_string(),
+        score: 0,
+        match_positions: Vec::new(),
+        preview_lines: Vec::new(),
+    };
+
+    let mut surface = Surface::new(40, 1);
+    rendering::render_candidate_label(&mut surface, 0, 0, &candidate, 40, false, None, true);
+    assert!(surface.get_mut(1, 0).style.dim);
+
+    let mut surface = Surface::new(40, 1);
+    rendering::render_candidate_label(&mut surface, 0, 0, &candidate, 40, false, None, false);
+    assert!(!surface.get_mut(1, 0).style.dim);
+}
+
+#[test]
 fn global_search_enter_opens_selected_match() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -225,6 +272,7 @@ fn global_search_enter_opens_selected_match() {
     palette.global_search_entries = vec![GlobalSearchResultEntry {
         rel_path: "src/main.rs".to_string(),
         display_path: "src/main.rs".to_string(),
+        origin_repo: None,
         line: 12,
         char_col: 7,
         preview_lines: vec![
@@ -277,6 +325,7 @@ fn global_search_alt_enter_sends_results_to_buffer() {
         GlobalSearchResultEntry {
             rel_path: "src/main.rs".to_string(),
             display_path: "src/main.rs".to_string(),
+            origin_repo: None,
             line: 12,
             char_col: 7,
             preview_lines: vec![
@@ -287,6 +336,7 @@ fn global_search_alt_enter_sends_results_to_buffer() {
         GlobalSearchResultEntry {
             rel_path: "src/lib.rs".to_string(),
             display_path: "src/lib.rs".to_string(),
+            origin_repo: None,
             line: 0,
             char_col: 4,
             preview_lines: vec![

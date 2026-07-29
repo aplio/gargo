@@ -6,34 +6,25 @@ pub fn fzf_style_match(haystack: &str, needle: &str) -> Option<(i32, Vec<usize>)
     let haystack_chars: Vec<char> = haystack.chars().collect();
     let needle_chars: Vec<char> = needle.chars().collect();
 
-    let mut positions = Vec::with_capacity(needle_chars.len());
-    let mut hay_idx = 0usize;
-    for &needle_ch in &needle_chars {
-        let needle_lower = needle_ch.to_lowercase().next().unwrap_or(needle_ch);
-        let mut found = false;
-        while hay_idx < haystack_chars.len() {
-            let hay = haystack_chars[hay_idx];
-            let hay_lower = hay.to_lowercase().next().unwrap_or(hay);
-            if hay_lower == needle_lower {
-                positions.push(hay_idx);
-                hay_idx += 1;
-                found = true;
-                break;
-            }
-            hay_idx += 1;
-        }
-        if !found {
-            return None;
-        }
-    }
+    let positions = greedy_subsequence_positions(&haystack_chars, &needle_chars)?;
+    let score = compute_fzf_score(&haystack_chars, &needle_chars, &positions);
+    Some(best_with_contiguous(
+        &haystack_chars,
+        &needle_chars,
+        score,
+        positions,
+        compute_fzf_score,
+    ))
+}
 
+fn compute_fzf_score(haystack: &[char], needle: &[char], positions: &[usize]) -> i32 {
     let mut score = 0i32;
     for (i, &position) in positions.iter().enumerate() {
         if position == 0 {
             score += 12;
         }
         if position > 0 {
-            let prev = haystack_chars[position - 1];
+            let prev = haystack[position - 1];
             if prev == ' ' || prev == '_' || prev == '-' || prev == '/' || prev == '.' {
                 score += 10;
             }
@@ -46,13 +37,70 @@ pub fn fzf_style_match(haystack: &str, needle: &str) -> Option<(i32, Vec<usize>)
                 score -= (position - prev - 1) as i32;
             }
         }
-        if haystack_chars[position] == needle_chars[i] {
+        if haystack[position] == needle[i] {
             score += 4;
         }
     }
-    score -= (haystack_chars.len() as i32) / 5;
+    score -= (haystack.len() as i32) / 5;
+    score
+}
 
-    Some((score, positions))
+fn char_lower(ch: char) -> char {
+    ch.to_lowercase().next().unwrap_or(ch)
+}
+
+/// Leftmost case-insensitive subsequence positions of `needle` in `haystack`.
+fn greedy_subsequence_positions(haystack: &[char], needle: &[char]) -> Option<Vec<usize>> {
+    let mut positions = Vec::with_capacity(needle.len());
+    let mut hay_idx = 0usize;
+    for &needle_ch in needle {
+        let needle_lower = char_lower(needle_ch);
+        loop {
+            if hay_idx >= haystack.len() {
+                return None;
+            }
+            let idx = hay_idx;
+            hay_idx += 1;
+            if char_lower(haystack[idx]) == needle_lower {
+                positions.push(idx);
+                break;
+            }
+        }
+    }
+    Some(positions)
+}
+
+/// The greedy scan anchors on the first occurrence of each needle char, which
+/// can scatter the match even when the needle appears verbatim later in the
+/// haystack (e.g. "search" in "src/global_search_index.rs" anchors on the
+/// leading 's'). Score every contiguous occurrence too and keep whichever
+/// alignment scores best, so exact substrings rank as exact matches.
+fn best_with_contiguous(
+    haystack: &[char],
+    needle: &[char],
+    greedy_score: i32,
+    greedy_positions: Vec<usize>,
+    score_fn: impl Fn(&[char], &[char], &[usize]) -> i32,
+) -> (i32, Vec<usize>) {
+    let mut best = (greedy_score, greedy_positions);
+    let Some(last_start) = haystack.len().checked_sub(needle.len()) else {
+        return best;
+    };
+    for start in 0..=last_start {
+        let matches = needle
+            .iter()
+            .zip(&haystack[start..])
+            .all(|(&n, &h)| char_lower(n) == char_lower(h));
+        if !matches {
+            continue;
+        }
+        let positions: Vec<usize> = (start..start + needle.len()).collect();
+        let score = score_fn(haystack, needle, &positions);
+        if score > best.0 {
+            best = (score, positions);
+        }
+    }
+    best
 }
 
 /// Fuzzy match `haystack` against `needle` (case-insensitive).
@@ -76,32 +124,15 @@ fn fuzzy_match_strict(haystack: &str, needle: &str) -> Option<(i32, Vec<usize>)>
     let haystack_chars: Vec<char> = haystack.chars().collect();
     let needle_chars: Vec<char> = needle.chars().collect();
 
-    let mut positions = Vec::with_capacity(needle_chars.len());
-    let mut hay_idx = 0;
-
-    for &needle_ch in &needle_chars {
-        let needle_lower = needle_ch.to_lowercase().next().unwrap_or(needle_ch);
-        let mut found = false;
-        while hay_idx < haystack_chars.len() {
-            let hay_lower = haystack_chars[hay_idx]
-                .to_lowercase()
-                .next()
-                .unwrap_or(haystack_chars[hay_idx]);
-            if hay_lower == needle_lower {
-                positions.push(hay_idx);
-                hay_idx += 1;
-                found = true;
-                break;
-            }
-            hay_idx += 1;
-        }
-        if !found {
-            return None;
-        }
-    }
-
+    let positions = greedy_subsequence_positions(&haystack_chars, &needle_chars)?;
     let score = compute_score(&haystack_chars, &needle_chars, &positions);
-    Some((score, positions))
+    Some(best_with_contiguous(
+        &haystack_chars,
+        &needle_chars,
+        score,
+        positions,
+        compute_score,
+    ))
 }
 
 const TOKEN_FALLBACK_PENALTY: i32 = 50;
@@ -210,5 +241,37 @@ mod tests {
         // Single-token query: no fallback path; absence means None.
         let result = fuzzy_match("Copy GitHub URL", "xyz");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn fuzzy_match_exact_substring_outranks_scattered_match() {
+        // "modules/search.rs" contains the query verbatim; the greedy scan used
+        // to anchor on the leading 's' of "modules" and scatter the rest,
+        // letting a non-exact candidate overtake it.
+        let (exact, _) = fuzzy_match("modules/search.rs", "search").expect("exact");
+        let (scattered, _) = fuzzy_match("sea_rch.rs", "search").expect("scattered");
+        assert!(exact > scattered, "exact={exact} scattered={scattered}");
+    }
+
+    #[test]
+    fn fuzzy_match_prefers_contiguous_occurrence_positions() {
+        let (_, positions) = fuzzy_match("src/global_search_index.rs", "search").expect("match");
+        assert_eq!(positions, (11..17).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn fuzzy_match_exact_equality_ranks_above_superstrings() {
+        let (equal, _) = fuzzy_match("search", "search").expect("equal");
+        for other in ["sea_rch.rs", "search.rs", "src/search.rs", "s_e_a_r_c_h"] {
+            let (score, _) = fuzzy_match(other, "search").expect(other);
+            assert!(equal > score, "{other}: {score} >= {equal}");
+        }
+    }
+
+    #[test]
+    fn fzf_style_match_prefers_contiguous_occurrence_positions() {
+        let (_, positions) =
+            fzf_style_match("src/global_search_index.rs", "search").expect("match");
+        assert_eq!(positions, (11..17).collect::<Vec<_>>());
     }
 }

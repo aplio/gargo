@@ -127,4 +127,44 @@ impl Compositor {
                     && row < p.rect.y + p.rect.height
             })
     }
+
+    /// Pane to attribute an in-flight drag-to-select gesture to: the pane
+    /// under the pointer when it shows `buffer_id`, else the focused pane
+    /// when it does, else the first pane showing the buffer. The fallbacks
+    /// keep the gesture alive while the pointer travels outside the pane.
+    pub fn drag_pane_for_buffer(
+        &self,
+        buffer_id: BufferId,
+        col: u16,
+        row: u16,
+        cols: usize,
+        rows: usize,
+    ) -> Option<crate::ui::framework::window_manager::PaneLayout> {
+        let area = self.editor_rect_for_dims(cols, rows)?;
+        let layout = self.window_manager.layout(area);
+        let col = usize::from(col);
+        let row = usize::from(row);
+        if let Some(pane) = layout.panes.iter().find(|p| {
+            p.buffer_id == buffer_id
+                && col >= p.rect.x
+                && col < p.rect.x + p.rect.width
+                && row >= p.rect.y
+                && row < p.rect.y + p.rect.height
+        }) {
+            return Some(*pane);
+        }
+        if let Some(pane) = self
+            .window_manager
+            .focused_pane(area)
+            .filter(|p| p.buffer_id == buffer_id)
+        {
+            return Some(pane);
+        }
+        layout.panes.into_iter().find(|p| p.buffer_id == buffer_id)
+    }
+
+    /// Buffer currently captured by a drag-to-select gesture, if any.
+    pub fn text_drag_target(&self) -> Option<BufferId> {
+        self.text_drag
+    }
 }

@@ -150,3 +150,60 @@ fn goto_definition_tracks_unsaved_edits_in_active_buffer() {
     );
     assert_eq!(app.editor().active_buffer().cursor_col(), 3);
 }
+
+/// The project root is canonicalized at startup while a buffer keeps the path
+/// it was opened with, so a symlinked root makes the two disagree. Everything
+/// keyed on the buffer's project-relative path (hit ranking, the unsaved-edit
+/// overlay) silently degrades when that mismatch isn't resolved. macOS hits
+/// this for free via `/var`; elsewhere it needs an explicit symlink.
+#[test]
+#[cfg(unix)]
+fn goto_definition_resolves_paths_through_a_symlinked_project_root() {
+    let temp = tempdir().expect("temp dir");
+    let real_root = temp.path().join("real");
+    std::fs::create_dir(&real_root).expect("real root");
+    std::fs::create_dir(real_root.join(".git")).expect("git dir");
+    std::fs::write(
+        real_root.join("a.rs"),
+        "fn local() {}\nfn main() { local(); }\n",
+    )
+    .expect("write a.rs");
+
+    let linked_root = temp.path().join("linked");
+    std::os::unix::fs::symlink(&real_root, &linked_root).expect("symlink root");
+
+    // Open the file through the symlink, exactly as a user with a symlinked
+    // checkout would.
+    let linked_file = linked_root.join("a.rs");
+    let mut app = app_without_plugins(&linked_file, &linked_root);
+    {
+        let doc = app.editor_mut().active_buffer_mut();
+        doc.rope.insert(0, "// comment\n");
+    }
+    app.editor_mut()
+        .active_buffer_mut()
+        .set_cursor_line_char(2, 13);
+
+    // Only reachable when the live-rope overlay recognizes the buffer as
+    // belonging to the project: the on-disk index still says line 0.
+    dispatch_until(&mut app, &goto_definition_action(), |app| {
+        app.editor().active_buffer().cursor_line() == 1
+    });
+
+    assert_eq!(app.editor().active_buffer().cursor_col(), 3);
+    // The jump must reuse the open buffer rather than opening the canonical
+    // path as a second buffer, which would show the unedited on-disk text.
+    assert_eq!(
+        app.editor().buffers().len(),
+        1,
+        "symlinked path should not open a duplicate buffer"
+    );
+    assert!(
+        app.editor()
+            .active_buffer()
+            .rope
+            .to_string()
+            .starts_with("// comment"),
+        "jump should land in the buffer holding the unsaved edit"
+    );
+}

@@ -43,7 +43,7 @@ impl App {
             }
             1 => {
                 let hit = &hits[0];
-                let path = self.project_root.join(&hit.rel_path);
+                let path = self.hit_path(&hit.rel_path, &self.open_buffer_paths_by_rel());
                 self.open_file_at_char_location(&path, hit.line, hit.char_col);
             }
             _ => self.open_symbol_definitions_picker(&name, hits),
@@ -132,11 +132,12 @@ impl App {
     }
 
     fn open_symbol_definitions_picker(&mut self, name: &str, hits: Vec<SymbolLocation>) {
+        let open_paths = self.open_buffer_paths_by_rel();
         let entries: Vec<ReferencePickerEntry> = hits
             .into_iter()
             .take(MAX_PICKER_ENTRIES)
             .map(|hit| {
-                let path = self.project_root.join(&hit.rel_path);
+                let path = self.hit_path(&hit.rel_path, &open_paths);
                 let (preview_lines, target_preview_line, target_char_col) =
                     self.reference_preview_lines_for_char_location(&path, hit.line, hit.char_col);
                 let target_line_text = target_preview_line
@@ -182,9 +183,9 @@ impl App {
     /// convention). Relative buffer paths are assumed root-relative.
     fn project_rel_path(&self, path: &Path) -> Option<String> {
         let rel = if path.is_absolute() {
-            path.strip_prefix(&self.project_root).ok()?
+            Self::strip_project_root(path, &self.project_root)?
         } else {
-            path
+            path.to_path_buf()
         };
         let rel = rel.to_string_lossy();
         if std::path::MAIN_SEPARATOR == '/' {
@@ -192,5 +193,46 @@ impl App {
         } else {
             Some(rel.replace(std::path::MAIN_SEPARATOR, "/"))
         }
+    }
+
+    /// `project_root` is canonicalized when the app starts, but a buffer keeps
+    /// whatever spelling its file was opened with. Those differ whenever the
+    /// path crosses a symlink (on macOS `/tmp` and `/var` always do), so retry
+    /// through `canonicalize` before giving up — otherwise every buffer looks
+    /// like it lives outside the project and ranking loses its "same file /
+    /// same directory" signal entirely.
+    fn strip_project_root(path: &Path, project_root: &Path) -> Option<PathBuf> {
+        if let Ok(rel) = path.strip_prefix(project_root) {
+            return Some(rel.to_path_buf());
+        }
+        let canonical = std::fs::canonicalize(path).ok()?;
+        let canonical_root = std::fs::canonicalize(project_root).ok()?;
+        canonical
+            .strip_prefix(canonical_root)
+            .ok()
+            .map(Path::to_path_buf)
+    }
+
+    /// Open buffers keyed by their project-relative path, so a jump can reuse
+    /// the spelling a file is already open under. `project_root.join(rel)` is
+    /// canonical and may not match it (see [`Self::strip_project_root`]);
+    /// opening that would spawn a second buffer onto the same file, showing
+    /// on-disk content and hiding the unsaved edits in the original.
+    fn open_buffer_paths_by_rel(&self) -> HashMap<String, PathBuf> {
+        self.editor
+            .buffers()
+            .iter()
+            .filter_map(|doc| {
+                let path = doc.file_path.clone()?;
+                Some((self.project_rel_path(&path)?, path))
+            })
+            .collect()
+    }
+
+    fn hit_path(&self, rel_path: &str, open_paths: &HashMap<String, PathBuf>) -> PathBuf {
+        open_paths
+            .get(rel_path)
+            .cloned()
+            .unwrap_or_else(|| self.project_root.join(rel_path))
     }
 }

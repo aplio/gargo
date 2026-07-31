@@ -384,3 +384,58 @@ impl Palette {
         }
     }
 }
+
+/// Candidates for the theme picker, straight off `theme::PRESETS` — no second
+/// list to keep in sync with the presets themselves.
+pub(super) fn theme_candidates(query: &str) -> Vec<ScoredCandidate> {
+    let presets = crate::syntax::theme::PRESETS.iter().enumerate();
+    if query.is_empty() {
+        return presets
+            .map(|(idx, preset)| ScoredCandidate {
+                kind: CandidateKind::Theme(idx),
+                label: preset.label.to_string(),
+                score: 0,
+                match_positions: Vec::new(),
+                preview_lines: Vec::new(),
+            })
+            .collect();
+    }
+    let mut scored: Vec<ScoredCandidate> = presets
+        .filter_map(|(idx, preset)| {
+            // Match the id too: people who know they want "gargo_sepia"
+            // shouldn't have to guess its display label.
+            let haystack = format!("{} {}", preset.label, preset.id);
+            fzf_style_match(&haystack, query).map(|(score, positions)| ScoredCandidate {
+                kind: CandidateKind::Theme(idx),
+                label: preset.label.to_string(),
+                score,
+                // Positions index the haystack, not the label; dropping them
+                // costs highlighting, not correctness.
+                match_positions: positions
+                    .into_iter()
+                    .filter(|pos| *pos < preset.label.len())
+                    .collect(),
+                preview_lines: Vec::new(),
+            })
+        })
+        .collect();
+    scored.sort_by(|a, b| b.score.cmp(&a.score));
+    scored
+}
+
+impl Palette {
+    pub(super) fn filter_theme_candidates(&mut self) {
+        self.candidates = theme_candidates(&self.input.text);
+        if self.selected >= self.candidates.len() {
+            self.selected = self.candidates.len().saturating_sub(1);
+        }
+    }
+
+    /// Preset the selection currently points at.
+    pub(super) fn selected_theme(&self) -> Option<&'static crate::syntax::theme::ThemePreset> {
+        match self.candidates.get(self.selected)?.kind {
+            CandidateKind::Theme(idx) => crate::syntax::theme::PRESETS.get(idx),
+            _ => None,
+        }
+    }
+}

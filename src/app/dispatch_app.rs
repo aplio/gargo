@@ -894,6 +894,24 @@ impl App {
                     }
                 }
             }
+            AppAction::Workspace(WorkspaceAction::OpenThemePicker) => {
+                let palette = Palette::new_theme_picker(&self.config.theme.preset);
+                self.compositor.push_palette(palette);
+            }
+            AppAction::Workspace(WorkspaceAction::PreviewTheme(preset)) => {
+                self.preview_theme(&preset);
+            }
+            AppAction::Workspace(WorkspaceAction::SetTheme(preset)) => {
+                self.compositor.apply(UiAction::ClosePalette);
+                self.config.theme.preset = preset;
+                self.theme = Theme::from_config(&self.config.theme);
+                self.theme_preview_active = false;
+                self.editor.mark_highlights_dirty();
+                self.editor.message = Some(format!(
+                    "Theme: {} (add [theme] preset = \"{}\" to config.toml to keep it)",
+                    self.config.theme.preset, self.config.theme.preset
+                ));
+            }
             AppAction::Workspace(WorkspaceAction::ToggleHiddenFiles) => {
                 // Session-local: the in-memory config is the single source the
                 // tree, the tree popup and the picker index all read from, so

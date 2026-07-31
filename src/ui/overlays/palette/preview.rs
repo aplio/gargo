@@ -40,6 +40,13 @@ impl Palette {
             self.update_symbol_preview();
             return;
         }
+        if self.mode == PaletteMode::ThemePicker {
+            // Nothing to put in the preview pane: the whole editor is already
+            // showing the selected theme.
+            self.preview_lines.clear();
+            self.preview_spans.clear();
+            return;
+        }
         if self.mode == PaletteMode::Command {
             self.preview_lines = self
                 .candidates

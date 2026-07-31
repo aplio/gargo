@@ -15,6 +15,9 @@ pub enum PaletteMode {
     SymbolPicker,
     GlobalSearch,
     GotoLine,
+    /// Theme chooser. Unlike the other pickers its preview is the editor
+    /// itself: moving the selection applies that theme live.
+    ThemePicker,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +30,8 @@ pub enum CandidateKind {
     Symbol(usize),
     File(usize),
     SearchResult(usize),
+    /// Index into [`crate::syntax::theme::PRESETS`].
+    Theme(usize),
 }
 
 pub struct ScoredCandidate {

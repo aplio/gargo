@@ -1948,3 +1948,100 @@ fn file_picker_empty_sorts_by_mtime_desc_uncommitted_first() {
 
     std::fs::remove_dir_all(&root).ok();
 }
+
+// --- theme picker ---
+
+fn theme_picker_key(palette: &mut Palette, code: KeyCode) -> EventResult {
+    palette.handle_key_event(
+        KeyEvent::new(code, KeyModifiers::NONE),
+        &CommandRegistry::new(),
+        &LanguageRegistry::new(),
+        &Config::default(),
+    )
+}
+
+#[test]
+fn theme_picker_opens_on_the_current_preset() {
+    let palette = Palette::new_theme_picker("gargo_sepia");
+    assert_eq!(
+        palette.selected_theme().map(|p| p.id),
+        Some("gargo_sepia"),
+        "picker should open where the user already is"
+    );
+}
+
+#[test]
+fn theme_picker_unknown_preset_falls_back_to_the_first_entry() {
+    let palette = Palette::new_theme_picker("no_such_theme");
+    assert_eq!(
+        palette.selected_theme().map(|p| p.id),
+        crate::syntax::theme::PRESETS.first().map(|p| p.id)
+    );
+}
+
+#[test]
+fn moving_the_selection_previews_that_theme() {
+    let mut palette = Palette::new_theme_picker("ansi_dark");
+    let result = theme_picker_key(&mut palette, KeyCode::Down);
+    let expected = palette.selected_theme().unwrap().id.to_string();
+    assert_eq!(
+        result,
+        EventResult::Action(Action::App(AppAction::Workspace(
+            WorkspaceAction::PreviewTheme(expected)
+        )))
+    );
+}
+
+#[test]
+fn staying_on_the_same_theme_does_not_re_preview() {
+    let mut palette = Palette::new_theme_picker("ansi_dark");
+    theme_picker_key(&mut palette, KeyCode::Down);
+    // Up returns to the entry above; moving back down lands on the same
+    // preset as before and must not emit a second preview for it.
+    theme_picker_key(&mut palette, KeyCode::Up);
+    let again = theme_picker_key(&mut palette, KeyCode::Down);
+    assert!(
+        matches!(again, EventResult::Action(_)),
+        "a genuine move still previews"
+    );
+    let repeat = theme_picker_key(&mut palette, KeyCode::Right);
+    assert_eq!(repeat, EventResult::Consumed, "no move, no preview");
+}
+
+#[test]
+fn enter_applies_the_selected_theme() {
+    let mut palette = Palette::new_theme_picker("ansi_dark");
+    theme_picker_key(&mut palette, KeyCode::Down);
+    let expected = palette.selected_theme().unwrap().id.to_string();
+    let result = theme_picker_key(&mut palette, KeyCode::Enter);
+    assert_eq!(
+        result,
+        EventResult::Action(Action::App(AppAction::Workspace(
+            WorkspaceAction::SetTheme(expected)
+        )))
+    );
+}
+
+#[test]
+fn escape_closes_without_applying() {
+    let mut palette = Palette::new_theme_picker("ansi_dark");
+    theme_picker_key(&mut palette, KeyCode::Down);
+    assert_eq!(
+        theme_picker_key(&mut palette, KeyCode::Esc),
+        EventResult::Action(Action::Ui(UiAction::ClosePalette))
+    );
+}
+
+#[test]
+fn typing_filters_themes_by_label_and_id() {
+    let mut palette = Palette::new_theme_picker("ansi_dark");
+    for c in "sepia".chars() {
+        palette.on_char(
+            c,
+            &CommandRegistry::new(),
+            &LanguageRegistry::new(),
+            &Config::default(),
+        );
+    }
+    assert_eq!(palette.selected_theme().map(|p| p.id), Some("gargo_sepia"));
+}

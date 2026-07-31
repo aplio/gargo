@@ -588,6 +588,17 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     });
 
     registry.register(CommandEntry {
+        id: "theme.change".into(),
+        label: "Change Theme".into(),
+        category: Some("Theme".into()),
+        action: Box::new(|_editor| {
+            CommandEffect::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::OpenThemePicker,
+            )))
+        }),
+    });
+
+    registry.register(CommandEntry {
         id: "explorer.toggle_hidden_files".into(),
         label: "Toggle Hidden Files".into(),
         category: Some("Explorer".into()),

@@ -50,6 +50,7 @@ impl Palette {
                 self.filter_symbol_candidates();
                 self.update_symbol_preview();
             }
+            PaletteMode::ThemePicker => self.filter_theme_candidates(),
             PaletteMode::GlobalSearch => {
                 self.mark_global_search_dirty();
                 self.pump_global_search();
@@ -335,6 +336,38 @@ impl Palette {
         lang_registry: &LanguageRegistry,
         config: &Config,
     ) -> EventResult {
+        let result = self.handle_key_event_inner(key, registry, lang_registry, config);
+        self.theme_preview_for(result)
+    }
+
+    /// In the theme picker the preview *is* the editor: any key that lands on
+    /// a different preset re-themes everything. Wrapping the result here
+    /// catches every path that can move the selection — arrows, Ctrl+n/p, and
+    /// typing a query that reorders the list — instead of each of them having
+    /// to remember.
+    fn theme_preview_for(&mut self, result: EventResult) -> EventResult {
+        if self.mode != PaletteMode::ThemePicker || result != EventResult::Consumed {
+            return result;
+        }
+        let Some(preset) = self.selected_theme() else {
+            return result;
+        };
+        if self.last_previewed_theme == Some(preset.id) {
+            return result;
+        }
+        self.last_previewed_theme = Some(preset.id);
+        EventResult::Action(Action::App(AppAction::Workspace(
+            WorkspaceAction::PreviewTheme(preset.id.to_string()),
+        )))
+    }
+
+    fn handle_key_event_inner(
+        &mut self,
+        key: KeyEvent,
+        registry: &CommandRegistry,
+        lang_registry: &LanguageRegistry,
+        config: &Config,
+    ) -> EventResult {
         self.pump_global_search();
 
         debug_log!(
@@ -487,6 +520,15 @@ impl Palette {
                                     line,
                                     character_utf16,
                                 },
+                            )))
+                        } else {
+                            EventResult::Action(Action::Ui(UiAction::ClosePalette))
+                        }
+                    }
+                    PaletteMode::ThemePicker => {
+                        if let Some(preset) = self.selected_theme() {
+                            EventResult::Action(Action::App(AppAction::Workspace(
+                                WorkspaceAction::SetTheme(preset.id.to_string()),
                             )))
                         } else {
                             EventResult::Action(Action::Ui(UiAction::ClosePalette))

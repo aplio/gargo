@@ -581,11 +581,18 @@ impl Theme {
         let mut theme = find_preset(&theme_config.preset)
             .map(|preset| preset.build())
             .unwrap_or_else(Self::ansi_dark);
-        for (capture, override_style) in &theme_config.captures {
-            theme.apply_capture_override(capture, override_style);
-        }
-        theme.apply_ui_overrides(&theme_config.ui);
+        theme.apply_config_overrides(theme_config);
         theme
+    }
+
+    /// Layer a config's capture and UI overrides onto an already-built preset.
+    /// Split out so live preview can swap the preset while keeping whatever
+    /// the user has customised on top of it.
+    pub fn apply_config_overrides(&mut self, theme_config: &ThemeConfig) {
+        for (capture, override_style) in &theme_config.captures {
+            self.apply_capture_override(capture, override_style);
+        }
+        self.apply_ui_overrides(&theme_config.ui);
     }
 
     fn from_entries(entries: Vec<(&'static str, Style)>) -> Self {

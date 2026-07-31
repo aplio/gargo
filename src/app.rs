@@ -173,6 +173,11 @@ pub struct App {
     registry: CommandRegistry,
     config: Config,
     theme: Theme,
+    /// A theme is on screen for preview only (the theme picker is open).
+    /// Restoring means rebuilding from `config`, never from a remembered
+    /// value: the config is what the editor is supposed to look like, and a
+    /// remembered copy goes stale the moment anything else changes it.
+    theme_preview_active: bool,
     project_root: PathBuf,
     file_list: Vec<String>,
     file_index_loading: bool,
@@ -291,6 +296,7 @@ impl App {
             compositor: Compositor::new(),
             registry: CommandRegistry::new(),
             theme: Theme::from_config(&config.theme),
+            theme_preview_active: false,
             config,
             project_root,
             file_list,
@@ -2289,6 +2295,11 @@ impl App {
         let should_quit = match action {
             Action::Core(action) => self.dispatch_core(action),
             Action::Ui(action) => {
+                // Closing the palette ends a theme preview; nothing else can
+                // dismiss the picker.
+                if action == UiAction::ClosePalette {
+                    self.restore_theme_from_config();
+                }
                 self.compositor.apply(action);
                 false
             }
@@ -2378,6 +2389,30 @@ impl App {
             None => format!("Config written: {}", path.display()),
         };
         Ok(msg)
+    }
+
+    /// Apply `preset` for preview only. `[theme] preset` is left alone, so
+    /// closing the picker restores whatever the config says.
+    fn preview_theme(&mut self, preset: &str) {
+        let Some(entry) = crate::syntax::theme::find_preset(preset) else {
+            return;
+        };
+        let mut theme = entry.build();
+        theme.apply_config_overrides(&self.config.theme);
+        self.theme = theme;
+        self.theme_preview_active = true;
+        self.editor.mark_highlights_dirty();
+    }
+
+    /// Undo a live preview. Deliberately rebuilds from config rather than
+    /// restoring a value captured when the preview started.
+    fn restore_theme_from_config(&mut self) {
+        if !self.theme_preview_active {
+            return;
+        }
+        self.theme = Theme::from_config(&self.config.theme);
+        self.theme_preview_active = false;
+        self.editor.mark_highlights_dirty();
     }
 
     fn apply_config_runtime(&mut self, config: Config) -> Option<String> {
@@ -6208,6 +6243,89 @@ enabled = ["diff_ui"]
 
         assert!(err.contains("Config parse failed:"));
         assert_eq!(after, invalid);
+    }
+
+    #[test]
+    fn theme_preview_applies_without_touching_config() {
+        let mut app = test_app_with_text("");
+        let before = app.theme.ui.status_bg;
+
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::PreviewTheme("gargo_sepia".to_string()),
+        )));
+
+        assert_ne!(app.theme.ui.status_bg, before);
+        assert!(app.theme_preview_active);
+        assert_eq!(
+            app.config.theme.preset, "ansi_dark",
+            "preview must not write the preset"
+        );
+    }
+
+    #[test]
+    fn closing_the_palette_restores_the_configured_theme() {
+        let mut app = test_app_with_text("");
+        let configured = app.theme.ui.status_bg;
+
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::PreviewTheme("gargo_contrast".to_string()),
+        )));
+        app.dispatch(Action::Ui(UiAction::ClosePalette));
+
+        assert_eq!(app.theme.ui.status_bg, configured);
+        assert!(!app.theme_preview_active);
+    }
+
+    /// The restore path rebuilds from config rather than replaying a value
+    /// captured when the preview started — so a config change made during the
+    /// preview is not silently undone.
+    #[test]
+    fn restore_follows_config_not_the_pre_preview_value() {
+        let mut app = test_app_with_text("");
+
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::PreviewTheme("gargo_contrast".to_string()),
+        )));
+        app.config.theme.preset = "gargo_sepia".to_string();
+        app.dispatch(Action::Ui(UiAction::ClosePalette));
+
+        assert_eq!(app.theme.ui.status_bg, Theme::gargo_sepia().ui.status_bg);
+    }
+
+    #[test]
+    fn setting_a_theme_writes_the_preset_and_ends_the_preview() {
+        let mut app = test_app_with_text("");
+
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::PreviewTheme("gargo_dim".to_string()),
+        )));
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::SetTheme("gargo_dim".to_string()),
+        )));
+
+        assert_eq!(app.config.theme.preset, "gargo_dim");
+        assert!(!app.theme_preview_active);
+        assert_eq!(app.theme.ui.status_bg, Theme::gargo_dim().ui.status_bg);
+    }
+
+    /// User overrides sit on top of whichever preset is being previewed.
+    #[test]
+    fn preview_keeps_user_overrides() {
+        let mut app = test_app_with_text("");
+        app.config.theme.ui.accent = Some("#ff0000".to_string());
+
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::PreviewTheme("gargo_sepia".to_string()),
+        )));
+
+        assert_eq!(
+            app.theme.ui.accent,
+            Color::Rgb {
+                r: 0xff,
+                g: 0,
+                b: 0
+            }
+        );
     }
 
     #[test]

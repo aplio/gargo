@@ -256,6 +256,12 @@ pub enum WorkspaceAction {
     },
     ToggleBranchCompareSplitPreview,
     ToggleHiddenFiles,
+    /// Open the theme chooser (live preview while moving the selection).
+    OpenThemePicker,
+    /// Apply a preset for preview only; leaves `[theme] preset` alone so
+    /// closing the picker restores what the config says.
+    PreviewTheme(String),
+    SetTheme(String),
     OpenCommitDiffView(String),
     ShowLastUsedSidebar,
     OpenSearchResultsBuffer {

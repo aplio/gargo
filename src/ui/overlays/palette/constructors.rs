@@ -77,6 +77,7 @@ impl Palette {
             image_preview_cache: HashMap::new(),
             pending_image_data: None,
             pending_image_request: None,
+            last_previewed_theme: None,
         }
     }
 
@@ -141,6 +142,7 @@ impl Palette {
             image_preview_cache: HashMap::new(),
             pending_image_data: None,
             pending_image_request: None,
+            last_previewed_theme: None,
         };
         palette.update_buffer_preview();
         palette
@@ -218,6 +220,7 @@ impl Palette {
             image_preview_cache: HashMap::new(),
             pending_image_data: None,
             pending_image_request: None,
+            last_previewed_theme: None,
         };
         palette.update_jump_preview();
         palette
@@ -298,6 +301,7 @@ impl Palette {
             image_preview_cache: HashMap::new(),
             pending_image_data: None,
             pending_image_request: None,
+            last_previewed_theme: None,
         };
         palette.update_reference_preview();
         palette
@@ -377,6 +381,7 @@ impl Palette {
             image_preview_cache: HashMap::new(),
             pending_image_data: None,
             pending_image_request: None,
+            last_previewed_theme: None,
         };
         palette.update_git_branch_preview();
         palette
@@ -463,6 +468,7 @@ impl Palette {
             image_preview_cache: HashMap::new(),
             pending_image_data: None,
             pending_image_request: None,
+            last_previewed_theme: None,
         };
         palette.update_git_branch_preview();
         palette
@@ -540,6 +546,7 @@ impl Palette {
             image_preview_cache: HashMap::new(),
             pending_image_data: None,
             pending_image_request: None,
+            last_previewed_theme: None,
         };
         palette.update_symbol_preview();
         palette
@@ -617,6 +624,7 @@ impl Palette {
             image_preview_cache: HashMap::new(),
             pending_image_data: None,
             pending_image_request: None,
+            last_previewed_theme: None,
         };
         palette.update_symbol_preview();
         palette
@@ -631,6 +639,68 @@ impl Palette {
     /// (e.g. "Stop gargo server" while the server is not running).
     pub fn set_hidden_command_ids(&mut self, ids: HashSet<String>) {
         self.hidden_command_ids = ids;
+    }
+
+    /// Theme chooser. Starts on the preset currently in effect so cancelling
+    /// without moving is a no-op, and so the list opens where the user is.
+    pub fn new_theme_picker(current_preset: &str) -> Self {
+        let candidates = super::filtering::theme_candidates("");
+        let selected = crate::syntax::theme::PRESETS
+            .iter()
+            .position(|preset| preset.id == current_preset)
+            .unwrap_or(0);
+        Self {
+            input: TextInput::default(),
+            mode: PaletteMode::ThemePicker,
+            candidates,
+            selected,
+            scroll_offset: 0,
+            preview_lines: Vec::new(),
+            preview_spans: HashMap::new(),
+            preview_cache: HashMap::new(),
+            buffer_entries: Vec::new(),
+            jump_entries: Vec::new(),
+            reference_entries: Vec::new(),
+            git_branch_entries: Vec::new(),
+            symbol_entries: Vec::new(),
+            symbol_submit_behavior: SymbolSubmitBehavior::JumpToLocation,
+            file_entries: Vec::new(),
+            project_root: PathBuf::new(),
+            request_tx: None,
+            result_rx: None,
+            _worker: None,
+            requested_paths: HashSet::new(),
+            git_status_map: HashMap::new(),
+            last_previewed_buffer: None,
+            last_previewed_jump_index: None,
+            last_previewed_reference_index: None,
+            last_previewed_git_branch_index: None,
+            last_previewed_symbol_index: None,
+            last_previewed_search_index: None,
+            jump_target_preview_line: None,
+            jump_target_char_col: None,
+            buffer_highlight_cache: HashMap::new(),
+            reference_highlight_cache: HashMap::new(),
+            lang_registry_owned: None,
+            command_history: None,
+            hidden_command_ids: HashSet::new(),
+            global_search_unsaved_buffers: Vec::new(),
+            global_search_entries: Vec::new(),
+            global_search_request_tx: None,
+            global_search_result_rx: None,
+            _global_search_worker: None,
+            global_search_generation: 0,
+            global_search_latest_applied: 0,
+            global_search_dirty: false,
+            global_search_changed_at: None,
+            active_doc_lines: Vec::new(),
+            is_unified: false,
+            caller_label: Some("Theme".to_string()),
+            image_preview_cache: HashMap::new(),
+            pending_image_data: None,
+            pending_image_request: None,
+            last_previewed_theme: None,
+        }
     }
 
     pub fn new_global_search(
@@ -704,6 +774,7 @@ impl Palette {
             image_preview_cache: HashMap::new(),
             pending_image_data: None,
             pending_image_request: None,
+            last_previewed_theme: None,
         }
     }
 }

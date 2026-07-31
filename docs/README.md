@@ -360,6 +360,8 @@ A theme has two layers:
 - **Captures** — syntax tokens. The `ansi_*` presets name ANSI colors, so code takes on the terminal's own palette; the `gargo_*` presets resolve the same capture set through a `SyntaxPalette` (nine slots) and look the same in every terminal.
 - **UI roles** (`syntax/ui_colors.rs`) — everything that is not a token: the status bar, panels, selection, git status, diagnostics, diff tints. These are always concrete RGB, including under the `ansi_*` presets, because the terminal palette should decide how code looks, not whether the sidebar is legible. Override any role under `[theme.ui]`.
 
+`Change Theme` in the command palette lists every preset and applies each one **live** as the selection moves; `Enter` keeps it, `Esc` restores. The restore path rebuilds from config rather than replaying the value captured when the preview started — the config is what the editor is supposed to look like, and a remembered copy goes stale as soon as anything else changes it. Applying a theme this way is session-local; write `[theme] preset` to keep it.
+
 A preset is one `SyntaxPalette` plus one `UiColors`, listed in `theme::PRESETS`. That table is the single source of truth — config resolution, the palette's theme list and the light/dark split all read it, so a preset cannot exist in one of them and not the others.
 
 Roles that express a *relationship* between other roles — panel borders, the sidebar surface, the current-line tint, the muted git gutter bars — are computed from the roles above and have no config key. Overriding `git_added` moves the gutter bar with it. Spelling those out per theme is how presets drift out of step with themselves.

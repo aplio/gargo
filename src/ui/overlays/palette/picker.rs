@@ -117,6 +117,9 @@ pub struct Palette {
     image_preview_cache: HashMap<PathBuf, Arc<EncodedImage>>,
     pending_image_data: Option<(PathBuf, Arc<EncodedImage>)>,
     pending_image_request: Option<ImageRenderRequest>,
+    /// Preset id last handed to the app for live preview, so moving the
+    /// selection re-themes only when the selection actually changed.
+    last_previewed_theme: Option<&'static str>,
 }
 
 impl Palette {

@@ -42,6 +42,10 @@ pub enum CoreAction {
     MoveLeft,
     MoveDown,
     MoveUp,
+    /// `gj` / `gk`: move by display line, stepping through wrapped rows when
+    /// soft wrap is on. Identical to `MoveDown`/`MoveUp` when it is off.
+    MoveDownDisplay,
+    MoveUpDisplay,
     MoveToLineStart,
     MoveToLineEnd,
     MoveWordForward,

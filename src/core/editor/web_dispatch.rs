@@ -48,6 +48,16 @@ impl Editor {
                 self.active_buffer_mut().clear_anchor();
                 self.active_buffer_mut().move_up();
             }
+            // The browser editor wraps in the DOM and has no column layout to
+            // consult here, so display-line motions fall back to buffer lines.
+            CoreAction::MoveDownDisplay => {
+                self.active_buffer_mut().clear_anchor();
+                self.active_buffer_mut().move_down();
+            }
+            CoreAction::MoveUpDisplay => {
+                self.active_buffer_mut().clear_anchor();
+                self.active_buffer_mut().move_up();
+            }
             CoreAction::MoveToLineStart => {
                 self.active_buffer_mut().clear_anchor();
                 self.active_buffer_mut().move_to_line_start();

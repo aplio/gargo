@@ -219,6 +219,10 @@ pub struct App {
     home_screen_update_check_requested: bool,
     last_term_cols: usize,
     last_term_rows: usize,
+    /// Text columns of the focused pane (pane width minus gutter) as of the
+    /// last frame. Display-line motions (`gj`/`gk`) need it to know where the
+    /// wrapped rows break.
+    last_text_width: usize,
     expand_chain: Option<expand::ExpandChain>,
     /// Anchor char position for an in-progress mouse drag selection. Set when
     /// the left button goes down inside a buffer pane; consumed by
@@ -320,6 +324,7 @@ impl App {
             home_screen_update_check_requested: !home_screen_active || fresh_update_cache.is_some(),
             last_term_cols: 120,
             last_term_rows: 40,
+            last_text_width: 0,
             expand_chain: None,
             drag_anchor: None,
             drag_autoscroll: None,
@@ -352,6 +357,8 @@ impl App {
             | CoreAction::MoveLeft
             | CoreAction::MoveDown
             | CoreAction::MoveUp
+            | CoreAction::MoveDownDisplay
+            | CoreAction::MoveUpDisplay
             | CoreAction::MoveWordForward
             | CoreAction::MoveWordForwardEnd
             | CoreAction::MoveWordBackward
@@ -1205,6 +1212,16 @@ impl App {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Width the text wraps at, or 0 when soft wrap is off — display-line
+    /// motions then behave like their buffer-line counterparts.
+    fn wrapped_text_width(&self) -> usize {
+        if self.config.wrap {
+            self.last_text_width
+        } else {
+            0
         }
     }
 
@@ -2066,6 +2083,7 @@ impl App {
                 self.config.line_number_width,
             );
             let text_width = editor_area_width.saturating_sub(gutter_w);
+            self.last_text_width = text_width;
             if self.config.wrap {
                 self.editor
                     .active_buffer_mut()
@@ -6235,6 +6253,24 @@ enabled = ["diff_ui"]
         ))));
         assert!(app.config.show_line_number);
         assert_eq!(app.editor.message.as_deref(), Some("Line numbers: ON"));
+    }
+
+    #[test]
+    fn display_motions_follow_wrapped_rows_only_while_wrap_is_on() {
+        let mut app = test_app_with_text("abcdefghijkl\nnext\n");
+        app.config.wrap = true;
+        app.last_text_width = 4;
+        app.editor.active_buffer_mut().set_cursor_line_char(0, 1);
+
+        app.dispatch(Action::Core(CoreAction::MoveDownDisplay));
+        assert_eq!(app.editor.active_buffer().cursors[0], 5);
+        app.dispatch(Action::Core(CoreAction::MoveUpDisplay));
+        assert_eq!(app.editor.active_buffer().cursors[0], 1);
+
+        // With wrap off the same action is a plain line motion.
+        app.config.wrap = false;
+        app.dispatch(Action::Core(CoreAction::MoveDownDisplay));
+        assert_eq!(app.editor.active_buffer().cursor_line(), 1);
     }
 
     #[test]

@@ -174,6 +174,7 @@ Some commands use multi-key sequences. A state machine in `input/chord.rs` track
 - Entering Insert mode clears any active selection anchor.
 - In Insert mode, real `Enter` keeps auto-indent behavior. Raw `LF`/`CR` character input is treated as pasted text and inserts a plain newline without auto-indent.
 - `g` (goto) chord: `gg` goes to file start, `ge` to file end, `gd` goes to definition.
+- `gj` / `gk` move by display line: with soft wrap on they step between the wrapped rows of a line, keeping the screen column; with wrap off they behave like `j` / `k`. Counts apply (`3gj`).
 - In the in-editor diff buffer, `gd` opens the file location represented by the current diff line.
 - In the in-editor diff buffer, `r` refreshes the diff content and jump mapping.
 - `SPC g` opens a flat changed-files sidebar with git status badges (`[M]`, `[A]`, `[D]`, `[?]`, `[U]`).

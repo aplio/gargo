@@ -130,6 +130,14 @@ impl CommandHelper {
                         description: "Line end".to_string(),
                     },
                     KeyBinding {
+                        key: "j".to_string(),
+                        description: "Down one display line".to_string(),
+                    },
+                    KeyBinding {
+                        key: "k".to_string(),
+                        description: "Up one display line".to_string(),
+                    },
+                    KeyBinding {
                         key: "p".to_string(),
                         description: "Previous buffer".to_string(),
                     },

@@ -97,6 +97,22 @@ impl App {
                 }
                 self.editor.active_buffer_mut().move_up();
             }
+            CoreAction::MoveDownDisplay => {
+                if self.editor.mode == mode::Mode::Normal {
+                    self.editor.active_buffer_mut().clear_anchor();
+                }
+                let text_width = self.wrapped_text_width();
+                self.editor
+                    .active_buffer_mut()
+                    .move_down_display(text_width);
+            }
+            CoreAction::MoveUpDisplay => {
+                if self.editor.mode == mode::Mode::Normal {
+                    self.editor.active_buffer_mut().clear_anchor();
+                }
+                let text_width = self.wrapped_text_width();
+                self.editor.active_buffer_mut().move_up_display(text_width);
+            }
             CoreAction::MoveToLineStart => {
                 if self.editor.mode == mode::Mode::Normal {
                     self.editor.active_buffer_mut().clear_anchor();

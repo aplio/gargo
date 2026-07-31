@@ -160,6 +160,8 @@ pub fn resolve(key: KeyEvent, state: &mut KeyState, mode: &Mode, is_recording: b
             KeyCode::Char('e') => core(CoreAction::MoveToFileEnd),
             KeyCode::Char('h') => core(CoreAction::MoveToLineStart),
             KeyCode::Char('l') => core(CoreAction::MoveToLineEnd),
+            KeyCode::Char('j') => core(CoreAction::MoveDownDisplay),
+            KeyCode::Char('k') => core(CoreAction::MoveUpDisplay),
             KeyCode::Char('p') => core(CoreAction::PrevBuffer),
             KeyCode::Char('n') => core(CoreAction::NextBuffer),
             _ => core(CoreAction::Noop),
@@ -549,6 +551,23 @@ mod tests {
         let mut state = KeyState::Goto;
         let action = resolve(key('e'), &mut state, &Mode::Normal, false);
         assert_eq!(action, core(CoreAction::MoveToFileEnd));
+        assert_eq!(state, KeyState::Normal);
+    }
+
+    #[test]
+    fn goto_gj_gk_map_to_display_line_motions() {
+        let mut state = KeyState::Goto;
+        assert_eq!(
+            resolve(key('j'), &mut state, &Mode::Normal, false),
+            core(CoreAction::MoveDownDisplay)
+        );
+        assert_eq!(state, KeyState::Normal);
+
+        let mut state = KeyState::Goto;
+        assert_eq!(
+            resolve(key('k'), &mut state, &Mode::Visual, false),
+            core(CoreAction::MoveUpDisplay)
+        );
         assert_eq!(state, KeyState::Normal);
     }
 

@@ -393,6 +393,66 @@ fn scroll_viewport_ensure_cursor_visible_is_noop() {
 }
 
 // -------------------------------------------------------
+// Display-line motions (gj / gk)
+// -------------------------------------------------------
+
+#[test]
+fn move_down_display_steps_through_wrapped_rows() {
+    let mut doc = doc_from_str("abcdefghijkl\nnext\n");
+    doc.set_cursor_line_char(0, 1); // display col 1, first wrapped row
+    doc.move_down_display(4);
+    assert_eq!(doc.cursors[0], 5); // same line, second row, same column
+    doc.move_down_display(4);
+    assert_eq!(doc.cursors[0], 9); // third row
+    doc.move_down_display(4);
+    assert_eq!(doc.cursors[0], 14); // spills onto the next buffer line ("next")
+}
+
+#[test]
+fn move_up_display_steps_back_through_wrapped_rows() {
+    let mut doc = doc_from_str("abcdefghijkl\nnext\n");
+    doc.set_cursor_line_char(1, 1);
+    doc.move_up_display(4);
+    assert_eq!(doc.cursors[0], 9); // last row of the wrapped line
+    doc.move_up_display(4);
+    assert_eq!(doc.cursors[0], 5);
+    doc.move_up_display(4);
+    assert_eq!(doc.cursors[0], 1);
+    doc.move_up_display(4); // already on the first row of the first line
+    assert_eq!(doc.cursors[0], 1);
+}
+
+#[test]
+fn display_motions_fall_back_to_line_motions_without_wrap() {
+    let mut doc = doc_from_str("abcdefghijkl\nnext\n");
+    doc.set_cursor_line_char(0, 1);
+    doc.move_down_display(0);
+    assert_eq!(doc.cursor_line(), 1);
+    doc.move_up_display(0);
+    assert_eq!(doc.cursor_line(), 0);
+}
+
+#[test]
+fn display_motions_clamp_to_shorter_rows() {
+    // Second row of line 0 is only 2 columns wide ("ef").
+    let mut doc = doc_from_str("abcdef\nxy\n");
+    doc.set_cursor_line_char(0, 3); // display col 3, first row
+    doc.move_down_display(4);
+    assert_eq!(doc.cursors[0], 6); // clamped to end of "ef"
+}
+
+#[test]
+fn display_motions_keep_column_across_wide_chars() {
+    // "ああああ" is 8 columns: two rows of two chars at width 4.
+    let mut doc = doc_from_str("ああああ\n");
+    doc.set_cursor_line_char(0, 1); // second char, display col 2
+    doc.move_down_display(4);
+    assert_eq!(doc.cursors[0], 3); // fourth char, display col 6 (col 2 of row 1)
+    doc.move_up_display(4);
+    assert_eq!(doc.cursors[0], 1);
+}
+
+// -------------------------------------------------------
 // Soft wrap viewport
 // -------------------------------------------------------
 

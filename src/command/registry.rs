@@ -588,6 +588,17 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     });
 
     registry.register(CommandEntry {
+        id: "explorer.toggle_hidden_files".into(),
+        label: "Toggle Hidden Files".into(),
+        category: Some("Explorer".into()),
+        action: Box::new(|_editor| {
+            CommandEffect::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::ToggleHiddenFiles,
+            )))
+        }),
+    });
+
+    registry.register(CommandEntry {
         id: "explorer.popup".into(),
         label: "Open Explorer (Big)".into(),
         category: Some("Explorer".into()),

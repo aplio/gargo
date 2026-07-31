@@ -3,11 +3,18 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use crate::project::FileFilter;
+
 const CHANNEL_POLL_FALLBACK_MS: u64 = 20;
 
 #[derive(Debug)]
 pub enum FileIndexRuntimeCommand {
-    Refresh { project_root: PathBuf },
+    Refresh {
+        project_root: PathBuf,
+        /// Visibility rules from the user's config, so the picker's file list
+        /// matches what the file tree shows.
+        filter: FileFilter,
+    },
     Shutdown,
 }
 
@@ -53,7 +60,7 @@ impl Drop for FileIndexRuntimeHandle {
 struct FileIndexRuntimeWorker {
     command_rx: mpsc::Receiver<FileIndexRuntimeCommand>,
     event_tx: mpsc::Sender<FileIndexRuntimeEvent>,
-    pending_project_root: Option<PathBuf>,
+    pending_project_root: Option<(PathBuf, FileFilter)>,
 }
 
 impl FileIndexRuntimeWorker {
@@ -74,16 +81,19 @@ impl FileIndexRuntimeWorker {
                 .command_rx
                 .recv_timeout(Duration::from_millis(CHANNEL_POLL_FALLBACK_MS))
             {
-                Ok(FileIndexRuntimeCommand::Refresh { project_root }) => {
-                    self.pending_project_root = Some(project_root);
+                Ok(FileIndexRuntimeCommand::Refresh {
+                    project_root,
+                    filter,
+                }) => {
+                    self.pending_project_root = Some((project_root, filter));
                 }
                 Ok(FileIndexRuntimeCommand::Shutdown) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
 
-            if let Some(project_root) = self.pending_project_root.take() {
-                let files = crate::project::collect_files(&project_root);
+            if let Some((project_root, filter)) = self.pending_project_root.take() {
+                let files = crate::project::collect_files_with_filter(&project_root, filter);
                 let _ = self.event_tx.send(FileIndexRuntimeEvent::Ready {
                     project_root,
                     files,
@@ -111,6 +121,7 @@ mod tests {
             .command_tx
             .send(FileIndexRuntimeCommand::Refresh {
                 project_root: tmp.path().to_path_buf(),
+                filter: FileFilter::default(),
             })
             .expect("send refresh");
 

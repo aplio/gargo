@@ -471,8 +471,12 @@ impl App {
                     self.queue_git_status_refresh(true);
                     let initial_preview = self.active_buffer_is_blank();
                     let (dir, select) = self.resolve_explorer_open_target();
-                    let mut explorer =
-                        Explorer::new(dir, &self.project_root, &self.git_status_cache);
+                    let mut explorer = Explorer::new_with_filter(
+                        dir,
+                        &self.project_root,
+                        &self.git_status_cache,
+                        FileFilter::from_config(&self.config),
+                    );
                     if let Some(name) = select {
                         explorer.select_by_name(&name);
                     }
@@ -512,7 +516,12 @@ impl App {
                 self.queue_git_status_refresh(true);
                 let initial_preview = self.active_buffer_is_blank();
                 let (dir, select) = self.resolve_reveal_target();
-                let mut explorer = Explorer::new(dir, &self.project_root, &self.git_status_cache);
+                let mut explorer = Explorer::new_with_filter(
+                    dir,
+                    &self.project_root,
+                    &self.git_status_cache,
+                    FileFilter::from_config(&self.config),
+                );
                 if let Some(name) = select {
                     explorer.select_by_name(&name);
                 }
@@ -522,10 +531,11 @@ impl App {
             AppAction::Workspace(WorkspaceAction::OpenExplorerPopup) => {
                 self.queue_git_status_refresh(true);
                 let reveal = self.editor.active_buffer().file_path.clone();
-                let popup = ExplorerPopup::new(
+                let popup = ExplorerPopup::new_with_filter(
                     self.project_root.clone(),
                     &self.git_status_cache,
                     reveal.as_deref(),
+                    FileFilter::from_config(&self.config),
                 );
                 self.compositor.open_explorer_popup(popup);
             }
@@ -883,6 +893,25 @@ impl App {
                         self.editor.message = Some(format!("Viewed toggle failed: {}", err));
                     }
                 }
+            }
+            AppAction::Workspace(WorkspaceAction::ToggleHiddenFiles) => {
+                // Session-local: the in-memory config is the single source the
+                // tree, the tree popup and the picker index all read from, so
+                // flipping it here keeps them from drifting apart. The config
+                // file is not written.
+                let show = !self.config.ui.show_dotfiles;
+                self.config.ui.show_dotfiles = show;
+                if let Some(explorer) = self.compositor.explorer_mut() {
+                    explorer.set_show_dotfiles(show);
+                }
+                if let Some(popup) = self.compositor.explorer_popup_mut() {
+                    popup.set_show_dotfiles(show);
+                }
+                self.queue_file_index_refresh();
+                self.editor.message = Some(format!(
+                    "Hidden files: {}",
+                    if show { "shown" } else { "hidden" }
+                ));
             }
             AppAction::Workspace(WorkspaceAction::ToggleBranchCompareSplitPreview) => {
                 match self.compositor.explorer_mut() {

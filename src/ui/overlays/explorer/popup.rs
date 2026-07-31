@@ -10,6 +10,7 @@ use crate::command::git::{GitFileStatus, dir_git_status};
 use crate::input::action::{
     Action, AppAction, BufferAction, IntegrationAction, ProjectAction, UiAction,
 };
+use crate::project::FileFilter;
 use crate::syntax::highlight::{HighlightSpan, highlight_text};
 use crate::syntax::language::LanguageRegistry;
 use crate::syntax::theme::Theme;
@@ -108,6 +109,7 @@ pub struct ExplorerPopup {
     requested_paths: HashSet<PathBuf>,
     current_preview_path: Option<PathBuf>,
     git_status_map: HashMap<String, GitFileStatus>,
+    filter: FileFilter,
 }
 
 const PREVIEW_SPLIT_THRESHOLD: usize = 60;
@@ -122,18 +124,44 @@ impl ExplorerPopup {
         git_status_map: &HashMap<String, GitFileStatus>,
         reveal: Option<&Path>,
     ) -> Self {
-        Self::new_with_mode(root, git_status_map, ExplorerPopupMode::OpenFiles, reveal)
+        Self::new_with_filter(root, git_status_map, reveal, FileFilter::default())
+    }
+
+    /// Like [`ExplorerPopup::new`], with the visibility rules from the user's
+    /// config.
+    pub fn new_with_filter(
+        root: PathBuf,
+        git_status_map: &HashMap<String, GitFileStatus>,
+        reveal: Option<&Path>,
+        filter: FileFilter,
+    ) -> Self {
+        Self::new_with_mode(
+            root,
+            git_status_map,
+            ExplorerPopupMode::OpenFiles,
+            reveal,
+            filter,
+        )
     }
 
     pub fn new_for_project_root(
         root: PathBuf,
         git_status_map: &HashMap<String, GitFileStatus>,
     ) -> Self {
+        Self::new_for_project_root_with_filter(root, git_status_map, FileFilter::default())
+    }
+
+    pub fn new_for_project_root_with_filter(
+        root: PathBuf,
+        git_status_map: &HashMap<String, GitFileStatus>,
+        filter: FileFilter,
+    ) -> Self {
         Self::new_with_mode(
             root,
             git_status_map,
             ExplorerPopupMode::SelectProjectRoot,
             None,
+            filter,
         )
     }
 
@@ -142,6 +170,7 @@ impl ExplorerPopup {
         git_status_map: &HashMap<String, GitFileStatus>,
         mode: ExplorerPopupMode,
         reveal: Option<&Path>,
+        filter: FileFilter,
     ) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<PreviewRequest>();
         let (res_tx, res_rx) = mpsc::channel::<PreviewResult>();
@@ -175,6 +204,7 @@ impl ExplorerPopup {
             requested_paths: HashSet::new(),
             current_preview_path: None,
             git_status_map: git_status_map.clone(),
+            filter,
         };
         if let Some(target) = reveal {
             popup.expand_ancestors_of(target);
@@ -204,6 +234,16 @@ impl ExplorerPopup {
         }
     }
 
+    /// Session-local dotfile visibility, kept in step with the sidebar and the
+    /// picker by the app-level "Toggle Hidden Files" action.
+    pub fn set_show_dotfiles(&mut self, show: bool) {
+        if self.filter.show_dotfiles == show {
+            return;
+        }
+        self.filter.show_dotfiles = show;
+        self.rebuild_entries();
+    }
+
     fn rebuild_entries(&mut self) {
         self.entries.clear();
         self.build_tree(&self.root.clone(), 0);
@@ -219,7 +259,7 @@ impl ExplorerPopup {
         if let Ok(read_dir) = std::fs::read_dir(dir) {
             for entry in read_dir.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') {
+                if !self.filter.accepts_name(&name) {
                     continue;
                 }
                 let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
@@ -1286,16 +1326,33 @@ impl ExplorerPopup {
 
     #[cfg(test)]
     fn new_without_worker(root: PathBuf) -> Self {
-        Self::new_without_worker_with_mode(root, ExplorerPopupMode::OpenFiles)
+        Self::new_without_worker_with_mode(
+            root,
+            ExplorerPopupMode::OpenFiles,
+            FileFilter::default(),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_without_worker_with_filter(root: PathBuf, filter: FileFilter) -> Self {
+        Self::new_without_worker_with_mode(root, ExplorerPopupMode::OpenFiles, filter)
     }
 
     #[cfg(test)]
     fn new_without_worker_for_project_root(root: PathBuf) -> Self {
-        Self::new_without_worker_with_mode(root, ExplorerPopupMode::SelectProjectRoot)
+        Self::new_without_worker_with_mode(
+            root,
+            ExplorerPopupMode::SelectProjectRoot,
+            FileFilter::default(),
+        )
     }
 
     #[cfg(test)]
-    fn new_without_worker_with_mode(root: PathBuf, mode: ExplorerPopupMode) -> Self {
+    fn new_without_worker_with_mode(
+        root: PathBuf,
+        mode: ExplorerPopupMode,
+        filter: FileFilter,
+    ) -> Self {
         let mut popup = Self {
             root,
             mode,
@@ -1322,6 +1379,7 @@ impl ExplorerPopup {
             requested_paths: HashSet::new(),
             current_preview_path: None,
             git_status_map: HashMap::new(),
+            filter,
         };
         popup.rebuild_entries();
         popup
@@ -1488,6 +1546,54 @@ mod tests {
         assert_eq!(popup.entries[1].name, "bbb.txt");
         assert!(!popup.entries[2].is_dir);
         assert_eq!(popup.entries[2].name, "ccc.rs");
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn dotfiles_follow_the_same_filter_as_the_sidebar() {
+        let dir = setup("dotfiles");
+        fs::create_dir_all(dir.join(".github")).unwrap();
+        fs::write(dir.join(".github").join("ci.yml"), "on: push").unwrap();
+        fs::create_dir_all(dir.join(".git")).unwrap();
+
+        let shown = ExplorerPopup::new_without_worker_with_filter(
+            dir.clone(),
+            FileFilter {
+                show_dotfiles: true,
+            },
+        );
+        let names: Vec<&str> = shown.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&".github"), "names: {:?}", names);
+        assert!(!names.contains(&".git"), "names: {:?}", names);
+
+        let hidden = ExplorerPopup::new_without_worker_with_filter(
+            dir.clone(),
+            FileFilter {
+                show_dotfiles: false,
+            },
+        );
+        let names: Vec<&str> = hidden.entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(!names.contains(&".github"), "names: {:?}", names);
+        assert!(names.contains(&"bbb.txt"));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn set_show_dotfiles_rebuilds_the_tree() {
+        let dir = setup("dotfiles_set");
+        fs::create_dir_all(dir.join(".github")).unwrap();
+        let mut popup = ExplorerPopup::new_without_worker_with_filter(
+            dir.clone(),
+            FileFilter {
+                show_dotfiles: false,
+            },
+        );
+        assert!(!popup.entries.iter().any(|e| e.name == ".github"));
+
+        popup.set_show_dotfiles(true);
+        assert!(popup.entries.iter().any(|e| e.name == ".github"));
 
         cleanup(&dir);
     }

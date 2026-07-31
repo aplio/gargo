@@ -44,6 +44,7 @@ use crate::log::debug_log;
 use crate::plugin::host::PluginHost;
 use crate::plugin::registry::build_plugin_host;
 use crate::plugin::types::{LspPickerLocation, PluginContext, PluginEvent, PluginOutput};
+use crate::project::FileFilter;
 use crate::syntax::symbol::{extract_definition_sections, extract_symbols};
 use crate::syntax::theme::Theme;
 use crate::ui::framework::component::{EventResult, RenderContext};
@@ -251,7 +252,14 @@ impl App {
         let git_index_runtime = Self::build_git_index_runtime().ok();
         let (file_list, file_index_loading, file_index_requested_for_root) =
             match config.performance.file_index.mode {
-                FileIndexMode::Eager => (crate::project::collect_files(&project_root), false, true),
+                FileIndexMode::Eager => (
+                    crate::project::collect_files_with_filter(
+                        &project_root,
+                        FileFilter::from_config(&config),
+                    ),
+                    false,
+                    true,
+                ),
                 FileIndexMode::Lazy => (Vec::new(), false, false),
             };
         let home_screen_active = should_show_home_screen(start_path, &editor);
@@ -847,7 +855,10 @@ impl App {
     fn queue_file_index_refresh(&mut self) {
         self.file_index_requested_for_root = true;
         let Some(runtime) = &self.file_index_runtime else {
-            self.file_list = crate::project::collect_files(&self.project_root);
+            self.file_list = crate::project::collect_files_with_filter(
+                &self.project_root,
+                FileFilter::from_config(&self.config),
+            );
             self.file_index_loading = false;
             return;
         };
@@ -856,6 +867,7 @@ impl App {
             .command_tx
             .send(FileIndexRuntimeCommand::Refresh {
                 project_root: self.project_root.clone(),
+                filter: FileFilter::from_config(&self.config),
             })
             .is_err()
         {
@@ -885,6 +897,7 @@ impl App {
         if command_tx
             .send(FileIndexRuntimeCommand::Refresh {
                 project_root: self.project_root.clone(),
+                filter: FileFilter::from_config(&self.config),
             })
             .is_err()
         {
@@ -968,7 +981,10 @@ impl App {
     fn refresh_file_index_for_current_root(&mut self) {
         match self.config.performance.file_index.mode {
             FileIndexMode::Eager => {
-                self.file_list = crate::project::collect_files(&self.project_root);
+                self.file_list = crate::project::collect_files_with_filter(
+                    &self.project_root,
+                    FileFilter::from_config(&self.config),
+                );
                 self.file_index_loading = false;
                 self.file_index_requested_for_root = true;
                 self.refresh_file_index_consumers();

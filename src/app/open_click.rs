@@ -107,7 +107,12 @@ impl App {
 
     fn open_clicked_dir(&mut self, dir: PathBuf) {
         self.queue_git_status_refresh(true);
-        let explorer = Explorer::new(dir.clone(), &self.project_root, &self.git_status_cache);
+        let explorer = Explorer::new_with_filter(
+            dir.clone(),
+            &self.project_root,
+            &self.git_status_cache,
+            FileFilter::from_config(&self.config),
+        );
         self.compositor.open_explorer(explorer);
         self.last_used_sidebar = Some(LastUsedSidebar::ExplorerRegular);
         self.editor.message = Some(format!("Explorer: {}", dir.display()));

@@ -1,5 +1,55 @@
 use std::path::{Path, PathBuf};
 
+use crate::config::Config;
+
+/// Decides which entries the file tree and the file pickers may show.
+///
+/// One predicate shared by the sidebar, the tree popup, the non-git walk and
+/// the git file list. Keeping it in a single place is the point: when each
+/// call site had its own `if name.starts_with('.')`, `.github/workflows/ci.yml`
+/// showed up in the picker but was unreachable in the tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileFilter {
+    /// Show entries whose name starts with `.`. Default on — not seeing
+    /// `.github/`, `.claude/` or `.env` is a real cost, and only the people who
+    /// already know about the setting can fix it.
+    pub show_dotfiles: bool,
+}
+
+impl Default for FileFilter {
+    fn default() -> Self {
+        Self {
+            show_dotfiles: true,
+        }
+    }
+}
+
+impl FileFilter {
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            show_dotfiles: config.ui.show_dotfiles,
+        }
+    }
+
+    /// True when an entry with this file name may be shown. A directory that
+    /// fails this is not descended into either.
+    pub fn accepts_name(&self, name: &str) -> bool {
+        // The repository's own database is never useful to browse, and it is
+        // large enough to drown the tree. Hidden regardless of the setting.
+        if name == ".git" {
+            return false;
+        }
+        self.show_dotfiles || !name.starts_with('.')
+    }
+
+    /// Same test applied to a `/`-separated path relative to the project root.
+    /// Any hidden component hides the whole path: a file under `.github/` is
+    /// unreachable in the tree, so it must not surface in the picker either.
+    pub fn accepts_rel_path(&self, rel: &str) -> bool {
+        rel.split('/').all(|component| self.accepts_name(component))
+    }
+}
+
 /// Resolve a project root by probing `start` first, then falling back to CWD.
 /// Uses the first ancestor directory containing a `.git` marker (dir or file).
 /// If `start` is provided and no git root is found from that path, returns the
@@ -56,13 +106,22 @@ fn find_git_root_from(start_dir: &Path) -> Option<PathBuf> {
 /// Collect files under `root`.
 /// If inside a git repo, uses gix to respect `.gitignore`.
 /// Otherwise falls back to a recursive directory walk.
+///
+/// Sees everything the filter allows by default. Callers that feed a file
+/// picker should use [`collect_files_with_filter`] so the picker and the file
+/// tree agree on what exists; the background indexes (search, symbols) stay on
+/// the default so a hidden-in-the-tree file is still searchable.
 pub fn collect_files(root: &Path) -> Vec<String> {
+    collect_files_with_filter(root, FileFilter::default())
+}
+
+pub fn collect_files_with_filter(root: &Path, filter: FileFilter) -> Vec<String> {
     if has_git_marker(root)
-        && let Some(files) = collect_files_git(root)
+        && let Some(files) = collect_files_git(root, filter)
     {
         return files;
     }
-    collect_files_walk(root, root)
+    collect_files_walk(root, root, filter)
 }
 
 /// Discover git repos accessible from `project_root`.
@@ -96,11 +155,20 @@ pub fn has_git_marker(dir: &Path) -> bool {
     dot_git.is_dir() || dot_git.is_file()
 }
 
-fn collect_files_git(root: &Path) -> Option<Vec<String>> {
-    crate::command::git_backend::collect_files(root)
+/// The git file list is unfiltered by construction (index entries plus
+/// untracked files), so the predicate is applied here — otherwise dotfiles
+/// would keep reaching the picker after the tree learned to hide them.
+fn collect_files_git(root: &Path, filter: FileFilter) -> Option<Vec<String>> {
+    let files = crate::command::git_backend::collect_files(root)?;
+    Some(
+        files
+            .into_iter()
+            .filter(|rel| filter.accepts_rel_path(rel))
+            .collect(),
+    )
 }
 
-fn collect_files_walk(dir: &Path, root: &Path) -> Vec<String> {
+fn collect_files_walk(dir: &Path, root: &Path, filter: FileFilter) -> Vec<String> {
     let mut result = Vec::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -111,13 +179,19 @@ fn collect_files_walk(dir: &Path, root: &Path) -> Vec<String> {
         let name = entry.file_name();
         let name_str = name.to_string_lossy();
 
-        if name_str.starts_with('.') || name_str == "target" || name_str == "node_modules" {
+        // `target` / `node_modules` are build output, not hidden files; they
+        // stay excluded regardless of the dotfile setting (a future
+        // `respect_gitignore` is where they really belong).
+        if name_str == "target" || name_str == "node_modules" {
+            continue;
+        }
+        if !filter.accepts_name(&name_str) {
             continue;
         }
 
         if path.is_dir() {
             if has_git_marker(&path) {
-                if let Some(git_files) = collect_files_git(&path)
+                if let Some(git_files) = collect_files_git(&path, filter)
                     && let Ok(prefix) = path.strip_prefix(root)
                 {
                     let prefix_str = prefix.to_string_lossy();
@@ -126,7 +200,7 @@ fn collect_files_walk(dir: &Path, root: &Path) -> Vec<String> {
                     }
                 }
             } else {
-                result.extend(collect_files_walk(&path, root));
+                result.extend(collect_files_walk(&path, root, filter));
             }
         } else if let Ok(rel) = path.strip_prefix(root) {
             result.push(rel.to_string_lossy().to_string());
@@ -392,6 +466,89 @@ mod tests {
         let mut got = collect_files(&repo);
         got.sort();
         assert_eq!(got, git_ls_files_present(&repo));
+    }
+
+    #[test]
+    fn file_filter_hides_dotfiles_only_when_asked() {
+        let shown = FileFilter {
+            show_dotfiles: true,
+        };
+        let hidden = FileFilter {
+            show_dotfiles: false,
+        };
+
+        assert!(shown.accepts_name(".github"));
+        assert!(!hidden.accepts_name(".github"));
+        assert!(shown.accepts_name("src"));
+        assert!(hidden.accepts_name("src"));
+
+        // `.git` is not browsable either way.
+        assert!(!shown.accepts_name(".git"));
+        assert!(!hidden.accepts_name(".git"));
+
+        // A hidden component hides the whole path: a file the tree cannot
+        // reach must not show up in the picker.
+        assert!(!hidden.accepts_rel_path(".github/workflows/ci.yml"));
+        assert!(shown.accepts_rel_path(".github/workflows/ci.yml"));
+        assert!(hidden.accepts_rel_path("src/main.rs"));
+    }
+
+    #[test]
+    fn collect_files_git_respects_the_filter() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".github")).unwrap();
+        init_git_repo(&repo);
+        std::fs::write(repo.join(".github").join("ci.yml"), "on: push").unwrap();
+        std::fs::write(repo.join("keep.txt"), "keep").unwrap();
+
+        let shown = collect_files_with_filter(
+            &repo,
+            FileFilter {
+                show_dotfiles: true,
+            },
+        );
+        assert!(shown.contains(&".github/ci.yml".to_string()), "{shown:?}");
+
+        let hidden = collect_files_with_filter(
+            &repo,
+            FileFilter {
+                show_dotfiles: false,
+            },
+        );
+        assert!(
+            !hidden.contains(&".github/ci.yml".to_string()),
+            "{hidden:?}"
+        );
+        assert!(hidden.contains(&"keep.txt".to_string()), "{hidden:?}");
+    }
+
+    #[test]
+    fn collect_files_walk_respects_the_filter() {
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".config")).unwrap();
+        std::fs::write(tmp.path().join(".config").join("x.toml"), "x").unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "a").unwrap();
+
+        let shown = collect_files_with_filter(
+            tmp.path(),
+            FileFilter {
+                show_dotfiles: true,
+            },
+        );
+        assert!(shown.contains(&".config/x.toml".to_string()), "{shown:?}");
+
+        let hidden = collect_files_with_filter(
+            tmp.path(),
+            FileFilter {
+                show_dotfiles: false,
+            },
+        );
+        assert!(
+            !hidden.contains(&".config/x.toml".to_string()),
+            "{hidden:?}"
+        );
+        assert!(hidden.contains(&"a.txt".to_string()));
     }
 
     #[test]

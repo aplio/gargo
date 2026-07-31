@@ -255,6 +255,7 @@ pub enum WorkspaceAction {
         viewed: bool,
     },
     ToggleBranchCompareSplitPreview,
+    ToggleHiddenFiles,
     OpenCommitDiffView(String),
     ShowLastUsedSidebar,
     OpenSearchResultsBuffer {

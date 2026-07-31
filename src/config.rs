@@ -101,6 +101,10 @@ pub struct UiConfig {
     /// Toggle at runtime with `s` in the sidebar or the
     /// "Toggle Split Diff Preview" palette command.
     pub branch_compare_split_preview: bool,
+    /// Show dotfiles (`.github/`, `.env`, …) in the file tree and the file
+    /// pickers. `.git` itself stays hidden either way. Toggle at runtime with
+    /// `.` in the sidebar or the "Toggle Hidden Files" palette command.
+    pub show_dotfiles: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -242,6 +246,7 @@ impl Default for UiConfig {
             popup_width_percent: 95,
             popup_height_percent: 90,
             branch_compare_split_preview: false,
+            show_dotfiles: true,
         }
     }
 }
@@ -688,6 +693,20 @@ branch_compare_split_preview = true
         assert_eq!(cfg.ui.popup_width_percent, 80);
         assert_eq!(cfg.ui.popup_height_percent, 75);
         assert!(cfg.ui.branch_compare_split_preview);
+    }
+
+    #[test]
+    fn test_show_dotfiles_defaults_on_and_parses() {
+        assert!(Config::default().ui.show_dotfiles);
+
+        let cfg: Config = toml::from_str(
+            r#"
+[ui]
+show_dotfiles = false
+"#,
+        )
+        .unwrap();
+        assert!(!cfg.ui.show_dotfiles);
     }
 
     #[test]

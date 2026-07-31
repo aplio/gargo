@@ -11,6 +11,7 @@ use crossterm::style::Color;
 use crate::command::git::{GitFileEntry, GitFileStatus, GitLineStatus, dir_git_status};
 use crate::input::action::{Action, AppAction, BufferAction, IntegrationAction, WorkspaceAction};
 use crate::input::chord::KeyState;
+use crate::project::FileFilter;
 use crate::split_render::{SplitCell, SplitKind, SplitRow};
 use crate::syntax::highlight::{HighlightSpan, highlight_text};
 use crate::syntax::language::LanguageRegistry;
@@ -114,6 +115,7 @@ fn file_mtime(path: &Path) -> Option<SystemTime> {
 
 pub struct Explorer {
     mode: ExplorerMode,
+    filter: FileFilter,
     current_dir: PathBuf,
     entries: Vec<DirEntry>,
     visible_entries: Vec<usize>,
@@ -186,7 +188,25 @@ impl Explorer {
         project_root: &Path,
         git_status_map: &HashMap<String, GitFileStatus>,
     ) -> Self {
-        Self::new_with_mode(dir, project_root, git_status_map, ExplorerMode::AllFiles)
+        Self::new_with_filter(dir, project_root, git_status_map, FileFilter::default())
+    }
+
+    /// Like [`Explorer::new`], with the visibility rules from the user's
+    /// config. `read_directory()` runs inside the constructor, so the filter
+    /// has to arrive here rather than through a later setter.
+    pub fn new_with_filter(
+        dir: PathBuf,
+        project_root: &Path,
+        git_status_map: &HashMap<String, GitFileStatus>,
+        filter: FileFilter,
+    ) -> Self {
+        Self::new_with_mode(
+            dir,
+            project_root,
+            git_status_map,
+            ExplorerMode::AllFiles,
+            filter,
+        )
     }
 
     pub fn new_changed_only(
@@ -194,7 +214,13 @@ impl Explorer {
         project_root: &Path,
         git_status_map: &HashMap<String, GitFileStatus>,
     ) -> Self {
-        Self::new_with_mode(dir, project_root, git_status_map, ExplorerMode::ChangedOnly)
+        Self::new_with_mode(
+            dir,
+            project_root,
+            git_status_map,
+            ExplorerMode::ChangedOnly,
+            FileFilter::default(),
+        )
     }
 
     fn new_with_mode(
@@ -202,9 +228,11 @@ impl Explorer {
         project_root: &Path,
         git_status_map: &HashMap<String, GitFileStatus>,
         mode: ExplorerMode,
+        filter: FileFilter,
     ) -> Self {
         let mut explorer = Self {
             mode,
+            filter,
             current_dir: dir,
             entries: Vec::new(),
             visible_entries: Vec::new(),
@@ -263,6 +291,7 @@ impl Explorer {
     ) -> Self {
         let mut explorer = Self {
             mode: ExplorerMode::BranchCompare,
+            filter: FileFilter::default(),
             current_dir: project_root.clone(),
             entries: Vec::new(),
             visible_entries: Vec::new(),
@@ -612,6 +641,34 @@ impl Explorer {
 
     pub fn preview_split_enabled(&self) -> bool {
         self.preview_split
+    }
+
+    /// Set dotfile visibility and reread the directory, keeping the current
+    /// selection when the entry survives the change. A session-local toggle:
+    /// the config file is not touched.
+    pub fn set_show_dotfiles(&mut self, show: bool) {
+        if self.filter.show_dotfiles == show {
+            return;
+        }
+        let selected_name = self.selected_name().map(|s| s.to_string());
+        self.filter.show_dotfiles = show;
+        self.read_directory();
+        if let Some(name) = selected_name {
+            self.select_by_name(&name);
+        }
+    }
+
+    pub fn toggle_show_dotfiles(&mut self) -> bool {
+        self.set_show_dotfiles(!self.filter.show_dotfiles);
+        self.filter.show_dotfiles
+    }
+
+    pub fn show_dotfiles(&self) -> bool {
+        self.filter.show_dotfiles
+    }
+
+    pub fn filter(&self) -> FileFilter {
+        self.filter
     }
 
     /// Scroll the preview pane in response to a mouse-wheel event over the
@@ -1024,8 +1081,7 @@ impl Explorer {
         if let Ok(read_dir) = std::fs::read_dir(&self.current_dir) {
             for entry in read_dir.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                // Skip dotfiles
-                if name.starts_with('.') {
+                if !self.filter.accepts_name(&name) {
                     continue;
                 }
                 let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
@@ -1311,6 +1367,11 @@ impl Explorer {
                 self.toggle_preview_split();
                 EventResult::Consumed
             }
+            // Routed through the app rather than flipped locally, so the
+            // picker's file list moves with the tree.
+            KeyCode::Char('.') if self.mode == ExplorerMode::AllFiles => EventResult::Action(
+                Action::App(AppAction::Workspace(WorkspaceAction::ToggleHiddenFiles)),
+            ),
             KeyCode::Esc => EventResult::Action(Action::App(AppAction::Workspace(
                 WorkspaceAction::ToggleExplorer,
             ))),
@@ -2768,6 +2829,115 @@ mod tests {
         assert_eq!(surface.get(41, 2).style.bg, Some(Color::DarkGreen));
         assert_eq!(surface.get(0, 1).style.bg, None);
         assert_eq!(surface.get(41, 1).style.bg, None);
+
+        cleanup(&dir);
+    }
+
+    /// Fixture with dotfile entries alongside the regular ones, plus a `.git`
+    /// directory that must stay hidden either way.
+    fn setup_with_dotfiles(name: &str) -> PathBuf {
+        let dir = setup(name);
+        fs::create_dir_all(dir.join(".github")).unwrap();
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        fs::write(dir.join(".env"), "SECRET=1").unwrap();
+        dir
+    }
+
+    fn visible_names(explorer: &Explorer) -> Vec<String> {
+        explorer
+            .visible_entries
+            .iter()
+            .map(|&i| explorer.entries[i].name.clone())
+            .collect()
+    }
+
+    #[test]
+    fn show_dotfiles_on_lists_hidden_entries() {
+        let dir = setup_with_dotfiles("dotfiles_on");
+        let explorer = Explorer::new_with_filter(
+            dir.clone(),
+            &dir,
+            &HashMap::new(),
+            FileFilter {
+                show_dotfiles: true,
+            },
+        );
+
+        let names = visible_names(&explorer);
+        assert!(names.contains(&".github".to_string()), "names: {:?}", names);
+        assert!(names.contains(&".env".to_string()), "names: {:?}", names);
+        assert!(names.contains(&"bbb.txt".to_string()));
+        assert!(
+            !names.contains(&".git".to_string()),
+            ".git is never listed: {:?}",
+            names
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn show_dotfiles_off_hides_hidden_entries() {
+        let dir = setup_with_dotfiles("dotfiles_off");
+        let explorer = Explorer::new_with_filter(
+            dir.clone(),
+            &dir,
+            &HashMap::new(),
+            FileFilter {
+                show_dotfiles: false,
+            },
+        );
+
+        let names = visible_names(&explorer);
+        assert!(
+            !names.contains(&".github".to_string()),
+            "names: {:?}",
+            names
+        );
+        assert!(!names.contains(&".env".to_string()), "names: {:?}", names);
+        assert!(names.contains(&"bbb.txt".to_string()));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn toggling_dotfiles_rereads_and_keeps_selection() {
+        let dir = setup_with_dotfiles("dotfiles_toggle");
+        let mut explorer = Explorer::new_with_filter(
+            dir.clone(),
+            &dir,
+            &HashMap::new(),
+            FileFilter {
+                show_dotfiles: false,
+            },
+        );
+        explorer.select_by_name("bbb.txt");
+
+        assert!(explorer.toggle_show_dotfiles());
+        assert!(visible_names(&explorer).contains(&".github".to_string()));
+        assert_eq!(explorer.selected_name(), Some("bbb.txt"));
+
+        assert!(!explorer.toggle_show_dotfiles());
+        assert!(!visible_names(&explorer).contains(&".github".to_string()));
+        assert_eq!(explorer.selected_name(), Some("bbb.txt"));
+
+        cleanup(&dir);
+    }
+
+    /// The key is routed through the app so the sidebar, the tree popup and
+    /// the picker index all move together.
+    #[test]
+    fn dot_key_emits_toggle_hidden_files_action() {
+        let dir = setup_with_dotfiles("dotfiles_key");
+        let mut explorer = Explorer::new(dir.clone(), &dir, &HashMap::new());
+
+        let result = explorer.handle_key(key(KeyCode::Char('.')), &KeyState::Normal);
+        assert!(matches!(
+            result,
+            EventResult::Action(Action::App(AppAction::Workspace(
+                WorkspaceAction::ToggleHiddenFiles
+            )))
+        ));
 
         cleanup(&dir);
     }

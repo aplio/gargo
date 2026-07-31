@@ -257,18 +257,35 @@ impl ExplorerPopup {
         let mut files = Vec::new();
 
         if let Ok(read_dir) = std::fs::read_dir(dir) {
-            for entry in read_dir.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !self.filter.accepts_name(&name) {
+            // One ignore query per directory, same as the sidebar.
+            let listing: Vec<(String, PathBuf, String, bool)> = read_dir
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !self.filter.accepts_name(&name) {
+                        return None;
+                    }
+                    let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                    let path = entry.path();
+                    let rel_path = path
+                        .strip_prefix(&self.root)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .to_string();
+                    Some((name, path, rel_path, is_dir))
+                })
+                .collect();
+
+            let candidates: Vec<(String, bool)> = listing
+                .iter()
+                .map(|(_, _, rel_path, is_dir)| (rel_path.clone(), *is_dir))
+                .collect();
+            let ignored = self.filter.ignored_among(&self.root, &candidates);
+
+            for (name, path, rel_path, is_dir) in listing {
+                if ignored.contains(&rel_path) {
                     continue;
                 }
-                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-                let path = entry.path();
-                let rel_path = path
-                    .strip_prefix(&self.root)
-                    .unwrap_or(&path)
-                    .to_string_lossy()
-                    .to_string();
 
                 let git_status = if is_dir {
                     let prefix = if rel_path.ends_with('/') {
@@ -1569,6 +1586,7 @@ mod tests {
             dir.clone(),
             FileFilter {
                 show_dotfiles: true,
+                ..FileFilter::default()
             },
         );
         let names: Vec<&str> = shown.entries.iter().map(|e| e.name.as_str()).collect();
@@ -1579,11 +1597,47 @@ mod tests {
             dir.clone(),
             FileFilter {
                 show_dotfiles: false,
+                ..FileFilter::default()
             },
         );
         let names: Vec<&str> = hidden.entries.iter().map(|e| e.name.as_str()).collect();
         assert!(!names.contains(&".github"), "names: {:?}", names);
         assert!(names.contains(&"bbb.txt"));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn respect_gitignore_hides_ignored_entries() {
+        let dir = setup("gitignore");
+        std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["init", "-q"])
+            .status()
+            .expect("git init");
+        fs::create_dir_all(dir.join("build")).unwrap();
+        fs::write(dir.join(".gitignore"), "build/\n").unwrap();
+
+        let off = ExplorerPopup::new_without_worker_with_filter(
+            dir.clone(),
+            FileFilter {
+                show_dotfiles: true,
+                respect_gitignore: false,
+            },
+        );
+        assert!(off.entries.iter().any(|e| e.name == "build"));
+
+        let on = ExplorerPopup::new_without_worker_with_filter(
+            dir.clone(),
+            FileFilter {
+                show_dotfiles: true,
+                respect_gitignore: true,
+            },
+        );
+        assert!(
+            !on.entries.iter().any(|e| e.name == "build"),
+            "tree popup must apply the same rule as the sidebar"
+        );
 
         cleanup(&dir);
     }
@@ -1596,6 +1650,7 @@ mod tests {
             dir.clone(),
             FileFilter {
                 show_dotfiles: false,
+                ..FileFilter::default()
             },
         );
         assert!(!popup.entries.iter().any(|e| e.name == ".github"));

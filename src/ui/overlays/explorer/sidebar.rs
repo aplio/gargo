@@ -1080,18 +1080,36 @@ impl Explorer {
         let mut files = Vec::new();
 
         if let Ok(read_dir) = std::fs::read_dir(&self.current_dir) {
-            for entry in read_dir.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if !self.filter.accepts_name(&name) {
+            // Collect first, then ask git about the whole listing in one go:
+            // the ignore stack is built per directory, not per entry.
+            let listing: Vec<(String, String, bool)> = read_dir
+                .flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if !self.filter.accepts_name(&name) {
+                        return None;
+                    }
+                    let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                    let full_path = entry.path();
+                    let rel_path = full_path
+                        .strip_prefix(&self.project_root)
+                        .unwrap_or(&full_path)
+                        .to_string_lossy()
+                        .to_string();
+                    Some((name, rel_path, is_dir))
+                })
+                .collect();
+
+            let candidates: Vec<(String, bool)> = listing
+                .iter()
+                .map(|(_, rel_path, is_dir)| (rel_path.clone(), *is_dir))
+                .collect();
+            let ignored = self.filter.ignored_among(&self.project_root, &candidates);
+
+            for (name, rel_path, is_dir) in listing {
+                if ignored.contains(&rel_path) {
                     continue;
                 }
-                let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-                let full_path = entry.path();
-                let rel_path = full_path
-                    .strip_prefix(&self.project_root)
-                    .unwrap_or(&full_path)
-                    .to_string_lossy()
-                    .to_string();
 
                 let git_status = if is_dir {
                     let prefix = if rel_path.ends_with('/') {
@@ -2855,6 +2873,7 @@ mod tests {
             &HashMap::new(),
             FileFilter {
                 show_dotfiles: true,
+                ..FileFilter::default()
             },
         );
 
@@ -2880,6 +2899,7 @@ mod tests {
             &HashMap::new(),
             FileFilter {
                 show_dotfiles: false,
+                ..FileFilter::default()
             },
         );
 
@@ -2904,6 +2924,7 @@ mod tests {
             &HashMap::new(),
             FileFilter {
                 show_dotfiles: false,
+                ..FileFilter::default()
             },
         );
         explorer.select_by_name("bbb.txt");
@@ -2933,6 +2954,74 @@ mod tests {
                 WorkspaceAction::ToggleHiddenFiles
             )))
         ));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn respect_gitignore_hides_ignored_entries() {
+        let dir = setup("gitignore");
+        run_git(&dir, &["init", "-q"]);
+        fs::create_dir_all(dir.join("build")).unwrap();
+        fs::write(dir.join("build").join("out.o"), "obj").unwrap();
+        fs::write(dir.join("ignored.log"), "log").unwrap();
+        fs::write(dir.join(".gitignore"), "build/\n*.log\n").unwrap();
+
+        let listed = |respect_gitignore: bool| -> Vec<String> {
+            let explorer = Explorer::new_with_filter(
+                dir.clone(),
+                &dir,
+                &HashMap::new(),
+                FileFilter {
+                    show_dotfiles: true,
+                    respect_gitignore,
+                },
+            );
+            visible_names(&explorer)
+        };
+
+        let off = listed(false);
+        assert!(off.contains(&"build".to_string()), "{off:?}");
+        assert!(off.contains(&"ignored.log".to_string()), "{off:?}");
+
+        let on = listed(true);
+        assert!(!on.contains(&"build".to_string()), "{on:?}");
+        assert!(!on.contains(&"ignored.log".to_string()), "{on:?}");
+        assert!(on.contains(&"bbb.txt".to_string()), "{on:?}");
+        // Ignored and hidden are separate switches: .gitignore itself is
+        // tracked, and dotfiles are still shown.
+        assert!(on.contains(&".gitignore".to_string()), "{on:?}");
+
+        cleanup(&dir);
+    }
+
+    /// Deleting a rule must un-hide the file on the next read, which is why
+    /// the ignore set is queried per listing instead of cached.
+    #[test]
+    fn deleting_a_rule_unhides_the_file_on_reread() {
+        let dir = setup("gitignore_stale");
+        run_git(&dir, &["init", "-q"]);
+        fs::write(dir.join("ignored.log"), "log").unwrap();
+        fs::write(dir.join(".gitignore"), "*.log\n").unwrap();
+
+        let mut explorer = Explorer::new_with_filter(
+            dir.clone(),
+            &dir,
+            &HashMap::new(),
+            FileFilter {
+                show_dotfiles: true,
+                respect_gitignore: true,
+            },
+        );
+        assert!(!visible_names(&explorer).contains(&"ignored.log".to_string()));
+
+        fs::write(dir.join(".gitignore"), "").unwrap();
+        explorer.read_directory();
+
+        assert!(
+            visible_names(&explorer).contains(&"ignored.log".to_string()),
+            "a deleted rule must stop hiding the file"
+        );
 
         cleanup(&dir);
     }

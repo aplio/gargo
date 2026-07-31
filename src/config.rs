@@ -105,6 +105,11 @@ pub struct UiConfig {
     /// pickers. `.git` itself stays hidden either way. Toggle at runtime with
     /// `.` in the sidebar or the "Toggle Hidden Files" palette command.
     pub show_dotfiles: bool,
+    /// Hide files git ignores from the file tree. Independent of
+    /// `show_dotfiles` — "hidden" and "ignored" are different ideas, and a
+    /// `.gitignore`d `build/` is not a dotfile. Off by default; the file
+    /// pickers already skip ignored files because their list comes from git.
+    pub respect_gitignore: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -297,6 +302,7 @@ impl Default for UiConfig {
             popup_height_percent: 90,
             branch_compare_split_preview: false,
             show_dotfiles: true,
+            respect_gitignore: false,
         }
     }
 }
@@ -760,6 +766,42 @@ show_dotfiles = false
         )
         .unwrap();
         assert!(!cfg.ui.show_dotfiles);
+    }
+
+    #[test]
+    fn test_respect_gitignore_defaults_off_and_parses() {
+        assert!(!Config::default().ui.respect_gitignore);
+
+        let cfg: Config = toml::from_str(
+            r#"
+[ui]
+respect_gitignore = true
+"#,
+        )
+        .unwrap();
+        assert!(cfg.ui.respect_gitignore);
+        // Independent of show_dotfiles, which keeps its default.
+        assert!(cfg.ui.show_dotfiles);
+    }
+
+    #[test]
+    fn test_theme_os_following_defaults() {
+        let cfg = Config::default();
+        assert!(!cfg.theme.follow_os_appearance);
+        assert_eq!(cfg.theme.preset_dark, "gargo_dark");
+        assert_eq!(cfg.theme.preset_light, "gargo_light");
+
+        let cfg: Config = toml::from_str(
+            r#"
+[theme]
+follow_os_appearance = true
+preset_light = "gargo_sepia"
+"#,
+        )
+        .unwrap();
+        assert!(cfg.theme.follow_os_appearance);
+        assert_eq!(cfg.theme.preset_light, "gargo_sepia");
+        assert_eq!(cfg.theme.preset_dark, "gargo_dark");
     }
 
     #[test]

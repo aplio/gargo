@@ -14,12 +14,17 @@ pub struct FileFilter {
     /// `.github/`, `.claude/` or `.env` is a real cost, and only the people who
     /// already know about the setting can fix it.
     pub show_dotfiles: bool,
+    /// Also hide what git ignores. A separate switch from `show_dotfiles`
+    /// because they are separate ideas: `build/` is ignored but not hidden,
+    /// `.github/` is hidden but not ignored.
+    pub respect_gitignore: bool,
 }
 
 impl Default for FileFilter {
     fn default() -> Self {
         Self {
             show_dotfiles: true,
+            respect_gitignore: false,
         }
     }
 }
@@ -28,6 +33,7 @@ impl FileFilter {
     pub fn from_config(config: &Config) -> Self {
         Self {
             show_dotfiles: config.ui.show_dotfiles,
+            respect_gitignore: config.ui.respect_gitignore,
         }
     }
 
@@ -40,6 +46,24 @@ impl FileFilter {
             return false;
         }
         self.show_dotfiles || !name.starts_with('.')
+    }
+
+    /// Which of `candidates` (project-root-relative paths, each flagged as a
+    /// directory) to hide as git-ignored. Empty unless `respect_gitignore` is
+    /// on or `project_root` is not a repository.
+    ///
+    /// Queried per listing, never cached: an ignore rule that has just been
+    /// deleted must stop hiding files right away, and a set built earlier
+    /// would keep hiding them.
+    pub fn ignored_among(
+        &self,
+        project_root: &Path,
+        candidates: &[(String, bool)],
+    ) -> std::collections::HashSet<String> {
+        if !self.respect_gitignore {
+            return std::collections::HashSet::new();
+        }
+        crate::command::git_backend::ignored_paths(project_root, candidates)
     }
 
     /// Same test applied to a `/`-separated path relative to the project root.
@@ -470,11 +494,10 @@ mod tests {
 
     #[test]
     fn file_filter_hides_dotfiles_only_when_asked() {
-        let shown = FileFilter {
-            show_dotfiles: true,
-        };
+        let shown = FileFilter::default();
         let hidden = FileFilter {
             show_dotfiles: false,
+            ..FileFilter::default()
         };
 
         assert!(shown.accepts_name(".github"));
@@ -506,6 +529,7 @@ mod tests {
             &repo,
             FileFilter {
                 show_dotfiles: true,
+                ..FileFilter::default()
             },
         );
         assert!(shown.contains(&".github/ci.yml".to_string()), "{shown:?}");
@@ -514,6 +538,7 @@ mod tests {
             &repo,
             FileFilter {
                 show_dotfiles: false,
+                ..FileFilter::default()
             },
         );
         assert!(
@@ -534,6 +559,7 @@ mod tests {
             tmp.path(),
             FileFilter {
                 show_dotfiles: true,
+                ..FileFilter::default()
             },
         );
         assert!(shown.contains(&".config/x.toml".to_string()), "{shown:?}");
@@ -542,6 +568,7 @@ mod tests {
             tmp.path(),
             FileFilter {
                 show_dotfiles: false,
+                ..FileFilter::default()
             },
         );
         assert!(

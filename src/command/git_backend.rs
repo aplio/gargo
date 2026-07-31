@@ -96,6 +96,49 @@ pub fn status_map(project_root: &Path) -> HashMap<String, GitFileStatus> {
     map
 }
 
+/// Which of `candidates` (worktree-relative paths, each flagged as a directory
+/// or not) git would ignore. Empty when `root` is not a repository.
+///
+/// Answered per listing rather than from a cached set on purpose: an ignore
+/// rule that has just been deleted must stop hiding files immediately, and a
+/// set built earlier would keep hiding them until something invalidated it.
+/// Building the stack costs one index read, which is what the tree already
+/// pays to draw git status.
+pub(crate) fn ignored_paths(root: &Path, candidates: &[(String, bool)]) -> HashSet<String> {
+    let mut ignored = HashSet::new();
+    if candidates.is_empty() {
+        return ignored;
+    }
+    let Some(repo) = shared_repo(root) else {
+        return ignored;
+    };
+    let repo = repo.to_thread_local();
+    let Ok(index) = repo.index_or_load_from_head_or_empty() else {
+        return ignored;
+    };
+    let Ok(mut stack) = repo.excludes(
+        &index,
+        None,
+        gix::worktree::stack::state::ignore::Source::WorktreeThenIdMappingIfNotSkipped,
+    ) else {
+        return ignored;
+    };
+
+    for (rel_path, is_dir) in candidates {
+        let mode = if *is_dir {
+            Some(gix::index::entry::Mode::DIR)
+        } else {
+            Some(gix::index::entry::Mode::FILE)
+        };
+        if let Ok(platform) = stack.at_path(rel_path, mode)
+            && platform.is_excluded()
+        {
+            ignored.insert(rel_path.clone());
+        }
+    }
+    ignored
+}
+
 /// `git ls-files -t --cached --others --exclude-standard --deleted`, reduced to
 /// present tracked files plus ignored-filtered untracked files.
 pub(crate) fn collect_files(root: &Path) -> Option<Vec<String>> {

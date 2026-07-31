@@ -9,6 +9,7 @@ use crossterm::style::Color;
 
 use crate::core::editor::Editor;
 use crate::input::action::{Action, AppAction, ProjectAction, WorkspaceAction};
+use crate::syntax::ui_colors::UiColors;
 
 use super::git_backend;
 use super::registry::{CommandEffect, CommandEntry, CommandRegistry, copy_to_clipboard};
@@ -62,23 +63,25 @@ impl GitLineStatus {
         }
     }
 
-    pub fn gutter_bg(&self) -> Color {
+    /// Background for the change lane when line numbers are off — the muted
+    /// gutter variants, derived from the theme's git colors.
+    pub fn gutter_bg(&self, ui: &UiColors) -> Color {
         match self {
-            GitLineStatus::Added => Color::DarkGreen,
-            GitLineStatus::Modified => Color::DarkYellow,
-            GitLineStatus::Deleted => Color::DarkRed,
+            GitLineStatus::Added => ui.gutter_added(),
+            GitLineStatus::Modified => ui.gutter_modified(),
+            GitLineStatus::Deleted => ui.gutter_deleted(),
         }
     }
 }
 
 impl GitFileStatus {
-    pub fn color(&self) -> Color {
+    pub fn color(&self, ui: &UiColors) -> Color {
         match self {
-            GitFileStatus::Modified => Color::Yellow,
-            GitFileStatus::Added => Color::Green,
-            GitFileStatus::Untracked => Color::DarkGreen,
-            GitFileStatus::Deleted => Color::Red,
-            GitFileStatus::Conflict => Color::Magenta,
+            GitFileStatus::Modified => ui.git_modified,
+            GitFileStatus::Added => ui.git_added,
+            GitFileStatus::Untracked => ui.git_untracked,
+            GitFileStatus::Deleted => ui.git_deleted,
+            GitFileStatus::Conflict => ui.git_conflict,
         }
     }
 

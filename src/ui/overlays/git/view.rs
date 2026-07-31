@@ -1,5 +1,4 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use crossterm::style::Color;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::path::PathBuf;
@@ -9,6 +8,7 @@ use crate::command::git::{self, GitFileEntry};
 use crate::command::git_view_diff_runtime::{DiffCacheKey, GitViewDiffCommand, GitViewDiffEvent};
 use crate::input::action::{Action, AppAction, BufferAction, UiAction, WorkspaceAction};
 use crate::syntax::theme::Theme;
+use crate::syntax::ui_colors::UiColors;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
@@ -1406,11 +1406,12 @@ impl GitView {
             let right_w = popup_w - gap - left_w;
             let right_x = offset_x + left_w + gap;
 
-            let cursor = self.render_file_panel(surface, offset_x, offset_y, left_w, popup_h);
+            let cursor =
+                self.render_file_panel(surface, offset_x, offset_y, left_w, popup_h, theme);
             self.render_diff_panel(surface, right_x, offset_y, right_w, popup_h, theme);
             cursor
         } else {
-            self.render_file_panel(surface, offset_x, offset_y, popup_w, popup_h)
+            self.render_file_panel(surface, offset_x, offset_y, popup_w, popup_h, theme)
         }
     }
 
@@ -1421,6 +1422,7 @@ impl GitView {
         y: usize,
         w: usize,
         h: usize,
+        theme: &Theme,
     ) -> Option<(u16, u16)> {
         let inner_w = w.saturating_sub(2);
         let default_style = CellStyle::default();
@@ -1553,7 +1555,7 @@ impl GitView {
                 };
                 let branch_style = CellStyle {
                     bold: true,
-                    fg: Some(Color::Cyan),
+                    fg: Some(theme.ui.accent),
                     ..CellStyle::default()
                 };
                 let (truncated, used) = truncate_to_width(&branch_label, inner_w);
@@ -1606,19 +1608,11 @@ impl GitView {
                 if display_idx < display_items.len() {
                     match &display_items[display_idx] {
                         DisplayItem::RepoHeader(label, selected) => {
-                            let header_style = if *selected {
-                                CellStyle {
-                                    bold: true,
-                                    reverse: true,
-                                    fg: Some(Color::Cyan),
-                                    ..CellStyle::default()
-                                }
-                            } else {
-                                CellStyle {
-                                    bold: true,
-                                    fg: Some(Color::Cyan),
-                                    ..CellStyle::default()
-                                }
+                            let header_style = CellStyle {
+                                bold: true,
+                                reverse: *selected,
+                                fg: Some(theme.ui.accent),
+                                ..CellStyle::default()
                             };
                             let (truncated, used) = truncate_to_width(label, inner_w);
                             surface.put_str(x + 1, y + row, truncated, &header_style);
@@ -1695,11 +1689,11 @@ impl GitView {
                                 CellStyle::default()
                             };
                             let add_style = CellStyle {
-                                fg: Some(Color::Green),
+                                fg: Some(theme.ui.git_added),
                                 ..base
                             };
                             let del_style = CellStyle {
-                                fg: Some(Color::Red),
+                                fg: Some(theme.ui.git_deleted),
                                 ..base
                             };
                             // Indent under the [X] file label: 5 spaces lines up past " [M] ".
@@ -1780,7 +1774,7 @@ impl GitView {
             DiffDisplayState::Error(message) => Some((
                 message.as_str(),
                 CellStyle {
-                    fg: Some(Color::Red),
+                    fg: Some(theme.ui.error),
                     ..CellStyle::default()
                 },
             )),
@@ -1839,7 +1833,7 @@ impl GitView {
                         surface.put_str(x + 1, y + row, " ", &default_style);
                     }
                     surface.put_str(x + 2, y + row, " ", &default_style);
-                    let style = diff_line_style(line);
+                    let style = diff_line_style(line, &theme.ui);
                     let window = slice_display_window(line, self.diff_horizontal_scroll, text_w);
                     surface.put_str(x + 1 + gutter_w, y + row, window.visible, &style);
                     if window.used_width < text_w {
@@ -1948,20 +1942,20 @@ fn parse_hunk_new_start(line: &str) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
-fn diff_line_style(line: &str) -> CellStyle {
+fn diff_line_style(line: &str, ui: &UiColors) -> CellStyle {
     if line.starts_with('+') {
         CellStyle {
-            fg: Some(Color::Green),
+            fg: Some(ui.git_added),
             ..CellStyle::default()
         }
     } else if line.starts_with('-') {
         CellStyle {
-            fg: Some(Color::Red),
+            fg: Some(ui.git_deleted),
             ..CellStyle::default()
         }
     } else if line.starts_with("@@") {
         CellStyle {
-            fg: Some(Color::Cyan),
+            fg: Some(ui.accent),
             ..CellStyle::default()
         }
     } else {

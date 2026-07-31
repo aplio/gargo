@@ -22,7 +22,7 @@ impl Palette {
             let right_w = popup_w - gap - left_w;
             let right_x = offset_x + left_w + gap;
 
-            self.render_left_panel(surface, left_x, offset_y, left_w, popup_h);
+            self.render_left_panel(surface, left_x, offset_y, left_w, popup_h, theme);
             self.render_right_panel(surface, right_x, offset_y, right_w, popup_h, theme);
 
             if let Some((path, data)) = self.pending_image_data.clone() {
@@ -47,7 +47,7 @@ impl Palette {
             }
         } else {
             left_w = popup_w;
-            self.render_left_panel(surface, left_x, offset_y, left_w, popup_h);
+            self.render_left_panel(surface, left_x, offset_y, left_w, popup_h, theme);
         }
 
         // Cursor position in input field
@@ -64,7 +64,15 @@ impl Palette {
         (cursor_x, cursor_y)
     }
 
-    fn render_left_panel(&mut self, surface: &mut Surface, x: usize, y: usize, w: usize, h: usize) {
+    fn render_left_panel(
+        &mut self,
+        surface: &mut Surface,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        theme: &Theme,
+    ) {
         let inner_w = w.saturating_sub(2);
         let candidate_area_h = h.saturating_sub(4);
         let default_style = CellStyle::default();
@@ -114,7 +122,7 @@ impl Palette {
                         CandidateKind::File(idx) => self
                             .git_status_map
                             .get(&self.file_entries[idx])
-                            .map(|s| s.color()),
+                            .map(|s| s.color(&theme.ui)),
                         _ => None,
                     };
 

@@ -1,9 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use crossterm::style::Color;
 use regex::Regex;
 use ropey::Rope;
 
 use crate::input::action::{Action, AppAction, UiAction, WorkspaceAction};
+use crate::syntax::theme::Theme;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
@@ -250,7 +250,7 @@ impl FindReplacePopup {
         }
     }
 
-    pub fn render_overlay(&self, surface: &mut Surface) -> Option<(u16, u16)> {
+    pub fn render_overlay(&self, surface: &mut Surface, theme: &Theme) -> Option<(u16, u16)> {
         let term_width = surface.width;
         let term_height = surface.height;
 
@@ -377,7 +377,7 @@ impl FindReplacePopup {
         // Status message
         if let Some(ref error) = self.error_message {
             let error_style = CellStyle {
-                fg: Some(Color::Red),
+                fg: Some(theme.ui.error),
                 ..CellStyle::default()
             };
             let (error_display, _) =
@@ -441,7 +441,7 @@ impl FindReplacePopup {
 
                     let line_style = if is_changed {
                         CellStyle {
-                            fg: Some(Color::Green),
+                            fg: Some(theme.ui.git_added),
                             ..CellStyle::default()
                         }
                     } else {

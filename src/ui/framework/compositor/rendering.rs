@@ -50,13 +50,13 @@ impl Compositor {
             (layout, &mut self.explorer)
         {
             let explorer_height = rows.saturating_sub(2); // stop before status bar
-            explorer.render(&mut self.current, 0, ew, explorer_height);
+            explorer.render(&mut self.current, 0, ew, explorer_height, ctx.theme);
 
             // Draw border column in split mode
             if cols >= 80 {
                 let border_col = ew;
                 let border_style = CellStyle {
-                    dim: true,
+                    fg: Some(ctx.theme.ui.border()),
                     ..CellStyle::default()
                 };
                 for r in 0..explorer_height {
@@ -106,14 +106,16 @@ impl Compositor {
         if let Some(ref bar) = self.search_bar {
             let status_row = rows.saturating_sub(1);
             let prompt = format!("/{}", bar.input.text);
-            let reverse_style = CellStyle {
-                reverse: true,
+            // Same surface as the status bar it replaces, so the row does not
+            // change color when a search starts.
+            let prompt_style = CellStyle {
+                fg: Some(ctx.theme.ui.status_fg),
+                bg: Some(ctx.theme.ui.status_bg),
                 ..CellStyle::default()
             };
-            // Clear the status row and draw search prompt
             self.current
-                .fill_region(0, status_row, cols, ' ', &reverse_style);
-            self.current.put_str(0, status_row, &prompt, &reverse_style);
+                .fill_region(0, status_row, cols, ' ', &prompt_style);
+            self.current.put_str(0, status_row, &prompt, &prompt_style);
 
             // Draw diff between previous and current
             draw_diff(&self.previous, &self.current, stdout)?;
@@ -151,7 +153,7 @@ impl Compositor {
         }
 
         if let Some(ref mut commit_log) = self.commit_log {
-            let cursor = commit_log.render_overlay(&mut self.current);
+            let cursor = commit_log.render_overlay(&mut self.current, ctx.theme);
 
             draw_diff(&self.previous, &self.current, stdout)?;
 
@@ -169,7 +171,7 @@ impl Compositor {
         }
 
         if let Some(ref mut pr_list_picker) = self.pr_list_picker {
-            let cursor = pr_list_picker.render_overlay(&mut self.current);
+            let cursor = pr_list_picker.render_overlay(&mut self.current, ctx.theme);
 
             draw_diff(&self.previous, &self.current, stdout)?;
 
@@ -187,7 +189,7 @@ impl Compositor {
         }
 
         if let Some(ref mut issue_list_picker) = self.issue_list_picker {
-            let cursor = issue_list_picker.render_overlay(&mut self.current);
+            let cursor = issue_list_picker.render_overlay(&mut self.current, ctx.theme);
 
             draw_diff(&self.previous, &self.current, stdout)?;
 
@@ -205,7 +207,7 @@ impl Compositor {
         }
 
         if let Some(ref mut find_replace_popup) = self.find_replace_popup {
-            let cursor = find_replace_popup.render_overlay(&mut self.current);
+            let cursor = find_replace_popup.render_overlay(&mut self.current, ctx.theme);
 
             draw_diff(&self.previous, &self.current, stdout)?;
 
@@ -223,7 +225,7 @@ impl Compositor {
         }
 
         if let Some(ref project_root_popup) = self.project_root_popup {
-            let cursor = project_root_popup.render_overlay(&mut self.current);
+            let cursor = project_root_popup.render_overlay(&mut self.current, ctx.theme);
 
             draw_diff(&self.previous, &self.current, stdout)?;
 
@@ -258,7 +260,7 @@ impl Compositor {
         }
 
         if let Some(ref save_as_popup) = self.save_as_popup {
-            let cursor = save_as_popup.render_overlay(&mut self.current);
+            let cursor = save_as_popup.render_overlay(&mut self.current, ctx.theme);
 
             draw_diff(&self.previous, &self.current, stdout)?;
 

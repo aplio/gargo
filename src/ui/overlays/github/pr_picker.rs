@@ -1,8 +1,9 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use crossterm::style::Color;
 use serde::Deserialize;
 
 use crate::input::action::{Action, AppAction, IntegrationAction, UiAction};
+use crate::syntax::theme::Theme;
+use crate::syntax::ui_colors::UiColors;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
@@ -170,7 +171,8 @@ impl PrListPicker {
     }
 
     fn scroll_preview_down_lines(&mut self, lines: usize, content_h: usize) {
-        let preview_len = self.preview_lines().len();
+        // Only the line count matters here; the colors are never drawn.
+        let preview_len = self.preview_lines(&UiColors::default()).len();
         let max_scroll = self.preview_max_scroll(preview_len, content_h);
         self.preview_scroll = self.preview_scroll.saturating_add(lines).min(max_scroll);
     }
@@ -260,7 +262,7 @@ impl PrListPicker {
         }
     }
 
-    fn preview_lines(&self) -> Vec<(String, CellStyle)> {
+    fn preview_lines(&self, ui: &UiColors) -> Vec<(String, CellStyle)> {
         let Some(entry) = self.selected_entry() else {
             return vec![(
                 "No PR selected".to_string(),
@@ -275,17 +277,17 @@ impl PrListPicker {
 
         let state_style = match entry.state.as_str() {
             "OPEN" => CellStyle {
-                fg: Some(Color::Green),
+                fg: Some(ui.git_added),
                 bold: true,
                 ..CellStyle::default()
             },
             "CLOSED" => CellStyle {
-                fg: Some(Color::Red),
+                fg: Some(ui.git_deleted),
                 bold: true,
                 ..CellStyle::default()
             },
             "MERGED" => CellStyle {
-                fg: Some(Color::Magenta),
+                fg: Some(ui.git_conflict),
                 bold: true,
                 ..CellStyle::default()
             },
@@ -302,7 +304,7 @@ impl PrListPicker {
         lines.push((
             format!("Branch: {}", entry.head_ref),
             CellStyle {
-                fg: Some(Color::Cyan),
+                fg: Some(ui.accent),
                 ..CellStyle::default()
             },
         ));
@@ -311,7 +313,7 @@ impl PrListPicker {
             lines.push((
                 format!("Labels: {}", entry.labels.join(", ")),
                 CellStyle {
-                    fg: Some(Color::Yellow),
+                    fg: Some(ui.warning),
                     ..CellStyle::default()
                 },
             ));
@@ -538,7 +540,7 @@ impl PrListPicker {
         }
     }
 
-    pub fn render_overlay(&mut self, surface: &mut Surface) -> Option<(u16, u16)> {
+    pub fn render_overlay(&mut self, surface: &mut Surface, theme: &Theme) -> Option<(u16, u16)> {
         let cols = surface.width;
         let rows = surface.height;
         let (popup_w, popup_h) = Self::popup_size(cols, rows);
@@ -551,11 +553,11 @@ impl PrListPicker {
             let right_w = popup_w - gap - left_w;
             let right_x = offset_x + left_w + gap;
 
-            let cursor = self.render_pr_panel(surface, offset_x, offset_y, left_w, popup_h);
-            self.render_preview_panel(surface, right_x, offset_y, right_w, popup_h);
+            let cursor = self.render_pr_panel(surface, offset_x, offset_y, left_w, popup_h, theme);
+            self.render_preview_panel(surface, right_x, offset_y, right_w, popup_h, theme);
             cursor
         } else {
-            self.render_pr_panel(surface, offset_x, offset_y, popup_w, popup_h)
+            self.render_pr_panel(surface, offset_x, offset_y, popup_w, popup_h, theme)
         }
     }
 
@@ -566,6 +568,7 @@ impl PrListPicker {
         y: usize,
         w: usize,
         h: usize,
+        theme: &Theme,
     ) -> Option<(u16, u16)> {
         let inner_w = w.saturating_sub(2);
         let default_style = CellStyle::default();
@@ -604,7 +607,7 @@ impl PrListPicker {
                 let title = format!(" Pull Requests ({})", self.filtered.len());
                 let title_style = CellStyle {
                     bold: true,
-                    fg: Some(Color::Cyan),
+                    fg: Some(theme.ui.accent),
                     ..CellStyle::default()
                 };
                 let (truncated, used) = truncate_to_width(&title, inner_w);
@@ -710,11 +713,12 @@ impl PrListPicker {
         y: usize,
         w: usize,
         h: usize,
+        theme: &Theme,
     ) {
         let inner_w = w.saturating_sub(2);
         let content_h = h.saturating_sub(2);
         let default_style = CellStyle::default();
-        let preview = self.preview_lines();
+        let preview = self.preview_lines(&theme.ui);
         self.clamp_preview_scroll(preview.len(), content_h);
         self.clamp_preview_horizontal_scroll(&preview, inner_w);
 
@@ -1082,7 +1086,7 @@ mod tests {
         let cols = 100;
         let rows = 20;
         let content_h = PrListPicker::preview_content_height_for_surface(cols, rows).unwrap();
-        let preview_len = picker.preview_lines().len();
+        let preview_len = picker.preview_lines(&UiColors::default()).len();
         let max_scroll = picker.preview_max_scroll(preview_len, content_h);
 
         for _ in 0..200 {

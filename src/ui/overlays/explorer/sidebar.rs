@@ -16,6 +16,7 @@ use crate::split_render::{SplitCell, SplitKind, SplitRow};
 use crate::syntax::highlight::{HighlightSpan, highlight_text};
 use crate::syntax::language::LanguageRegistry;
 use crate::syntax::theme::Theme;
+use crate::syntax::ui_colors::UiColors;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
@@ -1936,7 +1937,14 @@ impl Explorer {
         Some(&self.entries[idx].name)
     }
 
-    pub fn render(&mut self, surface: &mut Surface, x: usize, width: usize, height: usize) {
+    pub fn render(
+        &mut self,
+        surface: &mut Surface,
+        x: usize,
+        width: usize,
+        height: usize,
+        theme: &Theme,
+    ) {
         if width == 0 || height == 0 {
             return;
         }
@@ -2054,29 +2062,16 @@ impl Explorer {
                         && self.branch_compare_viewed.contains(&entry.name);
 
                     let mut style = if entry.is_repo_header {
-                        if is_selected {
-                            CellStyle {
-                                bold: true,
-                                reverse: true,
-                                fg: Some(crossterm::style::Color::Cyan),
-                                ..CellStyle::default()
-                            }
-                        } else {
-                            CellStyle {
-                                bold: true,
-                                fg: Some(crossterm::style::Color::Cyan),
-                                ..CellStyle::default()
-                            }
-                        }
-                    } else if is_selected {
                         CellStyle {
-                            reverse: true,
-                            fg: entry.git_status.map(|s| s.color()),
+                            bold: true,
+                            reverse: is_selected,
+                            fg: Some(theme.ui.accent),
                             ..CellStyle::default()
                         }
                     } else {
                         CellStyle {
-                            fg: entry.git_status.map(|s| s.color()),
+                            reverse: is_selected,
+                            fg: entry.git_status.map(|s| s.color(&theme.ui)),
                             ..CellStyle::default()
                         }
                     };
@@ -2107,11 +2102,11 @@ impl Explorer {
                         CellStyle::default()
                     };
                     let add_style = CellStyle {
-                        fg: Some(crossterm::style::Color::Green),
+                        fg: Some(theme.ui.git_added),
                         ..base
                     };
                     let del_style = CellStyle {
-                        fg: Some(crossterm::style::Color::Red),
+                        fg: Some(theme.ui.git_deleted),
                         ..base
                     };
                     surface.fill_region(x, screen_row, width, ' ', &base);
@@ -2417,9 +2412,9 @@ fn split_cell_style(kind: SplitKind, is_left: bool, theme: &Theme) -> CellStyle 
         }
     };
     let fallback = if capture == "diff.plus" {
-        Color::Green
+        theme.ui.git_added
     } else {
-        Color::Red
+        theme.ui.git_deleted
     };
     let fg = theme
         .style_for_capture(capture)
@@ -2434,10 +2429,10 @@ fn split_cell_style(kind: SplitKind, is_left: bool, theme: &Theme) -> CellStyle 
 /// Background tint marking the diff kind of a syntax-highlighted split cell:
 /// removed/changed content on the left (base) side, added/changed on the
 /// right (worktree) side.
-fn split_cell_bg(kind: SplitKind, is_left: bool) -> Option<Color> {
+fn split_cell_bg(kind: SplitKind, is_left: bool, ui: &UiColors) -> Option<Color> {
     match (kind, is_left) {
-        (SplitKind::Remove, true) | (SplitKind::Change, true) => Some(Color::DarkRed),
-        (SplitKind::Add, false) | (SplitKind::Change, false) => Some(Color::DarkGreen),
+        (SplitKind::Remove, true) | (SplitKind::Change, true) => Some(ui.diff_del_bg),
+        (SplitKind::Add, false) | (SplitKind::Change, false) => Some(ui.diff_add_bg),
         _ => None,
     }
 }
@@ -2489,7 +2484,7 @@ fn put_split_cell(
         if pad > 0 {
             surface.fill_region(x + window.used_width, y, pad, ' ', &default_style);
         }
-        if let Some(bg) = split_cell_bg(cell.kind, is_left) {
+        if let Some(bg) = split_cell_bg(cell.kind, is_left, &theme.ui) {
             for cx in x..x + width {
                 surface.get_mut(cx, y).style.bg = Some(bg);
             }
@@ -2825,8 +2820,8 @@ mod tests {
 
         // The diff kind moves to a background tint: base side of the change
         // row is red, worktree side green; context rows carry no tint.
-        assert_eq!(surface.get(0, 2).style.bg, Some(Color::DarkRed));
-        assert_eq!(surface.get(41, 2).style.bg, Some(Color::DarkGreen));
+        assert_eq!(surface.get(0, 2).style.bg, Some(theme.ui.diff_del_bg));
+        assert_eq!(surface.get(41, 2).style.bg, Some(theme.ui.diff_add_bg));
         assert_eq!(surface.get(0, 1).style.bg, None);
         assert_eq!(surface.get(41, 1).style.bg, None);
 
@@ -3082,7 +3077,7 @@ mod tests {
         let mut explorer = Explorer::new_changed_only(dir.clone(), &dir, &git_status_map);
         let mut surface = Surface::new(40, 6);
 
-        explorer.render(&mut surface, 0, 40, 6);
+        explorer.render(&mut surface, 0, 40, 6, &Theme::dark());
 
         let row: String = (0..40)
             .map(|x| {
@@ -3500,13 +3495,13 @@ mod tests {
         explorer.set_branch_compare_loading(true);
 
         let mut surface = Surface::new(40, 6);
-        explorer.render(&mut surface, 0, 40, 6);
+        explorer.render(&mut surface, 0, 40, 6, &Theme::dark());
         let row: String = (0..40).map(|x| surface.get(x, 1).symbol.as_str()).collect();
         assert!(row.contains("loading files"), "got row: {row:?}");
 
         explorer.apply_branch_diff_files(Vec::new());
         let mut surface = Surface::new(40, 6);
-        explorer.render(&mut surface, 0, 40, 6);
+        explorer.render(&mut surface, 0, 40, 6, &Theme::dark());
         let row: String = (0..40).map(|x| surface.get(x, 1).symbol.as_str()).collect();
         assert!(row.contains("(no differences)"), "got row: {row:?}");
 

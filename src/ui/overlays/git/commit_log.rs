@@ -1,5 +1,4 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEventKind};
-use crossterm::style::Color;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -8,6 +7,8 @@ use crate::command::commit_log_runtime::{
 };
 use crate::command::git;
 use crate::input::action::{Action, AppAction, IntegrationAction, UiAction, WorkspaceAction};
+use crate::syntax::theme::Theme;
+use crate::syntax::ui_colors::UiColors;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
@@ -498,7 +499,7 @@ impl CommitLogView {
 
     // Rendering
 
-    pub fn render_overlay(&mut self, surface: &mut Surface) -> Option<(u16, u16)> {
+    pub fn render_overlay(&mut self, surface: &mut Surface, theme: &Theme) -> Option<(u16, u16)> {
         let cols = surface.width;
         let rows = surface.height;
         let (popup_w, popup_h) = Self::popup_size(cols, rows);
@@ -506,7 +507,7 @@ impl CommitLogView {
         let offset_y = (rows.saturating_sub(popup_h)) / 2;
 
         if self.view_mode == ViewMode::Detail {
-            return self.render_detail_view(surface, offset_x, offset_y, popup_w, popup_h);
+            return self.render_detail_view(surface, offset_x, offset_y, popup_w, popup_h, theme);
         }
 
         if popup_w >= DIFF_SPLIT_THRESHOLD {
@@ -515,11 +516,12 @@ impl CommitLogView {
             let right_w = popup_w - gap - left_w;
             let right_x = offset_x + left_w + gap;
 
-            let cursor = self.render_commit_panel(surface, offset_x, offset_y, left_w, popup_h);
-            self.render_diff_panel(surface, right_x, offset_y, right_w, popup_h);
+            let cursor =
+                self.render_commit_panel(surface, offset_x, offset_y, left_w, popup_h, theme);
+            self.render_diff_panel(surface, right_x, offset_y, right_w, popup_h, theme);
             cursor
         } else {
-            self.render_commit_panel(surface, offset_x, offset_y, popup_w, popup_h)
+            self.render_commit_panel(surface, offset_x, offset_y, popup_w, popup_h, theme)
         }
     }
 
@@ -530,6 +532,7 @@ impl CommitLogView {
         y: usize,
         w: usize,
         h: usize,
+        theme: &Theme,
     ) -> Option<(u16, u16)> {
         let inner_w = w.saturating_sub(2);
         let default_style = CellStyle::default();
@@ -599,7 +602,7 @@ impl CommitLogView {
                 );
                 let title_style = CellStyle {
                     bold: true,
-                    fg: Some(Color::Cyan),
+                    fg: Some(theme.ui.accent),
                     ..CellStyle::default()
                 };
                 let (truncated, used) = truncate_to_width(&title, inner_w);
@@ -666,17 +669,10 @@ impl CommitLogView {
                         CellStyle::default()
                     };
 
-                    let hash_style = if is_selected {
-                        CellStyle {
-                            reverse: true,
-                            fg: Some(Color::Yellow),
-                            ..CellStyle::default()
-                        }
-                    } else {
-                        CellStyle {
-                            fg: Some(Color::Yellow),
-                            ..CellStyle::default()
-                        }
+                    let hash_style = CellStyle {
+                        reverse: is_selected,
+                        fg: Some(theme.ui.git_modified),
+                        ..CellStyle::default()
                     };
 
                     let date_style = if is_selected {
@@ -737,7 +733,15 @@ impl CommitLogView {
         }
     }
 
-    fn render_diff_panel(&mut self, surface: &mut Surface, x: usize, y: usize, w: usize, h: usize) {
+    fn render_diff_panel(
+        &mut self,
+        surface: &mut Surface,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        theme: &Theme,
+    ) {
         let inner_w = w.saturating_sub(2);
         let content_h = h.saturating_sub(2);
         let default_style = CellStyle::default();
@@ -809,7 +813,7 @@ impl CommitLogView {
                 let line_idx = self.diff_scroll + (row - 1);
                 if line_idx < self.diff_lines.len() && (row - 1) < content_h {
                     let line = &self.diff_lines[line_idx];
-                    let style = diff_line_style(line);
+                    let style = diff_line_style(line, &theme.ui);
                     let window = slice_display_window(line, self.diff_horizontal_scroll, inner_w);
                     surface.put_str(x + 1, y + row, window.visible, &style);
                     if window.used_width < inner_w {
@@ -837,13 +841,14 @@ impl CommitLogView {
         y: usize,
         w: usize,
         h: usize,
+        theme: &Theme,
     ) -> Option<(u16, u16)> {
         let inner_w = w.saturating_sub(2);
         let content_h = h.saturating_sub(2);
         let default_style = CellStyle::default();
 
         // Build detail lines
-        let detail_lines = self.build_detail_lines();
+        let detail_lines = self.build_detail_lines(theme);
 
         // Clamp scroll
         let max_scroll = detail_lines.len().saturating_sub(content_h);
@@ -892,7 +897,7 @@ impl CommitLogView {
         None
     }
 
-    fn build_detail_lines(&self) -> Vec<(String, CellStyle)> {
+    fn build_detail_lines(&self, theme: &Theme) -> Vec<(String, CellStyle)> {
         let mut lines: Vec<(String, CellStyle)> = Vec::new();
         let bold = CellStyle {
             bold: true,
@@ -904,7 +909,7 @@ impl CommitLogView {
         };
         let default = CellStyle::default();
         let cyan = CellStyle {
-            fg: Some(Color::Cyan),
+            fg: Some(theme.ui.accent),
             bold: true,
             ..CellStyle::default()
         };
@@ -936,11 +941,11 @@ impl CommitLogView {
                 lines.push((format!("Files changed ({}):", detail.files.len()), bold));
                 for file in &detail.files {
                     let status_color = match file.status {
-                        'A' => Color::Green,
-                        'D' => Color::Red,
-                        'M' => Color::Yellow,
-                        'R' => Color::Cyan,
-                        _ => Color::White,
+                        'A' => theme.ui.git_added,
+                        'D' => theme.ui.git_deleted,
+                        'M' => theme.ui.git_modified,
+                        'R' => theme.ui.accent,
+                        _ => theme.ui.text,
                     };
                     lines.push((
                         format!("  {} {}", file.status, file.path),
@@ -955,7 +960,7 @@ impl CommitLogView {
 
             // Diff
             for diff_line in &detail.diff_lines {
-                lines.push((diff_line.clone(), diff_line_style(diff_line)));
+                lines.push((diff_line.clone(), diff_line_style(diff_line, &theme.ui)));
             }
         } else {
             lines.push((String::new(), default));
@@ -966,20 +971,20 @@ impl CommitLogView {
     }
 }
 
-fn diff_line_style(line: &str) -> CellStyle {
+fn diff_line_style(line: &str, ui: &UiColors) -> CellStyle {
     if line.starts_with('+') {
         CellStyle {
-            fg: Some(Color::Green),
+            fg: Some(ui.git_added),
             ..CellStyle::default()
         }
     } else if line.starts_with('-') {
         CellStyle {
-            fg: Some(Color::Red),
+            fg: Some(ui.git_deleted),
             ..CellStyle::default()
         }
     } else if line.starts_with("@@") {
         CellStyle {
-            fg: Some(Color::Cyan),
+            fg: Some(ui.accent),
             ..CellStyle::default()
         }
     } else if line.starts_with("diff ") || line.starts_with("index ") {
@@ -1176,7 +1181,7 @@ mod tests {
     fn render_overlay_does_not_panic() {
         let mut view = test_view();
         let mut surface = Surface::new(120, 40);
-        view.render_overlay(&mut surface);
+        view.render_overlay(&mut surface, &Theme::dark());
     }
 
     #[test]
@@ -1196,7 +1201,7 @@ mod tests {
             diff_lines: vec!["+added".to_string(), "-removed".to_string()],
         });
         let mut surface = Surface::new(120, 40);
-        view.render_overlay(&mut surface);
+        view.render_overlay(&mut surface, &Theme::dark());
     }
 
     #[test]

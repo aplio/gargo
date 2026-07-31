@@ -1196,11 +1196,11 @@ impl ExplorerPopup {
             let right_w = popup_w - gap - left_w;
             let right_x = offset_x + left_w + gap;
 
-            self.render_tree_panel(surface, offset_x, offset_y, left_w, popup_h);
+            self.render_tree_panel(surface, offset_x, offset_y, left_w, popup_h, theme);
             self.render_preview_panel(surface, right_x, offset_y, right_w, popup_h, theme);
         } else {
             left_w = popup_w;
-            self.render_tree_panel(surface, offset_x, offset_y, left_w, popup_h);
+            self.render_tree_panel(surface, offset_x, offset_y, left_w, popup_h, theme);
         }
 
         // Return cursor position for input prompts
@@ -1223,7 +1223,15 @@ impl ExplorerPopup {
         }
     }
 
-    fn render_tree_panel(&mut self, surface: &mut Surface, x: usize, y: usize, w: usize, h: usize) {
+    fn render_tree_panel(
+        &mut self,
+        surface: &mut Surface,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        theme: &Theme,
+    ) {
         let inner_w = w.saturating_sub(2);
         let default_style = CellStyle::default();
 
@@ -1296,7 +1304,7 @@ impl ExplorerPopup {
 
                     let display = tree_entry_display(entry, inner_w);
 
-                    let status_fg = entry.git_status.map(|s| s.color());
+                    let status_fg = entry.git_status.map(|s| s.color(&theme.ui));
                     let style = if is_selected {
                         CellStyle {
                             reverse: true,
@@ -2201,7 +2209,7 @@ mod tests {
         popup.scroll_offset = 0;
 
         let mut surface = Surface::new(16, 6);
-        popup.render_tree_panel(&mut surface, 0, 0, 16, 6);
+        popup.render_tree_panel(&mut surface, 0, 0, 16, 6, &Theme::dark());
 
         // Inside border: x=1..14, first content row at y=1.
         let line = row_text(&surface, 1, 1, 14);
@@ -2223,7 +2231,7 @@ mod tests {
         popup.scroll_offset = 0;
 
         let mut surface = Surface::new(32, 6);
-        popup.render_tree_panel(&mut surface, 0, 0, 32, 6);
+        popup.render_tree_panel(&mut surface, 0, 0, 32, 6, &Theme::dark());
 
         let line = row_text(&surface, 1, 1, 30);
         assert!(line.starts_with("  alpha.txt"), "unexpected line: {line}");
@@ -2237,7 +2245,7 @@ mod tests {
         popup.scroll_offset = 0;
 
         let mut surface = Surface::new(5, 6);
-        popup.render_tree_panel(&mut surface, 0, 0, 5, 6);
+        popup.render_tree_panel(&mut surface, 0, 0, 5, 6, &Theme::dark());
 
         // Inner width is 3, so row should prefer basename over indent.
         let line = row_text(&surface, 1, 1, 3);

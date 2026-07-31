@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::input::action::{Action, AppAction, ProjectAction, UiAction};
+use crate::syntax::theme::Theme;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::EventResult;
 use crate::ui::framework::surface::Surface;
@@ -311,7 +312,7 @@ impl ProjectRootPopup {
         }
     }
 
-    pub fn render_overlay(&self, surface: &mut Surface) -> Option<(u16, u16)> {
+    pub fn render_overlay(&self, surface: &mut Surface, theme: &Theme) -> Option<(u16, u16)> {
         let cols = surface.width;
         let rows = surface.height;
         let popup_w = (cols * 85 / 100)
@@ -334,7 +335,7 @@ impl ProjectRootPopup {
             ..CellStyle::default()
         };
         let error = CellStyle {
-            fg: Some(crossterm::style::Color::Red),
+            fg: Some(theme.ui.error),
             ..CellStyle::default()
         };
 

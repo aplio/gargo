@@ -1,5 +1,4 @@
 use crossterm::cursor::SetCursorStyle;
-use crossterm::style::Color;
 use std::path::Path;
 
 use crate::command::in_editor_diff::IN_EDITOR_DIFF_TITLE;
@@ -7,6 +6,7 @@ use crate::core::document::{Document, SelectionCursorDisplay};
 use crate::core::lsp_types::LspSeverity;
 use crate::core::mode::Mode;
 use crate::syntax::highlight::HighlightSpan;
+use crate::syntax::ui_colors::UiColors;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::{Component, RenderContext};
 use crate::ui::framework::surface::Surface;
@@ -270,7 +270,7 @@ impl TextView {
                     let line_number_width = gutter_w.saturating_sub(1);
                     let mut number_style = dim_style;
                     if let Some(severity) = diagnostic_severity {
-                        apply_diagnostic_style(&mut number_style, severity);
+                        apply_diagnostic_style(&mut number_style, severity, &ctx.theme.ui);
                     }
                     // Continuation rows of a wrapped line keep the gutter blank;
                     // only the first row carries the number.
@@ -292,7 +292,7 @@ impl TextView {
                 } else if let Some(status) = buf.git_gutter.get(&line_idx) {
                     surface.put_str(area_x, screen_y, " ", &default_style);
                     let cell = surface.get_mut(area_x, screen_y);
-                    cell.style.bg = Some(status.gutter_bg());
+                    cell.style.bg = Some(status.gutter_bg(&ctx.theme.ui));
                 } else {
                     surface.put_str(area_x, screen_y, " ", &default_style);
                 }
@@ -448,9 +448,12 @@ impl TextView {
 
                         let is_current = primary_cursor == Some(match_offset);
                         let (bg, fg) = if is_current {
-                            (Some(Color::Yellow), Some(Color::Black))
+                            (
+                                Some(ctx.theme.ui.search_current_bg),
+                                Some(ctx.theme.ui.search_current_fg),
+                            )
                         } else {
-                            (Some(Color::DarkYellow), None)
+                            (Some(ctx.theme.ui.search_other_bg), None)
                         };
 
                         // A match can span several rows once the line wraps, so
@@ -577,8 +580,8 @@ impl TextView {
 
                 // Render secondary cursor with distinct style
                 let cell = surface.get_mut(area_x + gutter_w + screen_col, area_y + row_in_pane);
-                cell.style.bg = Some(Color::DarkGrey);
-                cell.style.fg = Some(Color::White);
+                cell.style.bg = Some(ctx.theme.ui.selected_bg);
+                cell.style.fg = Some(ctx.theme.ui.selected_fg);
             }
         }
     }
@@ -868,9 +871,9 @@ pub(crate) fn git_gutter_style(
         .style_for_capture(capture_name)
         .and_then(|style| style.fg)
         .or(match status {
-            crate::command::git::GitLineStatus::Added => Some(Color::Green),
-            crate::command::git::GitLineStatus::Modified => Some(Color::Yellow),
-            crate::command::git::GitLineStatus::Deleted => Some(Color::Red),
+            crate::command::git::GitLineStatus::Added => Some(theme.ui.git_added),
+            crate::command::git::GitLineStatus::Modified => Some(theme.ui.git_modified),
+            crate::command::git::GitLineStatus::Deleted => Some(theme.ui.git_deleted),
         });
 
     CellStyle {
@@ -879,13 +882,15 @@ pub(crate) fn git_gutter_style(
     }
 }
 
-fn apply_diagnostic_style(style: &mut CellStyle, severity: LspSeverity) {
+fn apply_diagnostic_style(style: &mut CellStyle, severity: LspSeverity, ui: &UiColors) {
     style.bold = true;
     style.fg = Some(match severity {
-        LspSeverity::Error => Color::Red,
-        LspSeverity::Warning => Color::Yellow,
-        LspSeverity::Info => Color::Blue,
-        LspSeverity::Hint => Color::DarkGrey,
+        LspSeverity::Error => ui.error,
+        LspSeverity::Warning => ui.warning,
+        LspSeverity::Info => ui.info,
+        // A hint is advisory: it should be visible without competing with the
+        // code it annotates.
+        LspSeverity::Hint => ui.faint,
     });
 }
 
@@ -896,6 +901,7 @@ mod tests {
     use crate::core::editor::Editor;
     use crate::input::chord::KeyState;
     use crate::syntax::theme::Theme;
+    use crossterm::style::Color;
     use std::path::Path;
 
     fn row_text(surface: &Surface, row: usize) -> String {
@@ -1382,8 +1388,9 @@ diff --git a/a.txt b/a.txt\n\
         let surface = render_editor_surface(&editor, &config, 12, 6);
 
         // "a" is the last column of row 0, "b" the first of row 1.
-        assert_eq!(surface.get(11, 0).style.bg, Some(Color::DarkYellow));
-        assert_eq!(surface.get(1, 1).style.bg, Some(Color::DarkYellow));
+        let ui = Theme::dark().ui;
+        assert_eq!(surface.get(11, 0).style.bg, Some(ui.search_other_bg));
+        assert_eq!(surface.get(1, 1).style.bg, Some(ui.search_other_bg));
     }
 
     #[test]
@@ -1457,8 +1464,8 @@ diff --git a/a.txt b/a.txt\n\
 
         TextView::new().render(&ctx, &mut surface);
 
-        assert_eq!(surface.get(2, 0).style.bg, Some(Color::Yellow));
-        assert_eq!(surface.get(3, 0).style.bg, Some(Color::Yellow));
+        assert_eq!(surface.get(2, 0).style.bg, Some(theme.ui.search_current_bg));
+        assert_eq!(surface.get(3, 0).style.bg, Some(theme.ui.search_current_bg));
     }
 
     #[test]
@@ -1517,7 +1524,10 @@ diff --git a/a.txt b/a.txt\n\
         let surface = render_editor_surface(&editor, &config, 10, 4);
 
         assert_eq!(surface.get(0, 0).symbol, " ");
-        assert_eq!(surface.get(0, 0).style.bg, Some(Color::DarkGreen));
+        assert_eq!(
+            surface.get(0, 0).style.bg,
+            Some(Theme::dark().ui.gutter_added())
+        );
         assert_eq!(find_char_in_row(&surface, 0, 'a'), 1);
     }
 

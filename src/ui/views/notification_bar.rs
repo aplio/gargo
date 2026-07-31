@@ -1,5 +1,3 @@
-use crossterm::style::Color;
-
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::{Component, RenderContext};
 use crate::ui::framework::surface::Surface;
@@ -28,7 +26,7 @@ impl Component for NotificationBar {
         if let Some(msg) = &ctx.editor.message {
             let style = if ctx.close_confirm_active {
                 CellStyle {
-                    fg: Some(Color::Red),
+                    fg: Some(ctx.theme.ui.error),
                     ..CellStyle::default()
                 }
             } else {
@@ -55,6 +53,7 @@ mod tests {
     use crate::input::chord::KeyState;
     use crate::syntax::theme::Theme;
     use crate::ui::framework::component::RenderContext;
+    use crossterm::style::Color;
 
     fn render_first_cell_color(close_confirm_active: bool) -> Option<Color> {
         let mut editor = Editor::new();
@@ -82,7 +81,7 @@ mod tests {
 
     #[test]
     fn close_confirm_message_is_red() {
-        assert_eq!(render_first_cell_color(true), Some(Color::Red));
+        assert_eq!(render_first_cell_color(true), Some(Theme::dark().ui.error));
     }
 
     #[test]

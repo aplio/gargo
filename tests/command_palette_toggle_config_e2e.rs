@@ -53,7 +53,7 @@ fn command_palette_toggle_wrap_flips_runtime_flag() {
     let mut config = Config::default();
     config.plugins.enabled.clear();
     let mut app = App::new(Editor::new(), config, Some(Path::new(".")));
-    assert!(!app.config().wrap);
+    assert!(app.config().wrap); // on by default
 
     let first = action_for_builtin_command("config.toggle_wrap");
     assert_eq!(
@@ -61,11 +61,11 @@ fn command_palette_toggle_wrap_flips_runtime_flag() {
         Action::App(AppAction::Lifecycle(LifecycleAction::ToggleWrap))
     );
     assert!(!app.dispatch_action(first));
-    assert!(app.config().wrap);
+    assert!(!app.config().wrap);
 
     let second = action_for_builtin_command("config.toggle_wrap");
     assert!(!app.dispatch_action(second));
-    assert!(!app.config().wrap);
+    assert!(app.config().wrap);
 }
 
 #[test]

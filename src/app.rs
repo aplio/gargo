@@ -6276,13 +6276,7 @@ enabled = ["diff_ui"]
     #[test]
     fn toggle_wrap_updates_runtime_config_and_message() {
         let mut app = test_app_with_text("");
-        assert!(!app.config.wrap);
-
-        assert!(!app.dispatch_action(Action::App(AppAction::Lifecycle(
-            LifecycleAction::ToggleWrap
-        ))));
-        assert!(app.config.wrap);
-        assert_eq!(app.editor.message.as_deref(), Some("Line wrap: ON"));
+        assert!(app.config.wrap); // on by default
 
         app.editor.active_buffer_mut().wrap_scroll_row = 3;
         assert!(!app.dispatch_action(Action::App(AppAction::Lifecycle(
@@ -6292,6 +6286,12 @@ enabled = ["diff_ui"]
         assert_eq!(app.editor.message.as_deref(), Some("Line wrap: OFF"));
         // Turning wrap off drops the wrapped sub-row offset.
         assert_eq!(app.editor.active_buffer().wrap_scroll_row, 0);
+
+        assert!(!app.dispatch_action(Action::App(AppAction::Lifecycle(
+            LifecycleAction::ToggleWrap
+        ))));
+        assert!(app.config.wrap);
+        assert_eq!(app.editor.message.as_deref(), Some("Line wrap: ON"));
     }
 
     // -------------------------------------------------------

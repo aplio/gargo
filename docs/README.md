@@ -423,7 +423,7 @@ GitHub Preview plugin still detaches follow mode when browser navigation moves t
 `~/.config/gargo/config.toml` controls:
 
 - `show_line_number`, `tab_width`, `horizontal_scroll_margin`
-- `wrap` (aliases `line_wrap`, `soft_wrap`) -- soft-wrap long lines in the editor viewport. Off by default, in which case long lines scroll horizontally. With wrap on, a buffer line occupies as many terminal rows as it needs, the line number is shown on its first row only, and the mouse wheel scrolls by wrapped rows.
+- `wrap` (aliases `line_wrap`, `soft_wrap`) -- soft-wrap long lines in the editor viewport. **On by default**; set `wrap = false` to scroll long lines horizontally instead. With wrap on, a buffer line occupies as many terminal rows as it needs, the line number is shown on its first row only, and the mouse wheel scrolls by wrapped rows.
 - Tab characters in buffer text are rendered as visible spaces in the editor viewport and are included in cursor/horizontal-scroll column calculations.
 - `[git]` -- git runtime tuning:
   - `gutter_debounce_high_priority_ms`

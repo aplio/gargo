@@ -13,9 +13,9 @@ pub struct Config {
     #[serde(alias = "line_number_min_width")]
     pub line_number_width: usize,
     pub tab_width: usize,
-    /// Soft-wrap long lines in the terminal editor. When false (default) lines
-    /// scroll horizontally. Toggle at runtime from the command palette
-    /// ("Enable/Disable Line Wrap").
+    /// Soft-wrap long lines in the terminal editor. On by default; set to
+    /// false to scroll long lines horizontally instead. Toggle at runtime from
+    /// the command palette ("Enable/Disable Line Wrap").
     #[serde(alias = "line_wrap", alias = "soft_wrap")]
     pub wrap: bool,
     pub horizontal_scroll_margin: usize,
@@ -302,7 +302,7 @@ impl Default for Config {
             show_line_number: true,
             line_number_width: 5,
             tab_width: 4,
-            wrap: false,
+            wrap: true,
             horizontal_scroll_margin: 5,
             plugins: PluginsConfig::default(),
             lsp: LspConfig::default(),
@@ -404,7 +404,7 @@ mod tests {
         assert!(!cfg.debug);
         assert_eq!(cfg.debug_log_path, PathBuf::from("/tmp/gargo.log"));
         assert_eq!(cfg.line_number_width, 5);
-        assert!(!cfg.wrap);
+        assert!(cfg.wrap);
         assert_eq!(cfg.horizontal_scroll_margin, 5);
         assert_eq!(cfg.git.gutter_debounce_high_priority_ms, 1);
         assert_eq!(cfg.git.gutter_debounce_normal_ms, 96);
@@ -658,11 +658,14 @@ line_number_min_width = 7
 
     #[test]
     fn test_wrap_parses_and_accepts_aliases() {
+        // On by default, so the interesting case is turning it off.
+        let cfg: Config = toml::from_str("wrap = false").unwrap();
+        assert!(!cfg.wrap);
+        let cfg: Config = toml::from_str("line_wrap = false").unwrap();
+        assert!(!cfg.wrap);
+        let cfg: Config = toml::from_str("soft_wrap = false").unwrap();
+        assert!(!cfg.wrap);
         let cfg: Config = toml::from_str("wrap = true").unwrap();
-        assert!(cfg.wrap);
-        let cfg: Config = toml::from_str("line_wrap = true").unwrap();
-        assert!(cfg.wrap);
-        let cfg: Config = toml::from_str("soft_wrap = true").unwrap();
         assert!(cfg.wrap);
     }
 

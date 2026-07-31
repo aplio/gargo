@@ -1160,6 +1160,8 @@ diff --git a/a.txt b/a.txt\n\
 
         let config = Config {
             show_line_number: false,
+            // Horizontal scrolling only applies without soft wrap.
+            wrap: false,
             ..Config::default()
         };
         let theme = Theme::dark();
@@ -1207,6 +1209,8 @@ diff --git a/a.txt b/a.txt\n\
 
         let config = Config {
             show_line_number: false,
+            // Horizontal scrolling only applies without soft wrap.
+            wrap: false,
             ..Config::default()
         };
         let theme = Theme::dark();
@@ -1393,6 +1397,8 @@ diff --git a/a.txt b/a.txt\n\
 
         let config = Config {
             show_line_number: false,
+            // Horizontal scrolling only applies without soft wrap.
+            wrap: false,
             ..Config::default()
         };
         let theme = Theme::dark();
@@ -1430,6 +1436,8 @@ diff --git a/a.txt b/a.txt\n\
 
         let config = Config {
             show_line_number: false,
+            // Horizontal scrolling only applies without soft wrap.
+            wrap: false,
             ..Config::default()
         };
         let theme = Theme::dark();

@@ -1507,6 +1507,57 @@ fn command_labels_for_config_toggles_are_dynamic() {
 }
 
 #[test]
+fn wrap_toggle_label_follows_config_and_matches_aliases() {
+    let mut registry = CommandRegistry::new();
+    crate::command::registry::register_builtins(&mut registry);
+
+    let config = Config {
+        wrap: false,
+        ..Config::default()
+    };
+    let candidates = Palette::filter_commands(
+        &registry,
+        "",
+        None,
+        &config,
+        &std::collections::HashSet::new(),
+    );
+    let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
+    assert!(labels.contains(&"Enable Line Wrap"));
+
+    let config = Config {
+        wrap: true,
+        ..Config::default()
+    };
+    let candidates = Palette::filter_commands(
+        &registry,
+        "",
+        None,
+        &config,
+        &std::collections::HashSet::new(),
+    );
+    let labels: Vec<&str> = candidates.iter().map(|c| c.label.as_str()).collect();
+    assert!(labels.contains(&"Disable Line Wrap"));
+
+    // Reachable by typing "wrap" and by the alias wording.
+    for query in ["wrap", "soft wrap", "word wrap"] {
+        let candidates = Palette::filter_commands(
+            &registry,
+            query,
+            None,
+            &config,
+            &std::collections::HashSet::new(),
+        );
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.label == "Disable Line Wrap"),
+            "query {query:?} should find the wrap toggle"
+        );
+    }
+}
+
+#[test]
 fn release_key_events_are_ignored() {
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 

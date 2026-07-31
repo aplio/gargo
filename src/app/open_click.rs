@@ -43,6 +43,7 @@ impl App {
             screen_row,
             self.config.show_line_number,
             self.config.line_number_width,
+            self.config.wrap,
         ) else {
             return;
         };

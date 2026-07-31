@@ -393,6 +393,93 @@ fn scroll_viewport_ensure_cursor_visible_is_noop() {
 }
 
 // -------------------------------------------------------
+// Soft wrap viewport
+// -------------------------------------------------------
+
+#[test]
+fn wrapped_line_rows_counts_wrapped_rows() {
+    let doc = doc_from_str("0123456789\nshort\n");
+    assert_eq!(doc.wrapped_line_rows(0, 4), 3); // 10 columns / 4
+    assert_eq!(doc.wrapped_line_rows(1, 4), 2); // 5 columns / 4
+}
+
+#[test]
+fn ensure_cursor_visible_wrapped_scrolls_for_wrapped_rows() {
+    // Four lines of 12 columns each wrap into 3 rows apiece at width 4.
+    let content: String = (0..4).map(|_| "abcdefghijkl\n".to_string()).collect();
+    let mut doc = doc_from_str(&content);
+    doc.set_cursor_line_char(2, 0);
+    doc.ensure_cursor_visible_wrapped(6, 4);
+    // The cursor's row is the 7th from the top of the buffer, so the view
+    // starts one wrapped row into line 0 and fills all 6 rows.
+    assert_eq!(doc.scroll_offset, 0);
+    assert_eq!(doc.wrap_scroll_row, 1);
+}
+
+#[test]
+fn ensure_cursor_visible_wrapped_is_stable_once_visible() {
+    let content: String = (0..4).map(|_| "abcdefghijkl\n".to_string()).collect();
+    let mut doc = doc_from_str(&content);
+    doc.set_cursor_line_char(2, 0);
+    doc.ensure_cursor_visible_wrapped(6, 4);
+    let (scroll, sub) = (doc.scroll_offset, doc.wrap_scroll_row);
+    doc.ensure_cursor_visible_wrapped(6, 4);
+    assert_eq!((doc.scroll_offset, doc.wrap_scroll_row), (scroll, sub));
+
+    // A cursor already on screen never scrolls the view backwards.
+    doc.set_cursor_line_char(1, 0);
+    doc.ensure_cursor_visible_wrapped(6, 4);
+    assert_eq!((doc.scroll_offset, doc.wrap_scroll_row), (scroll, sub));
+}
+
+#[test]
+fn ensure_cursor_visible_wrapped_scrolls_within_a_tall_line() {
+    // One line of 40 columns wraps into 10 rows at width 4 — taller than the
+    // 3-row pane, so the viewport has to scroll inside the line.
+    let mut doc = doc_from_str(&format!("{}\n", "x".repeat(40)));
+    doc.set_cursor_line_char(0, 39);
+    doc.ensure_cursor_visible_wrapped(3, 4);
+    assert_eq!(doc.scroll_offset, 0);
+    assert_eq!(doc.wrap_scroll_row, 7); // rows 7..=9 visible
+
+    doc.set_cursor_line_char(0, 0);
+    doc.ensure_cursor_visible_wrapped(3, 4);
+    assert_eq!(doc.wrap_scroll_row, 0);
+}
+
+#[test]
+fn ensure_cursor_visible_wrapped_clears_horizontal_offset() {
+    let mut doc = doc_from_str("0123456789\n");
+    doc.horizontal_scroll_offset = 4;
+    doc.ensure_cursor_visible_wrapped(5, 4);
+    assert_eq!(doc.horizontal_scroll_offset, 0);
+}
+
+#[test]
+fn scroll_viewport_wrapped_moves_by_wrapped_rows() {
+    // Each line is 8 columns → 2 rows at width 4.
+    let content: String = (0..6).map(|_| "abcdefgh\n".to_string()).collect();
+    let mut doc = doc_from_str(&content);
+    doc.set_cursor_line_char(0, 0);
+    doc.scroll_viewport_wrapped(3, 4, 4);
+    // Three wrapped rows down = one full line plus one row.
+    assert_eq!(doc.scroll_offset, 1);
+    assert_eq!(doc.wrap_scroll_row, 1);
+
+    doc.scroll_viewport_wrapped(-3, 4, 4);
+    assert_eq!(doc.scroll_offset, 0);
+    assert_eq!(doc.wrap_scroll_row, 0);
+}
+
+#[test]
+fn scroll_viewport_wrapped_stops_at_buffer_start() {
+    let mut doc = doc_from_str("abcdefgh\nabcdefgh\n");
+    doc.scroll_viewport_wrapped(-10, 4, 4);
+    assert_eq!(doc.scroll_offset, 0);
+    assert_eq!(doc.wrap_scroll_row, 0);
+}
+
+// -------------------------------------------------------
 // Word motions
 // -------------------------------------------------------
 

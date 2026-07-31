@@ -310,6 +310,7 @@ pub enum LifecycleAction {
     CreateDefaultConfig,
     ToggleDebug,
     ToggleLineNumber,
+    ToggleWrap,
     Quit,
     ForceQuit,
     Cancel,

@@ -31,6 +31,10 @@ impl Editor {
         &self.documents
     }
 
+    pub fn buffers_mut(&mut self) -> &mut [Document] {
+        &mut self.documents
+    }
+
     pub fn buffer_by_id(&self, id: BufferId) -> Option<&Document> {
         self.documents.iter().find(|doc| doc.id == id)
     }

@@ -4,7 +4,7 @@ use crate::core::buffer::BufferId;
 use crate::core::document::{Document, Selection};
 use crate::ui::framework::window_manager::PaneRect;
 use crate::ui::text::{char_display_width, slice_display_window};
-use crate::ui::views::text_view::reserved_left_gutter_width;
+use crate::ui::views::text_view::{VisualLayout, reserved_left_gutter_width};
 use std::time::{Duration, Instant};
 
 use super::expand::{ExpandChain, expand_selection};
@@ -63,6 +63,7 @@ impl App {
             screen_row,
             self.config.show_line_number,
             self.config.line_number_width,
+            self.config.wrap,
         ) else {
             return;
         };
@@ -223,6 +224,7 @@ impl App {
             clamped_row,
             self.config.show_line_number,
             self.config.line_number_width,
+            self.config.wrap,
         ) else {
             return;
         };
@@ -284,6 +286,7 @@ pub(super) fn screen_to_doc_pos(
     screen_row: u16,
     show_line_number: bool,
     line_number_width: usize,
+    wrap: bool,
 ) -> Option<ClickTarget> {
     let col = usize::from(screen_col);
     let row = usize::from(screen_row);
@@ -298,11 +301,21 @@ pub(super) fn screen_to_doc_pos(
     let gutter_w = reserved_left_gutter_width(total_lines, show_line_number, line_number_width);
 
     let row_in_pane = row - pane.y;
-    let raw_line = doc.scroll_offset.saturating_add(row_in_pane);
-    let line = if total_lines == 0 {
-        0
-    } else {
-        raw_line.min(total_lines - 1)
+    let available = pane.width.saturating_sub(gutter_w);
+    // The row's own start column: the wrapped row's offset with wrap on, the
+    // horizontal scroll offset otherwise. Rows past the last line clamp to it.
+    let layout = VisualLayout::build(doc, available, pane.height, wrap);
+    let (line, row_start_col) = match layout.rows.get(row_in_pane) {
+        Some(visual_row) => (visual_row.line_idx, Some(visual_row.start_col)),
+        None => {
+            let raw_line = doc.scroll_offset.saturating_add(row_in_pane);
+            let line = if total_lines == 0 {
+                0
+            } else {
+                raw_line.min(total_lines - 1)
+            };
+            (line, None)
+        }
     };
 
     let col_in_pane = col - pane.x;
@@ -327,9 +340,12 @@ pub(super) fn screen_to_doc_pos(
     };
     let line_display = line_str.trim_end_matches('\n');
 
-    let available = pane.width.saturating_sub(gutter_w);
-    let horizontal = slice_display_window(line_display, doc.horizontal_scroll_offset, available);
-    let view_start_col = horizontal.start_col;
+    let view_start_col = match row_start_col {
+        Some(start_col) => start_col,
+        None => {
+            slice_display_window(line_display, doc.horizontal_scroll_offset, available).start_col
+        }
+    };
     let target_display_col = view_start_col + col_in_content;
 
     // Walk display columns to find the char index containing target_display_col.
@@ -388,7 +404,7 @@ mod tests {
         let doc = doc_from("hello world\nbye\n");
         // gutter_w = 1 (no line numbers, just git lane). Screen col 7 →
         // content col 6 → display col 6 → 'w' at char index 6.
-        let target = screen_to_doc_pos(&doc, pane(40, 10), 7, 0, false, 4).unwrap();
+        let target = screen_to_doc_pos(&doc, pane(40, 10), 7, 0, false, 4, false).unwrap();
         assert_eq!(target.line, 0);
         assert_eq!(target.char_pos, 6); // 'w' in "world"
         assert!(!target.on_gutter);
@@ -398,14 +414,14 @@ mod tests {
     fn screen_to_doc_pos_handles_tabs() {
         let doc = doc_from("a\tb\n");
         // gutter_w=1; click at screen col 6 means content col 5 — past tab into 'b'
-        let target = screen_to_doc_pos(&doc, pane(40, 10), 6, 0, false, 4).unwrap();
+        let target = screen_to_doc_pos(&doc, pane(40, 10), 6, 0, false, 4, false).unwrap();
         assert_eq!(target.char_pos, 2); // 'b'
     }
 
     #[test]
     fn screen_to_doc_pos_past_eol_snaps_to_last() {
         let doc = doc_from("hi\n");
-        let target = screen_to_doc_pos(&doc, pane(40, 10), 30, 0, false, 4).unwrap();
+        let target = screen_to_doc_pos(&doc, pane(40, 10), 30, 0, false, 4, false).unwrap();
         assert_eq!(target.char_pos, 2); // one past last char ('i')
     }
 
@@ -413,7 +429,7 @@ mod tests {
     fn screen_to_doc_pos_gutter_click() {
         let doc = doc_from("alpha\nbeta\n");
         // line numbers on → gutter occupies cols 0..(>1)
-        let target = screen_to_doc_pos(&doc, pane(40, 10), 0, 1, true, 4).unwrap();
+        let target = screen_to_doc_pos(&doc, pane(40, 10), 0, 1, true, 4, false).unwrap();
         assert!(target.on_gutter);
         assert_eq!(target.line, 1);
         assert_eq!(target.char_pos, 6); // start of "beta"
@@ -422,8 +438,8 @@ mod tests {
     #[test]
     fn screen_to_doc_pos_outside_pane_returns_none() {
         let doc = doc_from("x\n");
-        assert!(screen_to_doc_pos(&doc, pane(10, 5), 20, 2, false, 4).is_none());
-        assert!(screen_to_doc_pos(&doc, pane(10, 5), 5, 8, false, 4).is_none());
+        assert!(screen_to_doc_pos(&doc, pane(10, 5), 20, 2, false, 4, false).is_none());
+        assert!(screen_to_doc_pos(&doc, pane(10, 5), 5, 8, false, 4, false).is_none());
     }
 
     #[test]
@@ -431,7 +447,7 @@ mod tests {
         let mut doc = doc_from("0123456789abcdef\n");
         doc.horizontal_scroll_offset = 5;
         // gutter_w=1; click at screen col 1 → content col 0 → display col 5 → '5'
-        let target = screen_to_doc_pos(&doc, pane(40, 10), 1, 0, false, 4).unwrap();
+        let target = screen_to_doc_pos(&doc, pane(40, 10), 1, 0, false, 4, false).unwrap();
         assert_eq!(target.char_pos, 5);
     }
 
@@ -441,8 +457,38 @@ mod tests {
         let doc = doc_from("吾輩は猫\n");
         // gutter_w=1; clicking at screen col 4 → content col 3 → display col 3 →
         // first char width=2 ends at col 2, so col 3 is inside second char (輩).
-        let target = screen_to_doc_pos(&doc, pane(40, 10), 4, 0, false, 4).unwrap();
+        let target = screen_to_doc_pos(&doc, pane(40, 10), 4, 0, false, 4, false).unwrap();
         assert_eq!(target.char_pos, 1); // '輩'
+    }
+
+    #[test]
+    fn screen_to_doc_pos_maps_wrapped_continuation_row() {
+        let doc = doc_from("0123456789abcdef\nnext\n");
+        // gutter_w = 1 → 11 text columns. Row 1 is the wrapped tail of line 0,
+        // so content col 1 there is display col 12 → char 'c'.
+        let target = screen_to_doc_pos(&doc, pane(12, 10), 2, 1, false, 4, true).unwrap();
+        assert_eq!(target.line, 0);
+        assert_eq!(target.char_pos, 12);
+        assert!(!target.on_gutter);
+    }
+
+    #[test]
+    fn screen_to_doc_pos_wrapped_row_reaches_following_line() {
+        let doc = doc_from("0123456789abcdef\nnext\n");
+        // Line 0 takes rows 0-1, so row 2 is the start of line 1.
+        let target = screen_to_doc_pos(&doc, pane(12, 10), 1, 2, false, 4, true).unwrap();
+        assert_eq!(target.line, 1);
+        assert_eq!(target.char_pos, 17); // start of "next"
+    }
+
+    #[test]
+    fn screen_to_doc_pos_gutter_click_on_wrapped_row_uses_its_line() {
+        let doc = doc_from("0123456789abcdefghij\nnext\n");
+        // Gutter of a continuation row still targets the wrapped line's start.
+        let target = screen_to_doc_pos(&doc, pane(14, 10), 0, 1, true, 4, true).unwrap();
+        assert!(target.on_gutter);
+        assert_eq!(target.line, 0);
+        assert_eq!(target.char_pos, 0);
     }
 
     #[test]
@@ -450,7 +496,7 @@ mod tests {
         let doc = doc_from("only\n");
         // total_lines = 2 (one for "only\n", one for the trailing empty line).
         // Row 9 is past the end → clamped to last line (1, the empty trailing).
-        let target = screen_to_doc_pos(&doc, pane(20, 10), 5, 9, false, 4).unwrap();
+        let target = screen_to_doc_pos(&doc, pane(20, 10), 5, 9, false, 4, false).unwrap();
         assert_eq!(target.line, 1);
     }
 }

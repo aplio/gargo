@@ -17,6 +17,7 @@ impl Document {
             cursors: vec![0],
             scroll_offset: 0,
             horizontal_scroll_offset: 0,
+            wrap_scroll_row: 0,
             file_path: Some(file_path),
             dirty: false,
             pending_edits: Vec::new(),

@@ -205,6 +205,17 @@ pub fn register_builtins(registry: &mut CommandRegistry) {
     });
 
     registry.register(CommandEntry {
+        id: "config.toggle_wrap".into(),
+        label: "Enable Line Wrap".into(),
+        category: Some("Config".into()),
+        action: Box::new(|_ctx| {
+            CommandEffect::Action(Action::App(AppAction::Lifecycle(
+                LifecycleAction::ToggleWrap,
+            )))
+        }),
+    });
+
+    registry.register(CommandEntry {
         id: "core.quit".into(),
         label: "Quit Editor".into(),
         category: Some("Core".into()),

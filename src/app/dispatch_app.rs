@@ -205,6 +205,20 @@ impl App {
                     }
                 ));
             }
+            AppAction::Lifecycle(LifecycleAction::ToggleWrap) => {
+                self.config.wrap = !self.config.wrap;
+                if !self.config.wrap {
+                    // The sub-row offset only means something while wrapping;
+                    // drop it so the horizontal view starts at a line boundary.
+                    for buffer in self.editor.buffers_mut() {
+                        buffer.wrap_scroll_row = 0;
+                    }
+                }
+                self.editor.message = Some(format!(
+                    "Line wrap: {}",
+                    if self.config.wrap { "ON" } else { "OFF" }
+                ));
+            }
             AppAction::Buffer(BufferAction::RefreshBuffer) => {
                 match self.editor.reload_active_buffer_from_disk() {
                     Ok(msg) => {

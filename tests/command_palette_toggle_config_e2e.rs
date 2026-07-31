@@ -49,6 +49,26 @@ fn command_palette_toggle_debug_flips_runtime_flag() {
 }
 
 #[test]
+fn command_palette_toggle_wrap_flips_runtime_flag() {
+    let mut config = Config::default();
+    config.plugins.enabled.clear();
+    let mut app = App::new(Editor::new(), config, Some(Path::new(".")));
+    assert!(!app.config().wrap);
+
+    let first = action_for_builtin_command("config.toggle_wrap");
+    assert_eq!(
+        first,
+        Action::App(AppAction::Lifecycle(LifecycleAction::ToggleWrap))
+    );
+    assert!(!app.dispatch_action(first));
+    assert!(app.config().wrap);
+
+    let second = action_for_builtin_command("config.toggle_wrap");
+    assert!(!app.dispatch_action(second));
+    assert!(!app.config().wrap);
+}
+
+#[test]
 fn command_palette_toggle_line_numbers_flips_runtime_flag() {
     let mut config = Config::default();
     config.plugins.enabled.clear();

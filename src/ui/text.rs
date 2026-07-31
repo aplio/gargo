@@ -94,6 +94,53 @@ pub fn slice_display_window(s: &str, start_col: usize, max_width: usize) -> Disp
     }
 }
 
+/// Split `s` into the successive display windows it occupies when soft-wrapped
+/// at `max_width` columns. Always returns at least one window (an empty line
+/// still occupies one row). Wide characters are never split across rows: a
+/// character that does not fit in the remaining columns starts the next row.
+pub fn wrap_display_windows(s: &str, max_width: usize) -> Vec<DisplayWindow<'_>> {
+    if max_width == 0 {
+        return vec![slice_display_window(s, 0, 0)];
+    }
+
+    let mut windows = Vec::new();
+    let mut col = 0usize;
+    loop {
+        let window = slice_display_window(s, col, max_width);
+        let reached_end = window.end_byte >= s.len();
+        // `max(1)` keeps the walk moving when a wide character cannot fit in
+        // `max_width` at all (e.g. a CJK char in a one-column pane).
+        col = window.start_col + window.used_width.max(1);
+        windows.push(window);
+        if reached_end {
+            break;
+        }
+    }
+    windows
+}
+
+/// Number of terminal rows `s` occupies when soft-wrapped at `max_width`.
+/// Always at least 1.
+pub fn wrapped_row_count(s: &str, max_width: usize) -> usize {
+    wrap_display_windows(s, max_width).len()
+}
+
+/// Index of the soft-wrapped row that holds display column `col`. Columns past
+/// the end of the last row (e.g. a cursor sitting one past a line that exactly
+/// fills the width) resolve to the last row.
+pub fn wrapped_row_of_col(s: &str, max_width: usize, col: usize) -> usize {
+    if max_width == 0 {
+        return 0;
+    }
+    let windows = wrap_display_windows(s, max_width);
+    for (idx, window) in windows.iter().enumerate() {
+        if col < window.start_col + max_width {
+            return idx;
+        }
+    }
+    windows.len().saturating_sub(1)
+}
+
 /// Compute gutter width (line numbers + space) for given total lines.
 pub fn gutter_width(total_lines: usize) -> usize {
     let digits = if total_lines == 0 {
@@ -211,6 +258,60 @@ mod tests {
         assert_eq!(window.visible, "\tb");
         assert_eq!(window.start_col, 1);
         assert_eq!(window.used_width, TAB_DISPLAY_WIDTH + 1);
+    }
+
+    #[test]
+    fn wrap_splits_ascii_into_fixed_width_rows() {
+        let windows = wrap_display_windows("abcdefg", 3);
+        let visible: Vec<&str> = windows.iter().map(|w| w.visible).collect();
+        assert_eq!(visible, vec!["abc", "def", "g"]);
+        assert_eq!(windows[1].start_col, 3);
+        assert_eq!(windows[2].start_col, 6);
+    }
+
+    #[test]
+    fn wrap_keeps_wide_chars_whole() {
+        // "aあい": 'a' (1) + 'あ' (2) + 'い' (2). At width 4 the second wide
+        // char cannot fit on row 0, so row 0 keeps 3 columns.
+        let windows = wrap_display_windows("aあい", 4);
+        let visible: Vec<&str> = windows.iter().map(|w| w.visible).collect();
+        assert_eq!(visible, vec!["aあ", "い"]);
+        assert_eq!(windows[0].used_width, 3);
+        assert_eq!(windows[1].start_col, 3);
+    }
+
+    #[test]
+    fn wrap_exact_fit_produces_single_row() {
+        let windows = wrap_display_windows("abcd", 4);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].visible, "abcd");
+    }
+
+    #[test]
+    fn wrap_empty_line_occupies_one_row() {
+        assert_eq!(wrapped_row_count("", 10), 1);
+    }
+
+    #[test]
+    fn wrap_terminates_when_wide_char_exceeds_width() {
+        // Degenerate one-column pane: the wide char cannot be rendered, but
+        // wrapping must still terminate.
+        let count = wrapped_row_count("あa", 1);
+        assert!(count >= 1);
+    }
+
+    #[test]
+    fn wrapped_row_of_col_maps_columns_to_rows() {
+        assert_eq!(wrapped_row_of_col("abcdefg", 3, 0), 0);
+        assert_eq!(wrapped_row_of_col("abcdefg", 3, 2), 0);
+        assert_eq!(wrapped_row_of_col("abcdefg", 3, 3), 1);
+        assert_eq!(wrapped_row_of_col("abcdefg", 3, 6), 2);
+    }
+
+    #[test]
+    fn wrapped_row_of_col_past_end_clamps_to_last_row() {
+        // Cursor one past a line that exactly fills the width.
+        assert_eq!(wrapped_row_of_col("abcd", 4, 4), 0);
     }
 
     #[test]

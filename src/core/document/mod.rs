@@ -64,6 +64,11 @@ pub struct Document {
     pub cursors: Vec<usize>,
     pub scroll_offset: usize,
     pub horizontal_scroll_offset: usize,
+    /// With soft wrap on, how many wrapped rows of the top line (`scroll_offset`)
+    /// are scrolled off the top of the viewport. Lets a line taller than the
+    /// pane be scrolled through. Ignored (and clamped at use sites) when wrap
+    /// is off, so a stale value can never corrupt the view.
+    pub wrap_scroll_row: usize,
     pub file_path: Option<PathBuf>,
     pub dirty: bool,
     pub pending_edits: Vec<EditEvent>,
@@ -108,6 +113,7 @@ impl Document {
             cursors: vec![0],
             scroll_offset: 0,
             horizontal_scroll_offset: 0,
+            wrap_scroll_row: 0,
             file_path: None,
             dirty: false,
             pending_edits: Vec::new(),

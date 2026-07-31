@@ -13,9 +13,122 @@ use crate::ui::framework::surface::Surface;
 use crate::ui::framework::window_manager::PaneRect;
 use crate::ui::text::{
     char_display_width, display_width, gutter_width, slice_display_window, truncate_to_width,
+    wrap_display_windows,
 };
 
 pub struct TextView;
+
+/// One terminal row of the text area: the slice of a buffer line shown on it.
+/// Without soft wrap every buffer line owns exactly one row; with wrap on, a
+/// line owns as many rows as it needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct VisualRow {
+    pub(crate) line_idx: usize,
+    /// Byte range of this row's slice within the line (newline trimmed).
+    pub(crate) start_byte: usize,
+    pub(crate) end_byte: usize,
+    /// Display column this row starts at (horizontal scroll offset without
+    /// wrap; the wrapped row's own offset with wrap).
+    pub(crate) start_col: usize,
+    pub(crate) used_width: usize,
+    /// First row of its buffer line — the one carrying the line number.
+    pub(crate) first: bool,
+}
+
+/// The rows of a pane, in screen order, starting at the buffer's scroll
+/// position. Shared by rendering, cursor placement and click mapping so all
+/// three agree on where a line landed.
+pub(crate) struct VisualLayout {
+    pub(crate) rows: Vec<VisualRow>,
+    pub(crate) text_width: usize,
+}
+
+impl VisualLayout {
+    pub(crate) fn build(
+        buf: &Document,
+        text_width: usize,
+        view_height: usize,
+        wrap: bool,
+    ) -> VisualLayout {
+        let total_lines = buf.rope.len_lines();
+        let mut rows: Vec<VisualRow> = Vec::new();
+
+        if wrap && text_width > 0 {
+            let mut line_idx = buf.scroll_offset;
+            let mut skip = buf.wrap_scroll_row;
+            while rows.len() < view_height && line_idx < total_lines {
+                let line_str = buf.rope.line(line_idx).to_string();
+                let display = line_str.trim_end_matches('\n');
+                let windows = wrap_display_windows(display, text_width);
+                let skip_here = skip.min(windows.len().saturating_sub(1));
+                skip = 0;
+                for (idx, window) in windows.iter().enumerate().skip(skip_here) {
+                    if rows.len() >= view_height {
+                        break;
+                    }
+                    rows.push(VisualRow {
+                        line_idx,
+                        start_byte: window.start_byte,
+                        end_byte: window.end_byte,
+                        start_col: window.start_col,
+                        used_width: window.used_width,
+                        first: idx == 0,
+                    });
+                }
+                line_idx += 1;
+            }
+        } else {
+            for row in 0..view_height {
+                let line_idx = buf.scroll_offset + row;
+                if line_idx >= total_lines {
+                    break;
+                }
+                let line_str = buf.rope.line(line_idx).to_string();
+                let display = line_str.trim_end_matches('\n');
+                let window =
+                    slice_display_window(display, buf.horizontal_scroll_offset, text_width);
+                rows.push(VisualRow {
+                    line_idx,
+                    start_byte: window.start_byte,
+                    end_byte: window.end_byte,
+                    start_col: window.start_col,
+                    used_width: window.used_width,
+                    first: true,
+                });
+            }
+        }
+
+        VisualLayout { rows, text_width }
+    }
+
+    pub(crate) fn first_line(&self) -> Option<usize> {
+        self.rows.first().map(|row| row.line_idx)
+    }
+
+    pub(crate) fn last_line(&self) -> Option<usize> {
+        self.rows.last().map(|row| row.line_idx)
+    }
+
+    /// Screen rows (index into the pane) showing `line_idx`.
+    pub(crate) fn rows_for_line(
+        &self,
+        line_idx: usize,
+    ) -> impl DoubleEndedIterator<Item = (usize, &VisualRow)> {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(move |(_, row)| row.line_idx == line_idx)
+    }
+
+    /// Screen row and x offset within the text area for a display column of
+    /// `line_idx`, or `None` when that column is not on screen.
+    pub(crate) fn locate(&self, line_idx: usize, col: usize) -> Option<(usize, usize)> {
+        self.rows_for_line(line_idx).find_map(|(idx, row)| {
+            (col >= row.start_col && col < row.start_col + self.text_width)
+                .then_some((idx, col - row.start_col))
+        })
+    }
+}
 
 impl Default for TextView {
     fn default() -> Self {
@@ -77,15 +190,21 @@ impl TextView {
         );
 
         let available = area.width.saturating_sub(gutter_w);
-        let line = buf.rope.line(cursor_line).to_string();
-        let line_display = line.trim_end_matches('\n');
-        let horizontal =
-            slice_display_window(line_display, buf.horizontal_scroll_offset, available);
-        let view_start_col = horizontal.start_col;
-        let cursor_col = cursor_display_col
-            .saturating_sub(view_start_col)
-            .min(available.saturating_sub(1));
-        let screen_row = area.y + cursor_line.saturating_sub(buf.scroll_offset);
+        let layout = VisualLayout::build(buf, available, area.height, ctx.config.wrap);
+        let (row_in_pane, cursor_col) = match layout.locate(cursor_line, cursor_display_col) {
+            Some(found) => found,
+            None => {
+                // Cursor past the last rendered column of its line (e.g. one
+                // past a line that exactly fills the pane): clamp onto the last
+                // row that line occupies.
+                let (row_in_pane, row) = layout.rows_for_line(cursor_line).next_back()?;
+                let col = cursor_display_col
+                    .saturating_sub(row.start_col)
+                    .min(available.saturating_sub(1));
+                (row_in_pane, col)
+            }
+        };
+        let screen_row = area.y + row_in_pane;
         if screen_row >= area.y + area.height {
             return None;
         }
@@ -116,8 +235,10 @@ impl TextView {
         let gutter_w =
             reserved_left_gutter_width(total_lines, show_line_number, ctx.config.line_number_width);
 
-        let start_line = buf.scroll_offset;
-        let end_line = (buf.scroll_offset + view_height).min(total_lines);
+        let available = area_w.saturating_sub(gutter_w);
+        let layout = VisualLayout::build(buf, available, view_height, ctx.config.wrap);
+        let start_line = layout.first_line().unwrap_or(buf.scroll_offset);
+        let end_line = layout.last_line().map_or(start_line, |line| line + 1);
         let highlight_spans = ctx
             .highlight_manager
             .query_visible(buf.id, &buf.rope, start_line, end_line);
@@ -136,10 +257,10 @@ impl TextView {
         };
 
         for row in 0..view_height {
-            let line_idx = buf.scroll_offset + row;
             let screen_y = area_y + row;
 
-            if line_idx < total_lines {
+            if let Some(visual_row) = layout.rows.get(row) {
+                let line_idx = visual_row.line_idx;
                 let line = buf.rope.line(line_idx);
                 let line_str = line.to_string();
                 let display = line_str.trim_end_matches('\n');
@@ -151,7 +272,13 @@ impl TextView {
                     if let Some(severity) = diagnostic_severity {
                         apply_diagnostic_style(&mut number_style, severity);
                     }
-                    let num_str = format!("{:>width$}", line_idx + 1, width = line_number_width);
+                    // Continuation rows of a wrapped line keep the gutter blank;
+                    // only the first row carries the number.
+                    let num_str = if visual_row.first {
+                        format!("{:>width$}", line_idx + 1, width = line_number_width)
+                    } else {
+                        " ".repeat(line_number_width)
+                    };
                     surface.put_str(area_x, screen_y, &num_str, &number_style);
 
                     let git_lane_x = area_x + line_number_width;
@@ -170,11 +297,8 @@ impl TextView {
                     surface.put_str(area_x, screen_y, " ", &default_style);
                 }
 
-                let available = area_w.saturating_sub(gutter_w);
-                let horizontal =
-                    slice_display_window(display, buf.horizontal_scroll_offset, available);
-                let visible_display = horizontal.visible;
-                let used_width = horizontal.used_width;
+                let visible_display = &display[visual_row.start_byte..visual_row.end_byte];
+                let used_width = visual_row.used_width;
 
                 let line_spans = highlight_spans.get(&line_idx);
                 if is_in_editor_diff {
@@ -194,7 +318,7 @@ impl TextView {
                             (screen_y, area_x + gutter_w),
                             visible_display,
                             spans,
-                            horizontal.start_byte..horizontal.end_byte,
+                            visual_row.start_byte..visual_row.end_byte,
                             available,
                             ctx.theme,
                         );
@@ -221,7 +345,7 @@ impl TextView {
                         (screen_y, area_x + gutter_w),
                         visible_display,
                         spans,
-                        horizontal.start_byte..horizontal.end_byte,
+                        visual_row.start_byte..visual_row.end_byte,
                         available,
                         ctx.theme,
                     );
@@ -296,7 +420,6 @@ impl TextView {
                         if line_idx < start_line || line_idx >= end_line {
                             continue;
                         }
-                        let screen_row = area_y + (line_idx - start_line);
                         let line_start_char = rope.line_to_char(line_idx);
 
                         let char_start = match_offset.saturating_sub(line_start_char);
@@ -309,20 +432,19 @@ impl TextView {
 
                         let line_str = rope.line(line_idx).to_string();
                         let line_display = line_str.trim_end_matches('\n');
-                        let available = area_w.saturating_sub(gutter_w);
-                        let horizontal = slice_display_window(
-                            line_display,
-                            buf.horizontal_scroll_offset,
-                            available,
-                        );
-                        let view_start_col = horizontal.start_col;
-                        let view_end_col = view_start_col + available;
                         let prefix_end = line_display
                             .char_indices()
                             .nth(char_start)
                             .map(|(i, _)| i)
                             .unwrap_or(line_display.len());
                         let col_start = display_width(&line_display[..prefix_end]);
+                        let match_width: usize = line_display
+                            .chars()
+                            .skip(char_start)
+                            .take(char_end - char_start)
+                            .map(char_display_width)
+                            .sum();
+                        let col_end = col_start + match_width;
 
                         let is_current = primary_cursor == Some(match_offset);
                         let (bg, fg) = if is_current {
@@ -331,42 +453,23 @@ impl TextView {
                             (Some(Color::DarkYellow), None)
                         };
 
-                        let mut char_col = col_start;
-                        for ch in line_display
-                            .chars()
-                            .skip(char_start)
-                            .take(char_end - char_start)
-                        {
-                            let ch_w = char_display_width(ch);
-                            let next_char_col = char_col + ch_w;
-                            if next_char_col <= view_start_col {
-                                char_col = next_char_col;
-                                continue;
-                            }
-                            if char_col >= view_end_col {
-                                break;
-                            }
-                            if char_col < view_start_col {
-                                char_col = next_char_col;
-                                continue;
-                            }
-                            let screen_col = area_x + gutter_w + (char_col - view_start_col);
-                            let cell = surface.get_mut(screen_col, screen_row);
-                            cell.style.bg = bg;
-                            if let Some(fg_color) = fg {
-                                cell.style.fg = Some(fg_color);
-                            }
-                            if ch_w == 2
-                                && screen_col + 1 < area_x + area_w
-                                && char_col + 1 < view_end_col
-                            {
-                                let cont = surface.get_mut(screen_col + 1, screen_row);
-                                cont.style.bg = bg;
+                        // A match can span several rows once the line wraps, so
+                        // paint each row's slice of the match separately.
+                        for (row_in_pane, visual_row) in layout.rows_for_line(line_idx) {
+                            let view_start_col = visual_row.start_col;
+                            let view_end_col = view_start_col + available;
+                            let paint_start = col_start.max(view_start_col);
+                            let paint_end = col_end.min(view_end_col);
+                            for col in paint_start..paint_end {
+                                let cell = surface.get_mut(
+                                    area_x + gutter_w + (col - view_start_col),
+                                    area_y + row_in_pane,
+                                );
+                                cell.style.bg = bg;
                                 if let Some(fg_color) = fg {
-                                    cont.style.fg = Some(fg_color);
+                                    cell.style.fg = Some(fg_color);
                                 }
                             }
-                            char_col = next_char_col;
                         }
                     }
                 }
@@ -374,8 +477,7 @@ impl TextView {
         }
 
         for (sel_start, sel_end) in buf.merged_selection_ranges() {
-            for row in 0..view_height {
-                let line_idx = buf.scroll_offset + row;
+            for line_idx in start_line..end_line {
                 if line_idx >= total_lines {
                     break;
                 }
@@ -414,25 +516,25 @@ impl TextView {
                     col_end = col;
                 }
 
-                let available = area_w.saturating_sub(gutter_w);
-                let horizontal =
-                    slice_display_window(line_content, buf.horizontal_scroll_offset, available);
-                let view_start_col = horizontal.start_col;
-                let view_end_col = view_start_col + available;
-                let paint_start = col_start.max(view_start_col);
-                let paint_end = col_end.min(view_end_col);
+                for (row_in_pane, visual_row) in layout.rows_for_line(line_idx) {
+                    let view_start_col = visual_row.start_col;
+                    let view_end_col = view_start_col + available;
+                    let paint_start = col_start.max(view_start_col);
+                    let paint_end = col_end.min(view_end_col);
 
-                for c in paint_start..paint_end {
-                    let cell =
-                        surface.get_mut(area_x + gutter_w + (c - view_start_col), area_y + row);
-                    cell.style.reverse = !cell.style.reverse;
+                    for c in paint_start..paint_end {
+                        let cell = surface.get_mut(
+                            area_x + gutter_w + (c - view_start_col),
+                            area_y + row_in_pane,
+                        );
+                        cell.style.reverse = !cell.style.reverse;
+                    }
                 }
             }
         }
 
         // Secondary cursors overlay pass
         if buf.cursors.len() > 1 {
-            let available = area_w.saturating_sub(gutter_w);
             let rope_len = buf.rope.len_chars();
             for (i, &cursor_pos) in buf.cursors.iter().enumerate().skip(1) {
                 // Each cursor decides its own one-back display adjustment based
@@ -451,7 +553,6 @@ impl TextView {
                 if cursor_line < start_line || cursor_line >= end_line {
                     continue;
                 }
-                let screen_row = cursor_line - start_line;
                 let line_start = buf.rope.line_to_char(cursor_line);
                 let col_in_line = cursor_pos - line_start;
 
@@ -467,17 +568,15 @@ impl TextView {
                     display_col += char_display_width(ch);
                 }
 
-                // Account for horizontal scroll
-                if display_col < buf.horizontal_scroll_offset {
+                // Place it on the row that actually shows this column (the
+                // wrapped row with wrap on, the horizontal window without).
+                let Some((row_in_pane, screen_col)) = layout.locate(cursor_line, display_col)
+                else {
                     continue;
-                }
-                let screen_col = display_col - buf.horizontal_scroll_offset;
-                if screen_col >= available {
-                    continue;
-                }
+                };
 
                 // Render secondary cursor with distinct style
-                let cell = surface.get_mut(area_x + gutter_w + screen_col, screen_row);
+                let cell = surface.get_mut(area_x + gutter_w + screen_col, area_y + row_in_pane);
                 cell.style.bg = Some(Color::DarkGrey);
                 cell.style.fg = Some(Color::White);
             }
@@ -1160,6 +1259,127 @@ diff --git a/a.txt b/a.txt\n\
             .expect("cursor should be visible");
         assert_eq!(row, 0);
         assert_eq!(col, 5);
+    }
+
+    #[test]
+    fn wrap_continues_long_line_on_next_row() {
+        let mut editor = Editor::new();
+        editor.active_buffer_mut().insert_text("0123456789abcdef\n");
+        editor.active_buffer_mut().set_cursor_line_char(0, 0);
+
+        let config = Config {
+            show_line_number: false,
+            wrap: true,
+            ..Config::default()
+        };
+        // width 12, gutter 1 (git lane) → 11 columns of text per row.
+        let surface = render_editor_surface(&editor, &config, 12, 6);
+
+        assert_eq!(row_text(&surface, 0), " 0123456789a");
+        assert_eq!(row_text(&surface, 1), " bcdef      ");
+    }
+
+    #[test]
+    fn wrap_numbers_only_the_first_row_of_a_line() {
+        let mut editor = Editor::new();
+        editor
+            .active_buffer_mut()
+            .insert_text("0123456789abcdef\nsecond\n");
+        editor.active_buffer_mut().set_cursor_line_char(0, 0);
+
+        let config = Config {
+            show_line_number: true,
+            line_number_width: 3,
+            wrap: true,
+            ..Config::default()
+        };
+        // gutter = line number width (3) + git lane (1) = 4.
+        let surface = render_editor_surface(&editor, &config, 14, 6);
+
+        assert!(row_text(&surface, 0).starts_with("  1 "));
+        // Continuation row: blank gutter, text continues.
+        assert!(row_text(&surface, 1).starts_with("    "));
+        assert!(row_text(&surface, 1).trim_start().starts_with("abcdef"));
+        // The next buffer line gets its own number, one row further down.
+        assert!(row_text(&surface, 2).starts_with("  2 "));
+    }
+
+    #[test]
+    fn wrap_places_cursor_on_the_wrapped_row() {
+        let mut editor = Editor::new();
+        editor.active_buffer_mut().insert_text("0123456789abcdef\n");
+        editor.active_buffer_mut().set_cursor_line_char(0, 12);
+
+        let config = Config {
+            show_line_number: false,
+            wrap: true,
+            ..Config::default()
+        };
+        let theme = Theme::dark();
+        let key_state = KeyState::Normal;
+        let ctx = RenderContext::new(
+            12,
+            6,
+            &editor,
+            &theme,
+            &key_state,
+            &config,
+            Path::new("/tmp/gargo-test-root"),
+            false,
+            false,
+        );
+
+        let (col, row, _) = TextView::new()
+            .cursor(&ctx)
+            .expect("cursor should be visible");
+        // Display col 12 → second wrapped row (11 columns each), offset 1,
+        // plus the one-column gutter.
+        assert_eq!(row, 1);
+        assert_eq!(col, 2);
+    }
+
+    #[test]
+    fn wrap_paints_selection_on_every_row_it_covers() {
+        let mut editor = Editor::new();
+        editor.active_buffer_mut().insert_text("0123456789abcdef\n");
+        editor.active_buffer_mut().set_cursor_line_char(0, 0);
+        editor.active_buffer_mut().set_anchor();
+        editor.active_buffer_mut().set_cursor_line_char(0, 16);
+
+        let config = Config {
+            show_line_number: false,
+            wrap: true,
+            ..Config::default()
+        };
+        let surface = render_editor_surface(&editor, &config, 12, 6);
+
+        assert!(surface.get(1, 0).style.reverse);
+        assert!(surface.get(11, 0).style.reverse);
+        // Continuation row keeps the selection over "bcdef" only.
+        assert!(surface.get(1, 1).style.reverse);
+        assert!(surface.get(5, 1).style.reverse);
+        assert!(!surface.get(6, 1).style.reverse);
+    }
+
+    #[test]
+    fn wrap_highlights_search_match_that_straddles_rows() {
+        let mut editor = Editor::new();
+        editor.active_buffer_mut().insert_text("0123456789abcdef\n");
+        editor.active_buffer_mut().set_cursor_line_char(0, 0);
+        editor.search.pattern = "ab".to_string();
+        editor.search.pattern_lower = "ab".to_string();
+        editor.search.last_search_found = true;
+
+        let config = Config {
+            show_line_number: false,
+            wrap: true,
+            ..Config::default()
+        };
+        let surface = render_editor_surface(&editor, &config, 12, 6);
+
+        // "a" is the last column of row 0, "b" the first of row 1.
+        assert_eq!(surface.get(11, 0).style.bg, Some(Color::DarkYellow));
+        assert_eq!(surface.get(1, 1).style.bg, Some(Color::DarkYellow));
     }
 
     #[test]

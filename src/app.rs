@@ -1208,6 +1208,19 @@ impl App {
         }
     }
 
+    /// Scroll the active buffer by `delta` rows — wrapped rows when soft wrap
+    /// is on, buffer lines otherwise — so the wheel moves the same visual
+    /// distance either way.
+    fn scroll_active_buffer(&mut self, delta: isize, view_height: usize, text_width: usize) {
+        let wrap = self.config.wrap;
+        let buffer = self.editor.active_buffer_mut();
+        if wrap {
+            buffer.scroll_viewport_wrapped(delta, view_height, text_width);
+        } else {
+            buffer.scroll_viewport(delta, view_height);
+        }
+    }
+
     fn command_display(&self) -> String {
         match self.pending_count {
             Some(count) => format!("{count}{}", self.key_state.display_prefix()),
@@ -2053,13 +2066,19 @@ impl App {
                 self.config.line_number_width,
             );
             let text_width = editor_area_width.saturating_sub(gutter_w);
-            self.editor
-                .active_buffer_mut()
-                .ensure_cursor_visible_with_horizontal(
-                    view_height.max(1),
-                    text_width,
-                    self.config.horizontal_scroll_margin,
-                );
+            if self.config.wrap {
+                self.editor
+                    .active_buffer_mut()
+                    .ensure_cursor_visible_wrapped(view_height.max(1), text_width);
+            } else {
+                self.editor
+                    .active_buffer_mut()
+                    .ensure_cursor_visible_with_horizontal(
+                        view_height.max(1),
+                        text_width,
+                        self.config.horizontal_scroll_margin,
+                    );
+            }
 
             let command_display = self.command_display();
             let mut ctx = RenderContext::new_with_chord_display(
@@ -2188,14 +2207,10 @@ impl App {
                             }
                             EventResult::Ignored => match mouse_event.kind {
                                 MouseEventKind::ScrollUp => {
-                                    self.editor
-                                        .active_buffer_mut()
-                                        .scroll_viewport(-3, view_height);
+                                    self.scroll_active_buffer(-3, view_height, text_width);
                                 }
                                 MouseEventKind::ScrollDown => {
-                                    self.editor
-                                        .active_buffer_mut()
-                                        .scroll_viewport(3, view_height);
+                                    self.scroll_active_buffer(3, view_height, text_width);
                                 }
                                 _ => {}
                             },
@@ -6220,6 +6235,27 @@ enabled = ["diff_ui"]
         ))));
         assert!(app.config.show_line_number);
         assert_eq!(app.editor.message.as_deref(), Some("Line numbers: ON"));
+    }
+
+    #[test]
+    fn toggle_wrap_updates_runtime_config_and_message() {
+        let mut app = test_app_with_text("");
+        assert!(!app.config.wrap);
+
+        assert!(!app.dispatch_action(Action::App(AppAction::Lifecycle(
+            LifecycleAction::ToggleWrap
+        ))));
+        assert!(app.config.wrap);
+        assert_eq!(app.editor.message.as_deref(), Some("Line wrap: ON"));
+
+        app.editor.active_buffer_mut().wrap_scroll_row = 3;
+        assert!(!app.dispatch_action(Action::App(AppAction::Lifecycle(
+            LifecycleAction::ToggleWrap
+        ))));
+        assert!(!app.config.wrap);
+        assert_eq!(app.editor.message.as_deref(), Some("Line wrap: OFF"));
+        // Turning wrap off drops the wrapped sub-row offset.
+        assert_eq!(app.editor.active_buffer().wrap_scroll_row, 0);
     }
 
     // -------------------------------------------------------

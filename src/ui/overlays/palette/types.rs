@@ -268,6 +268,13 @@ pub(super) fn command_display_label(
                 "Show Line Number".to_string()
             }
         }
+        "config.toggle_wrap" => {
+            if config.wrap {
+                "Disable Line Wrap".to_string()
+            } else {
+                "Enable Line Wrap".to_string()
+            }
+        }
         _ => entry.label.clone(),
     }
 }
@@ -280,6 +287,7 @@ pub(super) fn command_aliases(
 ) -> &'static [&'static str] {
     match entry.id.as_str() {
         "buffer.refresh" => &["Reload Buffer from Disk"],
+        "config.toggle_wrap" => &["Toggle Soft Wrap", "Word Wrap", "Toggle Line Wrap"],
         _ => &[],
     }
 }

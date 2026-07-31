@@ -90,6 +90,7 @@ src/
     in_editor_diff.rs  In-editor diff text builder and diff-line jump target mapper.
     git_backend.rs  Git library (gix) wrapper.
     git_runtime.rs  Async git worker with debouncing.
+    appearance_runtime.rs  OS light/dark polling for [theme] follow_os_appearance.
     gargo_server.rs  Unified local repository browser, diff, compare, and commit server.
     lsp.rs          LSP client.
     diff_server.rs  Legacy async diff computation used by the unified server.
@@ -344,6 +345,10 @@ Themes are configurable in `config.toml`:
 # ansi_dark (default) / ansi_light / gargo_dark / gargo_light /
 # gargo_dim / gargo_contrast / gargo_sepia
 preset = "gargo_dark"
+# Track the OS light/dark setting instead (ignores `preset`)
+follow_os_appearance = false
+preset_dark = "gargo_dark"
+preset_light = "gargo_light"
 
 [theme.captures]
 "keyword" = { fg = "magenta", bold = true }
@@ -359,6 +364,8 @@ A theme has two layers:
 
 - **Captures** — syntax tokens. The `ansi_*` presets name ANSI colors, so code takes on the terminal's own palette; the `gargo_*` presets resolve the same capture set through a `SyntaxPalette` (nine slots) and look the same in every terminal.
 - **UI roles** (`syntax/ui_colors.rs`) — everything that is not a token: the status bar, panels, selection, git status, diagnostics, diff tints. These are always concrete RGB, including under the `ansi_*` presets, because the terminal palette should decide how code looks, not whether the sidebar is legible. Override any role under `[theme.ui]`.
+
+Set `[theme] follow_os_appearance = true` to track the OS light/dark setting; the editor then switches between `preset_dark` and `preset_light` and ignores `preset`. There is no portable way to subscribe to appearance changes, so a background thread polls a platform probe (macOS `defaults read -g AppleInterfaceStyle` — a failed read *is* light mode; GNOME `gsettings ... color-scheme`, falling back to `gtk-theme` when it says `default`; Windows `reg query AppsUseLightTheme`). The poller only runs while following is on, and quitting never waits on it. `GARGO_OS_APPEARANCE=dark|light` forces the answer where no probe can give one. Choosing a theme by hand pauses following for the session — otherwise the next appearance change would silently undo the choice.
 
 `Change Theme` in the command palette lists every preset and applies each one **live** as the selection moves; `Enter` keeps it, `Esc` restores. The restore path rebuilds from config rather than replaying the value captured when the preview started — the config is what the editor is supposed to look like, and a remembered copy goes stale as soon as anything else changes it. Applying a theme this way is session-local; write `[theme] preset` to keep it.
 

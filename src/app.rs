@@ -12,6 +12,7 @@ use crossterm::{
 };
 use event_loop::{FRAME_DURATION_60_FPS, poll_event_until};
 
+use crate::command::appearance_runtime::{Appearance, AppearanceRuntimeHandle};
 use crate::command::commit_log_runtime::{CommitLogEvent, CommitLogRuntimeHandle};
 use crate::command::file_index_runtime::{
     FileIndexRuntimeCommand, FileIndexRuntimeEvent, FileIndexRuntimeHandle,
@@ -173,6 +174,9 @@ pub struct App {
     registry: CommandRegistry,
     config: Config,
     theme: Theme,
+    /// Polls the OS light/dark setting while `[theme] follow_os_appearance`
+    /// is on. `None` when following is off or the worker could not start.
+    appearance_runtime: Option<AppearanceRuntimeHandle>,
     /// A theme is on screen for preview only (the theme picker is open).
     /// Restoring means rebuilding from `config`, never from a remembered
     /// value: the config is what the editor is supposed to look like, and a
@@ -296,6 +300,7 @@ impl App {
             compositor: Compositor::new(),
             registry: CommandRegistry::new(),
             theme: Theme::from_config(&config.theme),
+            appearance_runtime: None,
             theme_preview_active: false,
             config,
             project_root,
@@ -348,6 +353,7 @@ impl App {
         };
         app.start_lazy_file_index_prefetch_if_possible();
         app.start_git_index_prefetch_if_possible();
+        app.sync_appearance_runtime();
         app.rebuild_registry_and_plugin_host();
         app.emit_plugin_event(PluginEvent::BufferActivated {
             doc_id: app.editor.active_buffer().id,
@@ -2269,6 +2275,7 @@ impl App {
             self.poll_commit_log_runtime();
             self.poll_file_index_runtime();
             self.poll_update_check_runtime();
+            self.poll_appearance_runtime();
         }
     }
 
@@ -2391,6 +2398,57 @@ impl App {
         Ok(msg)
     }
 
+    /// Start or stop the OS appearance poller to match the config. Called at
+    /// startup and whenever the config is reloaded, so turning following on
+    /// does not need a restart.
+    fn sync_appearance_runtime(&mut self) {
+        if !self.config.theme.follow_os_appearance {
+            // Dropping the handle tells the worker to stop; nothing waits on it.
+            self.appearance_runtime = None;
+            return;
+        }
+        if self.appearance_runtime.is_some() {
+            return;
+        }
+        match AppearanceRuntimeHandle::new() {
+            Ok(handle) => self.appearance_runtime = Some(handle),
+            Err(err) => {
+                self.editor.message = Some(format!("OS appearance follow unavailable: {}", err));
+            }
+        }
+    }
+
+    fn poll_appearance_runtime(&mut self) {
+        let mut latest = None;
+        if let Some(runtime) = &self.appearance_runtime {
+            while let Ok(appearance) = runtime.event_rx.try_recv() {
+                latest = Some(appearance);
+            }
+        }
+        if let Some(appearance) = latest {
+            self.apply_os_appearance(appearance);
+        }
+    }
+
+    /// Switch to the configured preset for `appearance`. A live theme preview
+    /// wins until it ends — the user is looking at the picker.
+    fn apply_os_appearance(&mut self, appearance: Appearance) {
+        if !self.config.theme.follow_os_appearance || self.theme_preview_active {
+            return;
+        }
+        let preset = if appearance.is_dark() {
+            self.config.theme.preset_dark.clone()
+        } else {
+            self.config.theme.preset_light.clone()
+        };
+        if self.config.theme.preset == preset {
+            return;
+        }
+        self.config.theme.preset = preset;
+        self.theme = Theme::from_config(&self.config.theme);
+        self.editor.mark_highlights_dirty();
+    }
+
     /// Apply `preset` for preview only. `[theme] preset` is left alone, so
     /// closing the picker restores whatever the config says.
     fn preview_theme(&mut self, preset: &str) {
@@ -2428,6 +2486,7 @@ impl App {
         self.git_view_diff_runtime = Self::build_git_view_diff_runtime().ok();
         self.commit_log_runtime = Self::build_commit_log_runtime().ok();
         self.file_index_runtime = Self::build_file_index_runtime().ok();
+        self.sync_appearance_runtime();
         self.refresh_file_index_for_current_root();
         self.refresh_git_index_for_current_root();
         let plugin_error = self.rebuild_registry_and_plugin_host();
@@ -6243,6 +6302,77 @@ enabled = ["diff_ui"]
 
         assert!(err.contains("Config parse failed:"));
         assert_eq!(after, invalid);
+    }
+
+    #[test]
+    fn os_appearance_switches_between_the_configured_presets() {
+        let mut app = test_app_with_text("");
+        app.config.theme.follow_os_appearance = true;
+        app.config.theme.preset_dark = "gargo_contrast".to_string();
+        app.config.theme.preset_light = "gargo_sepia".to_string();
+
+        app.apply_os_appearance(Appearance::Dark);
+        assert_eq!(app.config.theme.preset, "gargo_contrast");
+        assert_eq!(app.theme.ui.status_bg, Theme::gargo_contrast().ui.status_bg);
+
+        app.apply_os_appearance(Appearance::Light);
+        assert_eq!(app.config.theme.preset, "gargo_sepia");
+        assert_eq!(app.theme.ui.status_bg, Theme::gargo_sepia().ui.status_bg);
+    }
+
+    #[test]
+    fn os_appearance_is_ignored_when_following_is_off() {
+        let mut app = test_app_with_text("");
+        assert!(!app.config.theme.follow_os_appearance);
+
+        app.apply_os_appearance(Appearance::Light);
+
+        assert_eq!(app.config.theme.preset, "ansi_dark");
+    }
+
+    /// The picker is what the user is looking at; an OS change mid-preview
+    /// must not yank the theme out from under them.
+    #[test]
+    fn os_appearance_does_not_fight_a_live_preview() {
+        let mut app = test_app_with_text("");
+        app.config.theme.follow_os_appearance = true;
+
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::PreviewTheme("gargo_sepia".to_string()),
+        )));
+        app.apply_os_appearance(Appearance::Dark);
+
+        assert_eq!(app.theme.ui.status_bg, Theme::gargo_sepia().ui.status_bg);
+    }
+
+    #[test]
+    fn choosing_a_theme_by_hand_pauses_following() {
+        let mut app = test_app_with_text("");
+        app.config.theme.follow_os_appearance = true;
+
+        app.dispatch(Action::App(AppAction::Workspace(
+            WorkspaceAction::SetTheme("gargo_dim".to_string()),
+        )));
+
+        assert!(!app.config.theme.follow_os_appearance);
+        app.apply_os_appearance(Appearance::Light);
+        assert_eq!(app.config.theme.preset, "gargo_dim");
+    }
+
+    #[test]
+    fn follow_off_keeps_no_poller_running() {
+        let mut app = test_app_with_text("");
+        app.config.theme.follow_os_appearance = false;
+        app.sync_appearance_runtime();
+        assert!(app.appearance_runtime.is_none());
+
+        app.config.theme.follow_os_appearance = true;
+        app.sync_appearance_runtime();
+        assert!(app.appearance_runtime.is_some());
+
+        app.config.theme.follow_os_appearance = false;
+        app.sync_appearance_runtime();
+        assert!(app.appearance_runtime.is_none());
     }
 
     #[test]

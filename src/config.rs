@@ -146,6 +146,12 @@ pub enum LspStartMode {
 #[serde(default)]
 pub struct ThemeConfig {
     pub preset: String,
+    /// Follow the OS light/dark setting, switching between `preset_dark` and
+    /// `preset_light`. While on, `preset` above is not used. Off by default:
+    /// polling the OS is only worth doing for people who asked for it.
+    pub follow_os_appearance: bool,
+    pub preset_dark: String,
+    pub preset_light: String,
     pub captures: HashMap<String, ThemeCaptureConfig>,
     pub ui: ThemeUiConfig,
     /// Coloring for the browser editor (`gargo server`). The terminal UI uses
@@ -298,6 +304,9 @@ impl Default for UiConfig {
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
+            follow_os_appearance: false,
+            preset_dark: "gargo_dark".to_string(),
+            preset_light: "gargo_light".to_string(),
             preset: "ansi_dark".to_string(),
             captures: HashMap::new(),
             ui: ThemeUiConfig::default(),

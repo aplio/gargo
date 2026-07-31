@@ -903,14 +903,22 @@ impl App {
             }
             AppAction::Workspace(WorkspaceAction::SetTheme(preset)) => {
                 self.compositor.apply(UiAction::ClosePalette);
+                // Picking a theme by hand outranks OS following for the rest
+                // of the session — otherwise the next appearance change would
+                // silently undo the choice.
+                let was_following = self.config.theme.follow_os_appearance;
+                self.config.theme.follow_os_appearance = false;
+                self.sync_appearance_runtime();
                 self.config.theme.preset = preset;
                 self.theme = Theme::from_config(&self.config.theme);
                 self.theme_preview_active = false;
                 self.editor.mark_highlights_dirty();
-                self.editor.message = Some(format!(
-                    "Theme: {} (add [theme] preset = \"{}\" to config.toml to keep it)",
-                    self.config.theme.preset, self.config.theme.preset
-                ));
+                let hint = if was_following {
+                    " (OS appearance following paused for this session)"
+                } else {
+                    " (set [theme] preset in config.toml to keep it)"
+                };
+                self.editor.message = Some(format!("Theme: {}{}", self.config.theme.preset, hint));
             }
             AppAction::Workspace(WorkspaceAction::ToggleHiddenFiles) => {
                 // Session-local: the in-memory config is the single source the

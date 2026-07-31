@@ -1,4 +1,5 @@
 pub mod app_shell;
+pub mod appearance_runtime;
 pub mod async_runtime;
 pub mod commit_log_runtime;
 pub mod diff_server;

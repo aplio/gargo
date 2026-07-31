@@ -341,7 +341,8 @@ Themes are configurable in `config.toml`:
 
 ```toml
 [theme]
-# "ansi_dark" (default) / "ansi_light" / "gargo_dark" / "gargo_light"
+# ansi_dark (default) / ansi_light / gargo_dark / gargo_light /
+# gargo_dim / gargo_contrast / gargo_sepia
 preset = "gargo_dark"
 
 [theme.captures]
@@ -356,8 +357,10 @@ markdown_link_hover_selected_bg = "grey"
 
 A theme has two layers:
 
-- **Captures** — syntax tokens. The `ansi_*` presets name ANSI colors, so code takes on the terminal's own palette; the `gargo_*` presets resolve the same capture set to fixed hex values and look the same in every terminal.
+- **Captures** — syntax tokens. The `ansi_*` presets name ANSI colors, so code takes on the terminal's own palette; the `gargo_*` presets resolve the same capture set through a `SyntaxPalette` (nine slots) and look the same in every terminal.
 - **UI roles** (`syntax/ui_colors.rs`) — everything that is not a token: the status bar, panels, selection, git status, diagnostics, diff tints. These are always concrete RGB, including under the `ansi_*` presets, because the terminal palette should decide how code looks, not whether the sidebar is legible. Override any role under `[theme.ui]`.
+
+A preset is one `SyntaxPalette` plus one `UiColors`, listed in `theme::PRESETS`. That table is the single source of truth — config resolution, the palette's theme list and the light/dark split all read it, so a preset cannot exist in one of them and not the others.
 
 Roles that express a *relationship* between other roles — panel borders, the sidebar surface, the current-line tint, the muted git gutter bars — are computed from the roles above and have no config key. Overriding `git_added` moves the gutter bar with it. Spelling those out per theme is how presets drift out of step with themselves.
 
@@ -445,7 +448,7 @@ GitHub Preview plugin still detaches follow mode when browser navigation moves t
 - `[performance]` -- startup behavior
   - `[performance.file_index] mode = "lazy" | "eager"` (`lazy`: non-blocking background indexing during startup/root-switch, `eager`: blocking indexing during startup/root-switch)
   - `[performance.lsp] start_mode = "on_demand" | "eager"`
-- `[theme]` -- preset (`ansi_dark` / `ansi_light` / `gargo_dark` / `gargo_light`), capture overrides, and `[theme.ui]` role overrides
+- `[theme]` -- preset (`ansi_dark` / `ansi_light` / `gargo_dark` / `gargo_light` / `gargo_dim` / `gargo_contrast` / `gargo_sepia`), capture overrides, and `[theme.ui]` role overrides
 - `[lsp]` -- language server definitions
 - `[plugins]` -- enabled plugins
 

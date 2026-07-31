@@ -533,26 +533,39 @@ impl Theme {
         theme
     }
 
-    /// Same capture set as [`Theme::ansi_dark`], resolved to a fixed palette
-    /// instead of ANSI names. Built by remapping rather than by listing all
-    /// ~60 captures again, so a capture added to the ANSI preset cannot go
-    /// missing here.
-    pub fn gargo_dark() -> Self {
+    /// Same capture set as [`Theme::ansi_dark`], resolved through a fixed
+    /// palette instead of ANSI names. Built by remapping rather than by
+    /// listing all ~60 captures again, so a capture added to the base table
+    /// cannot go missing from a preset.
+    pub fn from_palette(palette: &SyntaxPalette, ui: UiColors) -> Self {
         let mut theme = Self::ansi_dark();
         for style in theme.mappings.values_mut() {
-            style.fg = style.fg.map(dark_hex_variant);
+            style.fg = style.fg.map(|color| palette.resolve(color));
         }
-        theme.ui = UiColors::dark();
+        theme.markdown_link_hover_bg = ui.selected_bg;
+        theme.markdown_link_hover_selected_bg = ui.accent;
+        theme.ui = ui;
         theme
     }
 
+    pub fn gargo_dark() -> Self {
+        Self::from_palette(&PALETTE_DARK, UiColors::dark())
+    }
+
     pub fn gargo_light() -> Self {
-        let mut theme = Self::ansi_dark();
-        for style in theme.mappings.values_mut() {
-            style.fg = style.fg.map(light_hex_variant);
-        }
-        theme.ui = UiColors::light();
-        theme
+        Self::from_palette(&PALETTE_LIGHT, UiColors::light())
+    }
+
+    pub fn gargo_dim() -> Self {
+        Self::from_palette(&PALETTE_DIM, UiColors::dim())
+    }
+
+    pub fn gargo_contrast() -> Self {
+        Self::from_palette(&PALETTE_CONTRAST, UiColors::contrast())
+    }
+
+    pub fn gargo_sepia() -> Self {
+        Self::from_palette(&PALETTE_SEPIA, UiColors::sepia())
     }
 
     pub fn dark() -> Self {
@@ -565,13 +578,9 @@ impl Theme {
     }
 
     pub fn from_config(theme_config: &ThemeConfig) -> Self {
-        let mut theme = match normalize_preset_name(&theme_config.preset) {
-            "ansi_dark" => Self::ansi_dark(),
-            "ansi_light" => Self::ansi_light(),
-            "gargo_dark" => Self::gargo_dark(),
-            "gargo_light" => Self::gargo_light(),
-            _ => Self::ansi_dark(),
-        };
+        let mut theme = find_preset(&theme_config.preset)
+            .map(|preset| preset.build())
+            .unwrap_or_else(Self::ansi_dark);
         for (capture, override_style) in &theme_config.captures {
             theme.apply_capture_override(capture, override_style);
         }
@@ -695,14 +704,21 @@ impl Theme {
     }
 }
 
+/// Canonical id for a configured preset name, or `""` when nothing matches
+/// (callers fall back to the default rather than failing to start).
 fn normalize_preset_name(name: &str) -> &'static str {
-    match name.trim().to_ascii_lowercase().as_str() {
-        "dark" | "ansi_dark" => "ansi_dark",
-        "light" | "ansi_light" => "ansi_light",
-        "gargo_dark" | "gargo-dark" => "gargo_dark",
-        "gargo_light" | "gargo-light" => "gargo_light",
-        _ => "",
+    let normalized = name.trim().to_ascii_lowercase().replace('-', "_");
+    match normalized.as_str() {
+        // Names from before the presets had ids of their own.
+        "dark" => return "ansi_dark",
+        "light" => return "ansi_light",
+        _ => {}
     }
+    PRESETS
+        .iter()
+        .find(|preset| preset.id == normalized)
+        .map(|preset| preset.id)
+        .unwrap_or("")
 }
 
 fn parse_color(input: &str) -> Option<Color> {
@@ -736,110 +752,176 @@ fn parse_color(input: &str) -> Option<Color> {
     }
 }
 
-/// ANSI name → fixed dark-background palette. Only the names the presets
-/// actually use are listed; anything else is left alone so an override written
-/// as an ANSI name survives the remap.
-fn dark_hex_variant(color: Color) -> Color {
-    match color {
-        Color::Magenta => Color::Rgb {
-            r: 0xbb,
-            g: 0x9a,
-            b: 0xf7,
-        },
-        Color::Blue => Color::Rgb {
-            r: 0x7a,
-            g: 0xa2,
-            b: 0xf7,
-        },
-        Color::Cyan => Color::Rgb {
-            r: 0x7d,
-            g: 0xcf,
-            b: 0xff,
-        },
-        Color::Green => Color::Rgb {
-            r: 0x9e,
-            g: 0xce,
-            b: 0x6a,
-        },
-        Color::Yellow => Color::Rgb {
-            r: 0xe0,
-            g: 0xaf,
-            b: 0x68,
-        },
-        Color::Red => Color::Rgb {
-            r: 0xf7,
-            g: 0x76,
-            b: 0x8e,
-        },
-        Color::White => Color::Rgb {
-            r: 0xc0,
-            g: 0xc8,
-            b: 0xe8,
-        },
-        Color::DarkGrey => Color::Rgb {
-            r: 0x56,
-            g: 0x5f,
-            b: 0x89,
-        },
-        Color::Grey => Color::Rgb {
-            r: 0x8d,
-            g: 0x96,
-            b: 0xb8,
-        },
-        other => other,
+/// The nine slots the capture table actually paints with. A preset is this
+/// plus a [`UiColors`] — nothing else, so adding a theme is filling in two
+/// structs rather than restating ~60 captures.
+#[derive(Clone, Copy, Debug)]
+pub struct SyntaxPalette {
+    pub magenta: Color,
+    pub blue: Color,
+    pub cyan: Color,
+    pub green: Color,
+    pub yellow: Color,
+    pub red: Color,
+    /// Plain identifiers, operators, punctuation.
+    pub text: Color,
+    /// Comments.
+    pub comment: Color,
+    /// Between `text` and `comment`: de-emphasised but not a comment.
+    pub muted: Color,
+}
+
+impl SyntaxPalette {
+    /// Resolve one ANSI name from the base capture table. Names the table
+    /// never uses pass through untouched, so a user override written as an
+    /// ANSI name survives the remap.
+    fn resolve(&self, color: Color) -> Color {
+        match color {
+            Color::Magenta => self.magenta,
+            Color::Blue => self.blue,
+            Color::Cyan => self.cyan,
+            Color::Green => self.green,
+            Color::Yellow => self.yellow,
+            Color::Red => self.red,
+            Color::White => self.text,
+            Color::DarkGrey => self.comment,
+            Color::Grey => self.muted,
+            other => other,
+        }
     }
 }
 
-/// Same remap against a light background: the hues match `dark_hex_variant`
-/// but are darkened enough to stay legible on a near-white surface.
-fn light_hex_variant(color: Color) -> Color {
-    match color {
-        Color::Magenta => Color::Rgb {
-            r: 0x7a,
-            g: 0x3d,
-            b: 0xb8,
-        },
-        Color::Blue => Color::Rgb {
-            r: 0x2e,
-            g: 0x5c,
-            b: 0xc4,
-        },
-        Color::Cyan => Color::Rgb {
-            r: 0x16,
-            g: 0x6b,
-            b: 0xa8,
-        },
-        Color::Green => Color::Rgb {
-            r: 0x38,
-            g: 0x7a,
-            b: 0x2f,
-        },
-        Color::Yellow => Color::Rgb {
-            r: 0x9a,
-            g: 0x62,
-            b: 0x00,
-        },
-        Color::Red => Color::Rgb {
-            r: 0xc0,
-            g: 0x2b,
-            b: 0x45,
-        },
-        Color::White => Color::Rgb {
-            r: 0x34,
-            g: 0x38,
-            b: 0x4a,
-        },
-        Color::DarkGrey => Color::Rgb {
-            r: 0x8a, // comments: readable but clearly secondary
-            g: 0x90,
-            b: 0xa4,
-        },
-        Color::Grey => Color::Rgb {
-            r: 0x5f,
-            g: 0x66,
-            b: 0x7d,
-        },
-        other => other,
+const fn hex(r: u8, g: u8, b: u8) -> Color {
+    Color::Rgb { r, g, b }
+}
+
+pub const PALETTE_DARK: SyntaxPalette = SyntaxPalette {
+    magenta: hex(0xbb, 0x9a, 0xf7),
+    blue: hex(0x7a, 0xa2, 0xf7),
+    cyan: hex(0x7d, 0xcf, 0xff),
+    green: hex(0x9e, 0xce, 0x6a),
+    yellow: hex(0xe0, 0xaf, 0x68),
+    red: hex(0xf7, 0x76, 0x8e),
+    text: hex(0xc0, 0xc8, 0xe8),
+    comment: hex(0x56, 0x5f, 0x89),
+    muted: hex(0x8d, 0x96, 0xb8),
+};
+
+pub const PALETTE_LIGHT: SyntaxPalette = SyntaxPalette {
+    magenta: hex(0x7a, 0x3d, 0xb8),
+    blue: hex(0x2e, 0x5c, 0xc4),
+    cyan: hex(0x16, 0x6b, 0xa8),
+    green: hex(0x38, 0x7a, 0x2f),
+    yellow: hex(0x9a, 0x62, 0x00),
+    red: hex(0xc0, 0x2b, 0x45),
+    text: hex(0x34, 0x38, 0x4a),
+    // Readable on near-white but clearly secondary.
+    comment: hex(0x8a, 0x90, 0xa4),
+    muted: hex(0x5f, 0x66, 0x7d),
+};
+
+pub const PALETTE_DIM: SyntaxPalette = SyntaxPalette {
+    magenta: hex(0xa5, 0x8c, 0xc9),
+    blue: hex(0x7b, 0x9b, 0xd1),
+    cyan: hex(0x6f, 0xb4, 0xc9),
+    green: hex(0x8f, 0xb8, 0x7a),
+    yellow: hex(0xcf, 0xa4, 0x6a),
+    red: hex(0xd1, 0x79, 0x8a),
+    text: hex(0xb0, 0xb6, 0xc4),
+    comment: hex(0x5f, 0x66, 0x75),
+    muted: hex(0x85, 0x8c, 0x9c),
+};
+
+pub const PALETTE_CONTRAST: SyntaxPalette = SyntaxPalette {
+    magenta: hex(0xe0, 0xa6, 0xff),
+    blue: hex(0x8a, 0xb6, 0xff),
+    cyan: hex(0x6f, 0xdc, 0xff),
+    green: hex(0x7c, 0xf0, 0x8a),
+    yellow: hex(0xff, 0xd1, 0x66),
+    red: hex(0xff, 0x7f, 0x92),
+    text: hex(0xff, 0xff, 0xff),
+    comment: hex(0x9a, 0xa0, 0xa6),
+    muted: hex(0xc8, 0xc8, 0xc8),
+};
+
+pub const PALETTE_SEPIA: SyntaxPalette = SyntaxPalette {
+    magenta: hex(0x7a, 0x46, 0x99),
+    blue: hex(0x2f, 0x5f, 0x9e),
+    cyan: hex(0x1f, 0x6f, 0x8b),
+    green: hex(0x4a, 0x7a, 0x2f),
+    yellow: hex(0x97, 0x60, 0x0b),
+    red: hex(0xa8, 0x32, 0x2f),
+    text: hex(0x3b, 0x33, 0x2a),
+    comment: hex(0x8c, 0x81, 0x72),
+    muted: hex(0x6b, 0x61, 0x53),
+};
+
+/// A selectable theme. `build` is what `[theme] preset = "<id>"` runs; `label`
+/// is what the palette shows; `is_dark` is what OS appearance following needs.
+pub struct ThemePreset {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub is_dark: bool,
+    build: fn() -> Theme,
+}
+
+/// Every built-in preset, in the order the palette offers them. Single source
+/// of truth: config resolution, the palette list and the light/dark split all
+/// read this, so a preset cannot exist in one of them and not the others.
+pub static PRESETS: &[ThemePreset] = &[
+    ThemePreset {
+        id: "ansi_dark",
+        label: "ANSI Dark (terminal palette)",
+        is_dark: true,
+        build: Theme::ansi_dark,
+    },
+    ThemePreset {
+        id: "ansi_light",
+        label: "ANSI Light (terminal palette)",
+        is_dark: false,
+        build: Theme::ansi_light,
+    },
+    ThemePreset {
+        id: "gargo_dark",
+        label: "Gargo Dark",
+        is_dark: true,
+        build: Theme::gargo_dark,
+    },
+    ThemePreset {
+        id: "gargo_light",
+        label: "Gargo Light",
+        is_dark: false,
+        build: Theme::gargo_light,
+    },
+    ThemePreset {
+        id: "gargo_dim",
+        label: "Gargo Dim (low contrast)",
+        is_dark: true,
+        build: Theme::gargo_dim,
+    },
+    ThemePreset {
+        id: "gargo_contrast",
+        label: "Gargo High Contrast",
+        is_dark: true,
+        build: Theme::gargo_contrast,
+    },
+    ThemePreset {
+        id: "gargo_sepia",
+        label: "Gargo Sepia (warm light)",
+        is_dark: false,
+        build: Theme::gargo_sepia,
+    },
+];
+
+/// Look up a preset by id, accepting the aliases `normalize_preset_name` knows.
+pub fn find_preset(name: &str) -> Option<&'static ThemePreset> {
+    let id = normalize_preset_name(name);
+    PRESETS.iter().find(|preset| preset.id == id)
+}
+
+impl ThemePreset {
+    pub fn build(&self) -> Theme {
+        (self.build)()
     }
 }
 
@@ -969,6 +1051,69 @@ mod tests {
         assert_eq!(Theme::ansi_light().ui, UiColors::light());
         assert_eq!(Theme::ansi_dark().ui, UiColors::dark());
         assert_eq!(Theme::gargo_light().ui, UiColors::light());
+    }
+
+    #[test]
+    fn every_preset_builds_and_is_reachable_by_id() {
+        for preset in PRESETS {
+            let theme = preset.build();
+            assert!(
+                theme.style_for_capture("keyword").is_some(),
+                "{} has no captures",
+                preset.id
+            );
+            assert_eq!(
+                find_preset(preset.id).map(|p| p.id),
+                Some(preset.id),
+                "{} is not reachable by its own id",
+                preset.id
+            );
+            // Hyphens and case are accepted for every id, not just some.
+            assert_eq!(
+                find_preset(&preset.id.replace('_', "-").to_uppercase()).map(|p| p.id),
+                Some(preset.id)
+            );
+        }
+    }
+
+    #[test]
+    fn preset_ids_are_unique() {
+        let mut ids: Vec<&str> = PRESETS.iter().map(|p| p.id).collect();
+        let before = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "duplicate preset id");
+    }
+
+    #[test]
+    fn presets_cover_both_appearances() {
+        // OS appearance following needs at least one of each.
+        assert!(PRESETS.iter().any(|p| p.is_dark));
+        assert!(PRESETS.iter().any(|p| !p.is_dark));
+    }
+
+    #[test]
+    fn hex_presets_resolve_every_ansi_slot() {
+        // A palette that forgot a slot would leave that capture ANSI-colored
+        // and quietly terminal-dependent.
+        for preset in PRESETS.iter().filter(|p| !p.id.starts_with("ansi_")) {
+            let theme = preset.build();
+            for (name, style) in &theme.mappings {
+                if let Some(fg) = style.fg {
+                    assert!(
+                        matches!(fg, Color::Rgb { .. }),
+                        "{} left {name} as {fg:?}",
+                        preset.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_preset_names_still_resolve() {
+        assert_eq!(find_preset("dark").map(|p| p.id), Some("ansi_dark"));
+        assert_eq!(find_preset("light").map(|p| p.id), Some("ansi_light"));
     }
 
     #[test]

@@ -1,50 +1,17 @@
 use crossterm::style::Color;
 
 use crate::core::mode::Mode;
+use crate::syntax::ui_colors::UiColors;
 use crate::ui::framework::cell::CellStyle;
 use crate::ui::framework::component::{Component, RenderContext};
 use crate::ui::framework::surface::Surface;
 use crate::ui::text::{display_width, truncate_to_width};
 
-// TODO(A-2): move these to `Theme::ui` once UI chrome roles exist. Explicit RGB
-// (not `reverse: true`) so the bar keeps the same look regardless of the
-// terminal's own color scheme.
-const BAR_BG: Color = Color::Rgb {
-    r: 0x2a,
-    g: 0x2f,
-    b: 0x41,
-};
-const BAR_FG: Color = Color::Rgb {
-    r: 0xc0,
-    g: 0xc8,
-    b: 0xe8,
-};
-const MODE_FG: Color = Color::Rgb {
-    r: 0x1a,
-    g: 0x1b,
-    b: 0x26,
-};
-const MODE_NORMAL_BG: Color = Color::Rgb {
-    r: 0x7a,
-    g: 0xa2,
-    b: 0xf7,
-};
-const MODE_INSERT_BG: Color = Color::Rgb {
-    r: 0x9e,
-    g: 0xce,
-    b: 0x6a,
-};
-const MODE_VISUAL_BG: Color = Color::Rgb {
-    r: 0xbb,
-    g: 0x9a,
-    b: 0xf7,
-};
-
-fn mode_bg(mode: Mode) -> Color {
+fn mode_bg(ui: &UiColors, mode: Mode) -> Color {
     match mode {
-        Mode::Normal => MODE_NORMAL_BG,
-        Mode::Insert => MODE_INSERT_BG,
-        Mode::Visual => MODE_VISUAL_BG,
+        Mode::Normal => ui.mode_normal,
+        Mode::Insert => ui.mode_insert,
+        Mode::Visual => ui.mode_visual,
     }
 }
 
@@ -115,14 +82,15 @@ impl Component for StatusBar {
             buf.display_cursor_col() + 1
         );
 
+        let ui = &ctx.theme.ui;
         let bar_style = CellStyle {
-            fg: Some(BAR_FG),
-            bg: Some(BAR_BG),
+            fg: Some(ui.status_fg),
+            bg: Some(ui.status_bg),
             ..CellStyle::default()
         };
         let mode_style = CellStyle {
-            fg: Some(MODE_FG),
-            bg: Some(mode_bg(ctx.editor.mode)),
+            fg: Some(ui.mode_fg),
+            bg: Some(mode_bg(ui, ctx.editor.mode)),
             bold: true,
             ..CellStyle::default()
         };
@@ -165,10 +133,13 @@ mod tests {
     use crate::syntax::theme::Theme;
 
     fn render(mode: Mode) -> Surface {
+        render_with_theme(mode, Theme::dark())
+    }
+
+    fn render_with_theme(mode: Mode, theme: Theme) -> Surface {
         let mut editor = Editor::new();
         editor.mode = mode;
         let config = Config::default();
-        let theme = Theme::dark();
         let key_state = KeyState::Normal;
         let ctx = RenderContext::new(
             40,
@@ -199,22 +170,35 @@ mod tests {
     #[test]
     fn trailing_cells_keep_bar_background() {
         let surface = render(Mode::Normal);
-        assert_eq!(surface.get(39, 2).style.bg, Some(BAR_BG));
+        assert_eq!(
+            surface.get(39, 2).style.bg,
+            Some(UiColors::dark().status_bg)
+        );
     }
 
     #[test]
     fn mode_indicator_is_colored_per_mode() {
+        let ui = UiColors::dark();
         for (mode, expected) in [
-            (Mode::Normal, MODE_NORMAL_BG),
-            (Mode::Insert, MODE_INSERT_BG),
-            (Mode::Visual, MODE_VISUAL_BG),
+            (Mode::Normal, ui.mode_normal),
+            (Mode::Insert, ui.mode_insert),
+            (Mode::Visual, ui.mode_visual),
         ] {
             let surface = render(mode);
             let style = &surface.get(1, 2).style;
             assert_eq!(style.bg, Some(expected), "mode {:?}", mode);
             assert!(style.bold);
             // Text after the mode segment falls back to the bar colors.
-            assert_eq!(surface.get(6, 2).style.bg, Some(BAR_BG));
+            assert_eq!(surface.get(6, 2).style.bg, Some(ui.status_bg));
         }
+    }
+
+    #[test]
+    fn bar_follows_the_theme_preset() {
+        let surface = render_with_theme(Mode::Normal, Theme::gargo_light());
+        assert_eq!(
+            surface.get(39, 2).style.bg,
+            Some(UiColors::light().status_bg)
+        );
     }
 }

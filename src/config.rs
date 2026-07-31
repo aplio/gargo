@@ -197,11 +197,55 @@ pub struct ThemeCaptureConfig {
     pub italic: Option<bool>,
 }
 
+/// Per-role overrides for UI chrome (`[theme.ui]`). Every value is a color:
+/// `#rrggbb` or an ANSI name (`cyan`, `dark_grey`, …). Anything left out keeps
+/// the preset's value.
+///
+/// Roles that are a relationship between others — panel borders, the sidebar
+/// surface, the muted gutter bars — are computed from these and are
+/// deliberately not settable: a theme that spells them out drifts out of step
+/// with itself the moment one of its inputs changes.
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 #[serde(default)]
 pub struct ThemeUiConfig {
+    /// Kept from the first version of this table, when it only held these two.
     pub markdown_link_hover_bg: Option<String>,
     pub markdown_link_hover_selected_bg: Option<String>,
+
+    pub bg: Option<String>,
+    pub panel_bg: Option<String>,
+    pub text: Option<String>,
+    pub dim: Option<String>,
+    pub faint: Option<String>,
+    pub accent: Option<String>,
+    pub selected_bg: Option<String>,
+    pub selected_fg: Option<String>,
+    pub folder: Option<String>,
+    pub dirty: Option<String>,
+
+    pub status_bg: Option<String>,
+    pub status_fg: Option<String>,
+    pub mode_fg: Option<String>,
+    pub mode_normal: Option<String>,
+    pub mode_insert: Option<String>,
+    pub mode_visual: Option<String>,
+
+    pub error: Option<String>,
+    pub warning: Option<String>,
+    pub info: Option<String>,
+
+    pub git_added: Option<String>,
+    pub git_modified: Option<String>,
+    pub git_deleted: Option<String>,
+    pub git_untracked: Option<String>,
+    pub git_conflict: Option<String>,
+
+    pub diff_add_bg: Option<String>,
+    pub diff_del_bg: Option<String>,
+
+    pub search_current_bg: Option<String>,
+    pub search_current_fg: Option<String>,
+    pub search_other_bg: Option<String>,
 }
 
 impl Default for PluginDiffUiConfig {

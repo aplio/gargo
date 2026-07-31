@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::config::{Config, ThemeCaptureConfig, ThemeConfig, ThemeUiConfig};
+use crate::syntax::ui_colors::UiColors;
 use crossterm::style::Color;
 
 #[derive(Clone, Debug, Default)]
@@ -12,6 +13,10 @@ pub struct Style {
 
 pub struct Theme {
     mappings: HashMap<String, Style>,
+    /// Colors for everything that is not a syntax token. Always concrete RGB,
+    /// including under the `ansi_*` presets: the terminal's palette should
+    /// decide how *code* looks, not whether the sidebar is readable.
+    pub ui: UiColors,
     markdown_link_hover_bg: Color,
     markdown_link_hover_selected_bg: Color,
 }
@@ -524,6 +529,29 @@ impl Theme {
         for style in theme.mappings.values_mut() {
             style.fg = style.fg.map(light_variant);
         }
+        theme.ui = UiColors::light();
+        theme
+    }
+
+    /// Same capture set as [`Theme::ansi_dark`], resolved to a fixed palette
+    /// instead of ANSI names. Built by remapping rather than by listing all
+    /// ~60 captures again, so a capture added to the ANSI preset cannot go
+    /// missing here.
+    pub fn gargo_dark() -> Self {
+        let mut theme = Self::ansi_dark();
+        for style in theme.mappings.values_mut() {
+            style.fg = style.fg.map(dark_hex_variant);
+        }
+        theme.ui = UiColors::dark();
+        theme
+    }
+
+    pub fn gargo_light() -> Self {
+        let mut theme = Self::ansi_dark();
+        for style in theme.mappings.values_mut() {
+            style.fg = style.fg.map(light_hex_variant);
+        }
+        theme.ui = UiColors::light();
         theme
     }
 
@@ -540,6 +568,8 @@ impl Theme {
         let mut theme = match normalize_preset_name(&theme_config.preset) {
             "ansi_dark" => Self::ansi_dark(),
             "ansi_light" => Self::ansi_light(),
+            "gargo_dark" => Self::gargo_dark(),
+            "gargo_light" => Self::gargo_light(),
             _ => Self::ansi_dark(),
         };
         for (capture, override_style) in &theme_config.captures {
@@ -556,6 +586,7 @@ impl Theme {
             .collect();
         Self {
             mappings,
+            ui: UiColors::dark(),
             markdown_link_hover_bg: Color::DarkGrey,
             markdown_link_hover_selected_bg: Color::Grey,
         }
@@ -588,6 +619,49 @@ impl Theme {
         {
             self.markdown_link_hover_selected_bg = color;
         }
+
+        macro_rules! override_role {
+            ($($role:ident),+ $(,)?) => {
+                $(
+                    if let Some(color_text) = &ui.$role
+                        && let Some(color) = parse_color(color_text)
+                    {
+                        self.ui.$role = color;
+                    }
+                )+
+            };
+        }
+        override_role!(
+            bg,
+            panel_bg,
+            text,
+            dim,
+            faint,
+            accent,
+            selected_bg,
+            selected_fg,
+            folder,
+            dirty,
+            status_bg,
+            status_fg,
+            mode_fg,
+            mode_normal,
+            mode_insert,
+            mode_visual,
+            error,
+            warning,
+            info,
+            git_added,
+            git_modified,
+            git_deleted,
+            git_untracked,
+            git_conflict,
+            diff_add_bg,
+            diff_del_bg,
+            search_current_bg,
+            search_current_fg,
+            search_other_bg,
+        );
     }
 
     pub fn markdown_link_hover_bg(&self) -> Color {
@@ -625,6 +699,8 @@ fn normalize_preset_name(name: &str) -> &'static str {
     match name.trim().to_ascii_lowercase().as_str() {
         "dark" | "ansi_dark" => "ansi_dark",
         "light" | "ansi_light" => "ansi_light",
+        "gargo_dark" | "gargo-dark" => "gargo_dark",
+        "gargo_light" | "gargo-light" => "gargo_light",
         _ => "",
     }
 }
@@ -657,6 +733,113 @@ fn parse_color(input: &str) -> Option<Color> {
         "cyan" => Some(Color::Cyan),
         "dark_cyan" => Some(Color::DarkCyan),
         _ => None,
+    }
+}
+
+/// ANSI name → fixed dark-background palette. Only the names the presets
+/// actually use are listed; anything else is left alone so an override written
+/// as an ANSI name survives the remap.
+fn dark_hex_variant(color: Color) -> Color {
+    match color {
+        Color::Magenta => Color::Rgb {
+            r: 0xbb,
+            g: 0x9a,
+            b: 0xf7,
+        },
+        Color::Blue => Color::Rgb {
+            r: 0x7a,
+            g: 0xa2,
+            b: 0xf7,
+        },
+        Color::Cyan => Color::Rgb {
+            r: 0x7d,
+            g: 0xcf,
+            b: 0xff,
+        },
+        Color::Green => Color::Rgb {
+            r: 0x9e,
+            g: 0xce,
+            b: 0x6a,
+        },
+        Color::Yellow => Color::Rgb {
+            r: 0xe0,
+            g: 0xaf,
+            b: 0x68,
+        },
+        Color::Red => Color::Rgb {
+            r: 0xf7,
+            g: 0x76,
+            b: 0x8e,
+        },
+        Color::White => Color::Rgb {
+            r: 0xc0,
+            g: 0xc8,
+            b: 0xe8,
+        },
+        Color::DarkGrey => Color::Rgb {
+            r: 0x56,
+            g: 0x5f,
+            b: 0x89,
+        },
+        Color::Grey => Color::Rgb {
+            r: 0x8d,
+            g: 0x96,
+            b: 0xb8,
+        },
+        other => other,
+    }
+}
+
+/// Same remap against a light background: the hues match `dark_hex_variant`
+/// but are darkened enough to stay legible on a near-white surface.
+fn light_hex_variant(color: Color) -> Color {
+    match color {
+        Color::Magenta => Color::Rgb {
+            r: 0x7a,
+            g: 0x3d,
+            b: 0xb8,
+        },
+        Color::Blue => Color::Rgb {
+            r: 0x2e,
+            g: 0x5c,
+            b: 0xc4,
+        },
+        Color::Cyan => Color::Rgb {
+            r: 0x16,
+            g: 0x6b,
+            b: 0xa8,
+        },
+        Color::Green => Color::Rgb {
+            r: 0x38,
+            g: 0x7a,
+            b: 0x2f,
+        },
+        Color::Yellow => Color::Rgb {
+            r: 0x9a,
+            g: 0x62,
+            b: 0x00,
+        },
+        Color::Red => Color::Rgb {
+            r: 0xc0,
+            g: 0x2b,
+            b: 0x45,
+        },
+        Color::White => Color::Rgb {
+            r: 0x34,
+            g: 0x38,
+            b: 0x4a,
+        },
+        Color::DarkGrey => Color::Rgb {
+            r: 0x8a, // comments: readable but clearly secondary
+            g: 0x90,
+            b: 0xa4,
+        },
+        Color::Grey => Color::Rgb {
+            r: 0x5f,
+            g: 0x66,
+            b: 0x7d,
+        },
+        other => other,
     }
 }
 
@@ -741,6 +924,105 @@ mod tests {
                 .style_for_capture("diff.hunk")
                 .and_then(|style| style.fg),
             Some(Color::Yellow)
+        );
+    }
+
+    #[test]
+    fn hex_presets_keep_every_capture_of_the_ansi_preset() {
+        let ansi = Theme::ansi_dark();
+        for (name, style) in &ansi.mappings {
+            for hex in [Theme::gargo_dark(), Theme::gargo_light()] {
+                let mapped = hex
+                    .style_for_capture(name)
+                    .unwrap_or_else(|| panic!("{name} missing from hex preset"));
+                assert_eq!(mapped.bold, style.bold, "{name} bold");
+                assert_eq!(mapped.italic, style.italic, "{name} italic");
+                // Captures carrying only bold/italic (`emphasis`, `strong`)
+                // have no color to remap and must stay colorless.
+                assert_eq!(
+                    style.fg.is_some(),
+                    mapped.fg.is_some(),
+                    "{name} gained or lost a color"
+                );
+                assert!(
+                    style.fg.is_none() || matches!(mapped.fg, Some(Color::Rgb { .. })),
+                    "{name} should resolve to rgb, got {:?}",
+                    mapped.fg
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ui_colors_are_rgb_even_for_the_ansi_presets() {
+        // The terminal palette decides how code looks; it must not decide
+        // whether the status bar is readable.
+        for theme in [Theme::ansi_dark(), Theme::ansi_light()] {
+            assert!(matches!(theme.ui.status_bg, Color::Rgb { .. }));
+            assert!(matches!(theme.ui.accent, Color::Rgb { .. }));
+            assert!(matches!(theme.ui.border(), Color::Rgb { .. }));
+        }
+    }
+
+    #[test]
+    fn ansi_light_preset_uses_the_light_ui_palette() {
+        assert_eq!(Theme::ansi_light().ui, UiColors::light());
+        assert_eq!(Theme::ansi_dark().ui, UiColors::dark());
+        assert_eq!(Theme::gargo_light().ui, UiColors::light());
+    }
+
+    #[test]
+    fn unknown_preset_falls_back_to_the_default() {
+        let cfg: Config = toml::from_str(
+            r#"
+[theme]
+preset = "no_such_preset"
+"#,
+        )
+        .unwrap();
+        let theme = Theme::from_config(&cfg.theme);
+        assert_eq!(
+            theme.style_for_capture("keyword").and_then(|s| s.fg),
+            Some(Color::Magenta)
+        );
+    }
+
+    #[test]
+    fn from_config_applies_ui_role_overrides() {
+        let cfg: Config = toml::from_str(
+            r##"
+[theme]
+preset = "gargo_dark"
+
+[theme.ui]
+accent = "#ff0000"
+git_added = "#00ff00"
+bad = "#000000"
+"##,
+        )
+        .unwrap();
+
+        let theme = Theme::from_config(&cfg.theme);
+        assert_eq!(
+            theme.ui.accent,
+            Color::Rgb {
+                r: 0xff,
+                g: 0,
+                b: 0
+            }
+        );
+        // Derived roles follow the override instead of needing their own key.
+        assert_eq!(
+            theme.ui.gutter_added(),
+            UiColors {
+                git_added: Color::Rgb {
+                    r: 0,
+                    g: 0xff,
+                    b: 0
+                },
+                ..UiColors::dark()
+            }
+            .gutter_added()
         );
     }
 

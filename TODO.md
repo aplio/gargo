@@ -1,5 +1,18 @@
 # TODO
 
+**進捗（2026-07-31）**: A 系・B 系すべて実装済み。残りは C 系のみ。
+
+A-4 は druk / tokyonight 等からの取り込みはせず、gargo 独自パレット 3 本
+（`gargo_dim` / `gargo_contrast` / `gargo_sepia`）を書き下ろした（ライセンス確認が不要なため）。
+
+**C-1 の事前確認の結果（済）**: `src/input/keymap.rs` は単一の情報源に **なっていない**。
+1. `src/ui/overlays/command_helper.rs` が SPC / g チョードの一覧を**手書きで二重管理**している。
+   実際に既にズレていて、`SPC /`（グローバル検索）は keymap にあるのにヘルパーに出ない。
+2. 各オーバーレイが自前でキーを直接 match している（sidebar 68 / popup 61 /
+   commit_log 40 / pr_picker 38 箇所）。テーブルがないので「今このペインで何が押せるか」は
+   そもそも導出できない。
+→ C-1 をやるなら本体は「キー定義テーブルの導入」で、規模は中〜大。
+
 druk（Bun + SolidJS + OpenTUI の TUI エディタ）の設計調査から切り出したタスク。
 コードは移植できない（Rust / crossterm と JS / OpenTUI）が、**設計は移植できる**。
 
@@ -108,10 +121,10 @@ config から hex で上書きする経路は通っている。足りないの�
 reverse は端末の fg/bg をそのまま反転するので、**エディタ本体と無関係な色**になる。
 ステータスバーだけ浮いて見える最大の原因。
 
-- [ ] `CellStyle` に明示的な `fg` / `bg` を指定する
-- [ ] 当座は `theme` 経由にできないなら定数でもよいが、A-2 実装時に必ずテーマ参照へ移す
+- [x] `CellStyle` に明示的な `fg` / `bg` を指定する
+- [x] 当座は `theme` 経由にできないなら定数でもよいが、A-2 実装時に必ずテーマ参照へ移す
       （TODO コメントを残す）
-- [ ] モード表示（`NOR` / `INS` / `VIS`）はモードごとに色を変える。druk にはない gargo 独自の
+- [x] モード表示（`NOR` / `INS` / `VIS`）はモードごとに色を変える。druk にはない gargo 独自の
       要素だが、モーダルエディタでは現在モードが一目で分かることの価値が大きい
 
 **完了条件**: ターミナルのカラースキームを変えてもステータスバーの見え方が変わらない。
@@ -125,21 +138,21 @@ reverse は端末の fg/bg をそのまま反転するので、**エディタ本
 現在 `Theme`（`src/syntax/theme.rs:13`）はシンタックス色しか持たない。
 UI 用の色レイヤを別に足す。
 
-- [ ] `UiColors` 構造体を定義。最低限のロール（D-4 で粒度を決める）:
+- [x] `UiColors` 構造体を定義。最低限のロール（D-4 で粒度を決める）:
       `bg` / `panel_bg` / `bar_bg` / `status_bg` / `status_fg` / `text` / `dim` / `faint` /
       `accent` / `selected_bg` / `focus_bg` / `dirty` / `error` / `folder` / `cursor` /
       `gutter` / `current_line` / `git_added` / `git_modified` / `git_deleted`
-- [ ] **派生ロールは列挙せず計算する**。druk が `colorsFor` でやっている方式
+- [x] **派生ロールは列挙せず計算する**。druk が `colorsFor` でやっている方式
       （`~/workspace/druk/src/themes/types.ts:52-58` のコメントが要点）。
       罫線の色は「2 色の**関係**」であって誰かが選ぶ色ではない。
       各プリセットに `border` を手書きさせると、テーマを足すたびに微妙にズレる。
       対象: `border`（`bg` と `text` の間から導出）、`sidebar_bg`（`panel_bg` から）
-- [ ] `Theme` に `pub ui: UiColors` を持たせ、`Theme::from_config`（`theme.rs:539`）で
+- [x] `Theme` に `pub ui: UiColors` を持たせ、`Theme::from_config`（`theme.rs:539`）で
       プリセット選択とユーザー上書きを反映
-- [ ] `ThemeUiConfig`（`src/config.rs:198`）を拡張。現状 markdown ホバー 2 色しかない。
+- [x] `ThemeUiConfig`（`src/config.rs:198`）を拡張。現状 markdown ホバー 2 色しかない。
       既存の 2 フィールドは alias で残して後方互換を保つ
-- [ ] hex プリセットを最低 1 組（dark / light）追加。`parse_color` は既に hex 対応済み
-- [ ] `normalize_preset_name`（`theme.rs:624`）に新プリセット名を登録。
+- [x] hex プリセットを最低 1 組（dark / light）追加。`parse_color` は既に hex 対応済み
+- [x] `normalize_preset_name`（`theme.rs:624`）に新プリセット名を登録。
       未知の名前は既定にフォールバックする既存挙動を壊さないこと
 
 **完了条件**: `config.toml` の `[theme] preset` で新プリセットを選ぶと、
@@ -158,17 +171,17 @@ UI 用の色レイヤを別に足す。
 
 多い順に潰す。1 ファイルずつ独立してコミットできる:
 
-- [ ] `src/ui/views/text_view.rs`（20 箇所）— エディタ本体。効果が最大
-- [ ] `src/ui/overlays/git/commit_log.rs`（12）
-- [ ] `src/ui/overlays/explorer/sidebar.rs`（10）— `Color::Cyan`(2000,2006),
+- [x] `src/ui/views/text_view.rs`（20 箇所）— エディタ本体。効果が最大
+- [x] `src/ui/overlays/git/commit_log.rs`（12）
+- [x] `src/ui/overlays/explorer/sidebar.rs`（10）— `Color::Cyan`(2000,2006),
       `Green`(2049), `Red`(2053), `DarkRed`/`DarkGreen`(2378-2379) 他
-- [ ] `src/ui/overlays/git/view.rs`（9）
-- [ ] `src/ui/overlays/github/issue_picker.rs`（7）
-- [ ] `src/ui/overlays/github/pr_picker.rs`（6）
-- [ ] `src/ui/views/notification_bar.rs`（2）、`editor/markdown_link_hover.rs`（2）、
+- [x] `src/ui/overlays/git/view.rs`（9）
+- [x] `src/ui/overlays/github/issue_picker.rs`（7）
+- [x] `src/ui/overlays/github/pr_picker.rs`（6）
+- [x] `src/ui/views/notification_bar.rs`（2）、`editor/markdown_link_hover.rs`（2）、
       `editor/find_replace.rs`（2）、`project/save_as_popup.rs`（1）、
       `project/root_picker.rs`（1）
-- [ ] `src/command/git.rs`（8）、`src/app.rs`（2）も同様に確認
+- [x] `src/command/git.rs`（8）、`src/app.rs`（2）も同様に確認
 
 ⚠️ `sidebar.rs:2767-2768` に `Color::DarkRed` / `DarkGreen` を直接アサートしている
 テストがある。テーマ参照に変えると落ちるので、テスト側もテーマ経由の期待値にする。
@@ -185,9 +198,9 @@ A-2/A-3 が終われば 1 テーマ ≒ 定数の塊 1 個。druk は 26 本持�
 （`~/workspace/druk/src/themes/` — tokyo-night, catppuccin ×4, gruvbox, nord,
 rose-pine ×3, kanagawa ×3, everforest, ayu ×3, dracula, solarized, one-dark, vesper …）。
 
-- [ ] 参考にする場合、druk の各テーマファイルは 60 行程度で `ui` と `syntax` の
+- [x] 参考にする場合、druk の各テーマファイルは 60 行程度で `ui` と `syntax` の
       2 ブロックに分かれている。UI ロール名を gargo 側に読み替えれば値はそのまま使える
-- [ ] 出典元（tokyonight.nvim 等）のライセンス表記を確認してから取り込むこと。
+- [x] 出典元（tokyonight.nvim 等）のライセンス表記を確認してから取り込むこと。
       druk 側は各ファイル冒頭に出典 URL のコメントを置いている
 
 ---
@@ -199,14 +212,14 @@ rose-pine ×3, kanagawa ×3, everforest, ayu ×3, dracula, solarized, one-dark, 
 druk の `src/core/appearance.ts`（115 行）が直接移植できる設計。
 OS には可搬な購読 API がないのでポーリングしている。
 
-- [ ] プラットフォーム別プローブ:
+- [x] プラットフォーム別プローブ:
       macOS `defaults read -g AppleInterfaceStyle`（キーはダーク時のみ存在＝
       読み取り失敗＝ライト）、Linux `gsettings get org.gnome.desktop.interface color-scheme`
       →`default` なら `gtk-theme` にフォールバック、Windows は `reg query`
-- [ ] `theme_light` / `theme_dark` を別々に設定できるようにする
-- [ ] 環境変数で強制上書きできる口を用意（druk の `DRUK_OS_APPEARANCE` 相当）。
+- [x] `theme_light` / `theme_dark` を別々に設定できるようにする
+- [x] 環境変数で強制上書きできる口を用意（druk の `DRUK_OS_APPEARANCE` 相当）。
       どのプローブも答えられないデスクトップ用
-- [ ] ポーリングスレッドが**プロセスの終了を妨げない**こと。
+- [x] ポーリングスレッドが**プロセスの終了を妨げない**こと。
       druk はタイマーを unref している。Rust なら detached thread ＋ 終了フラグ
 
 ---
@@ -218,9 +231,9 @@ OS には可搬な購読 API がないのでポーリングしている。
 druk はパレットの選択がその値に乗っている間だけ適用し、確定せずに抜けたら戻す
 （`preview` / `restore` の 2 コールバック）。26 個から選ぶ UI として効いている。
 
-- [ ] `restore` は「**適用前の値を覚えて戻す**」のではなく「**config が言う値に戻す**」
+- [x] `restore` は「**適用前の値を覚えて戻す**」のではなく「**config が言う値に戻す**」
       実装にすること。druk の設計メモに明記されている落とし穴
-- [ ] 対象は `src/ui/overlays/palette/`
+- [x] 対象は `src/ui/overlays/palette/`
 
 ---
 
@@ -254,12 +267,12 @@ druk はパレットの選択がその値に乗っている間だけ適用し、
 
 **規模**: 小〜中 / **依存**: D-2, D-3
 
-- [ ] `UiConfig`（`src/config.rs:96`）に `show_dotfiles: bool` を追加。既定は D-3 で決めた値
-- [ ] D-2 で決めた方式で `Explorer` に渡す
-- [ ] `sidebar.rs:1027-1029` のハードコードされたスキップを設定参照に置換
-- [ ] `popup.rs:221-224` も同様に置換（**同じ述語を使うこと**。ここで実装が分岐すると
+- [x] `UiConfig`（`src/config.rs:96`）に `show_dotfiles: bool` を追加。既定は D-3 で決めた値
+- [x] D-2 で決めた方式で `Explorer` に渡す
+- [x] `sidebar.rs:1027-1029` のハードコードされたスキップを設定参照に置換
+- [x] `popup.rs:221-224` も同様に置換（**同じ述語を使うこと**。ここで実装が分岐すると
       今の不整合を作り直すことになる）
-- [ ] テスト: ドットファイルを含む fixture で、設定 on/off 両方の `visible_entries` を検証
+- [x] テスト: ドットファイルを含む fixture で、設定 on/off 両方の `visible_entries` を検証
 
 **完了条件**: `show_dotfiles = true` で `.github/` がサイドバーに出る。
 `false` で従来どおり消える。
@@ -272,12 +285,12 @@ druk はパレットの選択がその値に乗っている間だけ適用し、
 
 B-1 だけだと、git リポジトリ内で `collect_files_git` が返す一覧との不整合が残る。
 
-- [ ] `src/project.rs:114` の walk 側のスキップを同じ設定に従わせる
-- [ ] `src/command/git_backend.rs:101` `collect_files` の結果にも同じ述語を適用する。
+- [x] `src/project.rs:114` の walk 側のスキップを同じ設定に従わせる
+- [x] `src/command/git_backend.rs:101` `collect_files` の結果にも同じ述語を適用する。
       ここは現在ノーフィルタなので、`show_dotfiles = false` のときに**初めて**
       フィルタが要るようになる（＝ B-1 の既定を `true` にした場合、この項目の
       優先度は下がる）
-- [ ] `target` / `node_modules` の除外は**ドットファイルとは別概念**なので、
+- [x] `target` / `node_modules` の除外は**ドットファイルとは別概念**なので、
       `show_dotfiles` と混ぜないこと。将来 B-3 の gitignore 側に寄せるのが筋
 
 **完了条件**: 同じプロジェクトで `SPC f` に出るファイル集合と `SPC e` を辿って
@@ -292,9 +305,9 @@ B-1 だけだと、git リポジトリ内で `collect_files_git` が返す一覧
 druk は `respect_gitignore`（既定 false）を `show_dotfiles` とは独立に持つ。
 gargo は既に gix を使っているので ignore 判定のコストは低い。
 
-- [ ] `UiConfig` に `respect_gitignore: bool` を追加、既定 `false`
-- [ ] B-1 で作った述語に OR 条件として合流させる
-- [ ] ignore 集合をキャッシュする場合、**古い集合を使い続けない**こと。
+- [x] `UiConfig` に `respect_gitignore: bool` を追加、既定 `false`
+- [x] B-1 で作った述語に OR 条件として合流させる
+- [x] ignore 集合をキャッシュする場合、**古い集合を使い続けない**こと。
       druk は「ツリー更新のたびに読み直す」設計にしていて、その理由をコメントに
       残している（ignore ルールが消えたのにファイルが隠れたままになる）
 
@@ -304,9 +317,9 @@ gargo は既に gix を使っているので ignore 判定のコストは低い�
 
 **規模**: 小 / **依存**: B-1
 
-- [ ] エクスプローラにフォーカスがある状態で `.` を押すと `show_dotfiles` が反転して
+- [x] エクスプローラにフォーカスがある状態で `.` を押すと `show_dotfiles` が反転して
       即座に再読み込み（設定ファイルには書かない一時トグル、が扱いとして自然）
-- [ ] コマンドパレットにも "Toggle Hidden Files" を登録。
+- [x] コマンドパレットにも "Toggle Hidden Files" を登録。
       既存の "Toggle Split Diff Preview"（`UiConfig::branch_compare_split_preview`）が
       同じ形の先例なので、それに倣う
 
@@ -329,7 +342,7 @@ gargo はコマンドパレットがあるので「何ができるか」は引�
 「**今このペインで何が押せるか**」の面。モーダルエディタなのでモードごとに変わる分、
 druk より価値が高い可能性がある。
 
-- [ ] 先に `src/input/keymap.rs` が単一の情報源になっているか確認する。
+- [x] 先に `src/input/keymap.rs` が単一の情報源になっているか確認する。
       なっていないなら、そちらの整理が本体
 
 ### C-2. 設定画面
